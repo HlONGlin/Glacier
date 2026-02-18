@@ -1,29 +1,33 @@
 # Glacier
 
-Glacier 是一个面向 Android 的媒体浏览与播放应用，支持本地目录、WebDAV、Emby 三类来源统一管理，提供收藏夹、标签、历史记录、图片查看和视频播放能力。
+Glacier 是一个面向 Android 的媒体浏览与播放应用，支持本地目录、WebDAV、Emby 三类来源统一管理，覆盖收藏、检索、浏览、播放和回看等完整流程。
 
-## 功能亮点
+## 核心功能介绍
 
-- 多来源聚合：本地 / WebDAV / Emby
-- 收藏夹控制台：统一管理媒体入口
-- 图片浏览：标签筛选、搜索、排序
-- 视频播放：目录浮层、播放列表快速切换
-- 标签系统：资源组织与检索
-- 历史记录：快速回看最近浏览内容
+### 1. 收藏夹控制台
+统一管理媒体入口，支持快速创建收藏夹、查看来源数量、进入常用资源。
 
-## 功能预览
+<img src="assets/feature/01_dashboard.jpg" width="260" alt="收藏夹控制台" />
 
-<p>
-  <img src="assets/feature/01_dashboard.jpg" width="240" alt="收藏夹控制台" />
-  <img src="assets/feature/02_menu.jpg" width="240" alt="收藏夹快捷菜单" />
-  <img src="assets/feature/03_browser.jpg" width="240" alt="目录浏览" />
-</p>
+### 2. 快捷菜单中心
+在收藏夹页可直接进入历史记录、设置、标签管理、WebDAV、Emby 等关键模块，减少跳转成本。
 
-<p>
-  <img src="assets/feature/04_video_playlist.jpg" width="240" alt="视频播放目录浮层" />
-  <img src="assets/feature/05_playlist_panel.jpg" width="240" alt="播放列表浮层" />
-  <img src="assets/feature/06_image_viewer.jpg" width="240" alt="图片查看器" />
-</p>
+<img src="assets/feature/02_menu.jpg" width="260" alt="收藏夹快捷菜单" />
+
+### 3. 目录浏览与筛选
+支持列表视图、搜索、标签过滤、名称排序与升降序切换，适合大规模图片/视频目录快速定位。
+
+<img src="assets/feature/03_browser.jpg" width="260" alt="目录浏览" />
+
+### 4. 视频播放目录浮层
+播放中可打开目录浮层查看当前播放列表，并快速切换上下条目，提升连续观看体验。
+
+<img src="assets/feature/04_video_playlist.jpg" width="260" alt="视频播放目录浮层" />
+
+### 5. 图片查看器
+支持沉浸式浏览与当前位置显示，便于连续查看同目录图片内容。
+
+<img src="assets/feature/06_image_viewer.jpg" width="260" alt="图片查看器" />
 
 ## 技术栈
 
@@ -67,4 +71,4 @@ APK 输出路径：
 - `lib/webdav.dart`：WebDAV 模块
 - `lib/emby.dart`：Emby 模块
 - `lib/tag.dart`：标签模块
-- `assets/feature/`：README 预览图资源
+- `assets/feature/`：README 功能图资源
