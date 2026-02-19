@@ -4384,6 +4384,8 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   IconData? _gestureIcon;
   Timer? _gestureHideTimer;
   Timer? _lockButtonHideTimer;
+  Timer? _resumeHintForceHideTimer;
+  int _resumeHintSerial = 0;
   Offset? _lastDoubleTapPos;
   Duration _dragStartPos = Duration.zero;
   Duration _dragTargetPos = Duration.zero;
@@ -4447,6 +4449,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     _hideTimer?.cancel();
     _gestureHideTimer?.cancel();
     _lockButtonHideTimer?.cancel();
+    _dismissResumeHint();
     _stopAutoRotateIfAny();
     final c = _controller;
     _controller = null;
@@ -4634,8 +4637,9 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     if (c == null || !c.value.isInitialized) return;
     if (resumedMs < 5000) return;
 
+    _dismissResumeHint(bumpSerial: false);
+    final serial = ++_resumeHintSerial;
     final messenger = ScaffoldMessenger.of(context);
-    messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
       SnackBar(
         duration: const Duration(seconds: 4),
@@ -4646,6 +4650,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
             final cur = _controller;
             if (cur == null || !cur.value.isInitialized) return;
             if (_currentPath.trim() != sourcePath.trim()) return;
+            _dismissResumeHint();
             unawaited(cur.seekTo(Duration.zero));
             unawaited(
               _reportEmbyProgress(eventName: 'TimeUpdate', interactive: true),
@@ -4657,6 +4662,22 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
         ),
       ),
     );
+    _resumeHintForceHideTimer = Timer(const Duration(milliseconds: 4200), () {
+      if (!mounted) return;
+      if (serial != _resumeHintSerial) return;
+      if (_currentPath.trim() != sourcePath.trim()) return;
+      _dismissResumeHint(bumpSerial: false);
+    });
+  }
+
+  void _dismissResumeHint({bool bumpSerial = true}) {
+    if (bumpSerial) _resumeHintSerial++;
+    _resumeHintForceHideTimer?.cancel();
+    _resumeHintForceHideTimer = null;
+    if (!mounted) return;
+    try {
+      ScaffoldMessenger.maybeOf(context)?.hideCurrentSnackBar();
+    } catch (_) {}
   }
 
   bool _isWebDavSource(String s) {
@@ -5848,6 +5869,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     }
 
     final seq = ++_openSeq;
+    _dismissResumeHint();
     setState(() {
       _opening = true;
       _error = null;
@@ -6226,6 +6248,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                         IconButton(
                           onPressed: () async {
                             final navigator = Navigator.of(context);
+                            _dismissResumeHint();
                             await _flushHistoryProgress();
                             if (!mounted) return;
                             navigator.maybePop();

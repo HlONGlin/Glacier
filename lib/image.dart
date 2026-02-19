@@ -252,6 +252,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   // 说明：这是用户可选功能，避免与系统音量调节冲突。
   bool _volumeKeyPagingEnabled = false;
   final FocusNode _keyFocusNode = FocusNode(debugLabel: 'ImageViewerKeyFocus');
+  static const EventChannel _hardwareKeyEventChannel =
+      EventChannel('glacier/hardware_keys');
+  StreamSubscription<dynamic>? _hardwareKeySub;
+  DateTime _lastVolumeHardwareKeyAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   // 右键菜单
   OverlayEntry? _contextMenuEntry;
@@ -688,8 +692,41 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       final v = await AppSettings.getImageVolumeKeyPaging();
       if (!mounted) return;
       setState(() => _volumeKeyPagingEnabled = v);
+      _syncHardwareVolumeKeyPagingListener();
     } catch (_) {
       // 设置读取失败不影响看图：保持默认关闭。
+    }
+  }
+
+  void _syncHardwareVolumeKeyPagingListener() {
+    if (!_isMobile || !Platform.isAndroid || !_volumeKeyPagingEnabled) {
+      _hardwareKeySub?.cancel();
+      _hardwareKeySub = null;
+      return;
+    }
+    _hardwareKeySub ??= _hardwareKeyEventChannel
+        .receiveBroadcastStream()
+        .listen(_onHardwareKeyEvent, onError: (_) {});
+  }
+
+  void _onHardwareKeyEvent(dynamic event) {
+    if (!mounted || !_volumeKeyPagingEnabled) return;
+    final route = ModalRoute.of(context);
+    if (route?.isCurrent != true) return;
+    final now = DateTime.now();
+    if (now.difference(_lastVolumeHardwareKeyAt).inMilliseconds < 90) return;
+
+    final type = (event ?? '').toString().trim().toLowerCase();
+    if (type == 'volume_up') {
+      _lastVolumeHardwareKeyAt = now;
+      _jumpToIndex(_index + 1);
+      _ensureKeyFocus();
+      return;
+    }
+    if (type == 'volume_down') {
+      _lastVolumeHardwareKeyAt = now;
+      _jumpToIndex(_index - 1);
+      _ensureKeyFocus();
     }
   }
 
@@ -698,6 +735,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _disposed = true;
     _removeContextMenu();
     _restoreSystemUI();
+    _hardwareKeySub?.cancel();
+    _hardwareKeySub = null;
     _controller.dispose();
     _stripController.dispose();
     _indexVN.dispose();
@@ -714,9 +753,34 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     final idx = newIndex.clamp(0, total - 1);
     if (idx == _index) return;
 
+    final oldIndex = _index;
     setState(() => _index = idx);
     _indexVN.value = idx;
-    _controller.jumpToPage(idx);
+    if (_stripMode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_stripMode) return;
+        final ctx = _stripKeys[idx].currentContext;
+        if (ctx != null) {
+          _ensureStripVisible(idx);
+          return;
+        }
+        if (!_stripController.hasClients) return;
+        final direction = idx > oldIndex ? 1.0 : -1.0;
+        final delta = MediaQuery.of(context).size.height * 0.82;
+        final min = _stripController.position.minScrollExtent;
+        final max = _stripController.position.maxScrollExtent;
+        final target =
+            (_stripController.offset + direction * delta).clamp(min, max);
+        if ((target - _stripController.offset).abs() < 1) return;
+        _stripController.animateTo(
+          target,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+        );
+      });
+    } else if (_controller.hasClients) {
+      _controller.jumpToPage(idx);
+    }
     _updatePreloadWindow(idx);
   }
 
@@ -1003,6 +1067,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                         onTap: () async {
                           final next = !_volumeKeyPagingEnabled;
                           setState(() => _volumeKeyPagingEnabled = next);
+                          _syncHardwareVolumeKeyPagingListener();
                           try {
                             await AppSettings.setImageVolumeKeyPaging(next);
                           } catch (_) {

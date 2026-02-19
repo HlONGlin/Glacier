@@ -5830,6 +5830,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                                     icon: Icons.history,
                                     label: '历史记录'),
                                 const TopActionMenuItem(
+                                    value: 'settings',
+                                    icon: Icons.settings_outlined,
+                                    label: '设置'),
+                                const TopActionMenuItem(
                                     value: 'refresh',
                                     icon: Icons.refresh,
                                     label: '刷新'),
@@ -5862,6 +5866,13 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                                       context,
                                       MaterialPageRoute(
                                           builder: (_) => const HistoryPage()),
+                                    );
+                                    break;
+                                  case 'settings':
+                                    await Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                          builder: (_) => const SettingsPage()),
                                     );
                                     break;
                                   case 'refresh':
