@@ -1728,6 +1728,13 @@ class FolderDetailPage extends StatefulWidget {
 
 enum _CtxKind { root, local, webdav, emby }
 
+enum _FolderSearchScope {
+  currentDirectory,
+  currentCollection,
+  allCollections,
+  singleCollection,
+}
+
 class _NavCtx {
   final _CtxKind kind;
 
@@ -1792,6 +1799,10 @@ class _Entry {
   final String? embyItemId;
   final String? embyCoverUrl;
 
+  // Optional metadata for cross-collection search results.
+  final String? searchCollectionId;
+  final String? searchCollectionName;
+
   const _Entry({
     required this.isDir,
     required this.name,
@@ -1806,6 +1817,8 @@ class _Entry {
     this.embyAccountId,
     this.embyItemId,
     this.embyCoverUrl,
+    this.searchCollectionId,
+    this.searchCollectionName,
   });
 
   bool get isWebDav => wdAccountId != null;
@@ -2618,6 +2631,17 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
   String _q = '';
   bool _searchExpanded = false;
+  _FolderSearchScope _searchScope = _FolderSearchScope.currentCollection;
+  String? _singleSearchCollectionId;
+  List<FavoriteCollection> _searchCollections = const <FavoriteCollection>[];
+  bool _searchCollectionsLoaded = false;
+  bool _scopeSearching = false;
+  Object? _scopeSearchError;
+  List<_Entry> _scopeSearchRaw = const <_Entry>[];
+  final Map<String, List<_Entry>> _scopeSearchCache = <String, List<_Entry>>{};
+  Timer? _scopeSearchDebounce;
+  int _scopeSearchToken = 0;
+  static const int _maxScopeSearchResults = 400;
   String? _selectedTagId; // null 表示不过滤
 
   bool _tagEnabled = true; // 由设置控制，避免用户不需要时被打扰
@@ -2794,6 +2818,730 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     showAppToast(context, '已更新 ${targets.length} 项标签');
   }
 
+  String _searchScopeBaseLabel(_FolderSearchScope scope) {
+    switch (scope) {
+      case _FolderSearchScope.currentDirectory:
+        return '当前目录';
+      case _FolderSearchScope.currentCollection:
+        return '当前收藏夹';
+      case _FolderSearchScope.allCollections:
+        return '全部收藏夹';
+      case _FolderSearchScope.singleCollection:
+        return '单个收藏夹';
+    }
+  }
+
+  IconData _searchScopeIcon(_FolderSearchScope scope) {
+    switch (scope) {
+      case _FolderSearchScope.currentDirectory:
+        return Icons.search_outlined;
+      case _FolderSearchScope.currentCollection:
+        return Icons.folder_special_outlined;
+      case _FolderSearchScope.allCollections:
+        return Icons.collections_bookmark_outlined;
+      case _FolderSearchScope.singleCollection:
+        return Icons.bookmark_outline;
+    }
+  }
+
+  String _searchScopeChipLabel() {
+    if (_searchScope == _FolderSearchScope.singleCollection) {
+      final c = _collectionById(_singleSearchCollectionId);
+      final name = (c?.name ?? '').trim();
+      return name.isEmpty ? '范围: 单个收藏夹' : '范围: $name';
+    }
+    return '范围: ${_searchScopeBaseLabel(_searchScope)}';
+  }
+
+  String _searchHintText() {
+    switch (_searchScope) {
+      case _FolderSearchScope.currentDirectory:
+        return '搜索当前目录';
+      case _FolderSearchScope.currentCollection:
+        return '搜索当前收藏夹';
+      case _FolderSearchScope.allCollections:
+        return '搜索全部收藏夹';
+      case _FolderSearchScope.singleCollection:
+        final c = _collectionById(_singleSearchCollectionId);
+        final name = (c?.name ?? '').trim();
+        if (name.isEmpty) return '搜索单个收藏夹';
+        return '搜索收藏夹：$name';
+    }
+  }
+
+  bool get _usingScopeSearch =>
+      _searchScope != _FolderSearchScope.currentDirectory &&
+      _q.trim().isNotEmpty;
+
+  FavoriteCollection? _collectionById(String? id) {
+    final key = (id ?? '').trim();
+    if (key.isEmpty) return null;
+    if (widget.collection.id == key) return widget.collection;
+    for (final c in _searchCollections) {
+      if (c.id == key) return c;
+    }
+    return null;
+  }
+
+  List<FavoriteCollection> _allSearchCollections() {
+    final out = <FavoriteCollection>[widget.collection];
+    for (final c in _searchCollections) {
+      if (out.any((x) => x.id == c.id)) continue;
+      out.add(c);
+    }
+    return out;
+  }
+
+  Future<void> _ensureSearchCollectionsLoaded() async {
+    if (_searchCollectionsLoaded) return;
+    try {
+      final list = await _Store.load();
+      if (!mounted) return;
+      setState(() {
+        _searchCollections = list;
+        _searchCollectionsLoaded = true;
+        _singleSearchCollectionId ??= widget.collection.id;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _searchCollectionsLoaded = true;
+        _singleSearchCollectionId ??= widget.collection.id;
+      });
+    }
+  }
+
+  Future<void> _loadSearchScopeSettings() async {
+    try {
+      final scopeRaw = await AppSettings.getFolderSearchScope();
+      final singleId = await AppSettings.getFolderSearchSingleCollectionId();
+      if (!mounted) return;
+      setState(() {
+        switch (scopeRaw) {
+          case 'currentDirectory':
+            _searchScope = _FolderSearchScope.currentDirectory;
+            break;
+          case 'allCollections':
+            _searchScope = _FolderSearchScope.allCollections;
+            break;
+          case 'singleCollection':
+            _searchScope = _FolderSearchScope.singleCollection;
+            break;
+          case 'currentCollection':
+          default:
+            _searchScope = _FolderSearchScope.currentCollection;
+            break;
+        }
+        final sid = (singleId ?? '').trim();
+        if (sid.isNotEmpty) {
+          _singleSearchCollectionId = sid;
+        } else {
+          _singleSearchCollectionId ??= widget.collection.id;
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _searchScope = _FolderSearchScope.currentCollection;
+        _singleSearchCollectionId ??= widget.collection.id;
+      });
+    }
+  }
+
+  Future<void> _persistSearchScopeSettings() async {
+    await AppSettings.setFolderSearchScope(_searchScope.name);
+    final sid = (_singleSearchCollectionId ?? '').trim();
+    if (sid.isEmpty) {
+      await AppSettings.setFolderSearchSingleCollectionId(null);
+    } else {
+      await AppSettings.setFolderSearchSingleCollectionId(sid);
+    }
+  }
+
+  String _searchPathHint(_Entry e) {
+    if (e.isWebDav) {
+      final rel = (e.wdRelPath ?? '').trim();
+      if (rel.isEmpty) return 'WebDAV';
+      final d = p.dirname(rel);
+      if (d == '.' || d == '/') return 'WebDAV 根目录';
+      return 'WebDAV/$d';
+    }
+    if (e.isEmby) {
+      return 'Emby';
+    }
+    final lp = (e.localPath ?? '').trim();
+    if (lp.isEmpty) return '本地';
+    final d = p.dirname(lp);
+    if (d == '.' || d.trim().isEmpty) return '本地';
+    final base = p.basename(d).trim();
+    return base.isEmpty ? d : base;
+  }
+
+  _Entry _cloneEntry(
+    _Entry e, {
+    String? origin,
+    String? searchCollectionId,
+    String? searchCollectionName,
+  }) {
+    return _Entry(
+      isDir: e.isDir,
+      name: e.name,
+      size: e.size,
+      modified: e.modified,
+      typeKey: e.typeKey,
+      origin: origin ?? e.origin,
+      localPath: e.localPath,
+      wdAccountId: e.wdAccountId,
+      wdRelPath: e.wdRelPath,
+      wdHref: e.wdHref,
+      embyAccountId: e.embyAccountId,
+      embyItemId: e.embyItemId,
+      embyCoverUrl: e.embyCoverUrl,
+      searchCollectionId: searchCollectionId ?? e.searchCollectionId,
+      searchCollectionName: searchCollectionName ?? e.searchCollectionName,
+    );
+  }
+
+  _Entry _asSearchResult(FavoriteCollection c, _Entry e) {
+    final cName = c.name.trim().isEmpty ? '未命名收藏夹' : c.name.trim();
+    final hint = _searchPathHint(e);
+    final label = hint.trim().isEmpty ? cName : '$cName · $hint';
+    return _cloneEntry(
+      e,
+      origin: label,
+      searchCollectionId: c.id,
+      searchCollectionName: cName,
+    );
+  }
+
+  String _scopeSearchCacheKey(String qLower, List<FavoriteCollection> cols) {
+    final scope = _searchScope.name;
+    final ids = cols.map((e) => e.id).join(',');
+    return '$scope|$_singleSearchCollectionId|$ids|$qLower';
+  }
+
+  void _clearScopeSearchState({bool clearCache = false}) {
+    _scopeSearchDebounce?.cancel();
+    _scopeSearchToken++;
+    _scopeSearching = false;
+    _scopeSearchError = null;
+    _scopeSearchRaw = const <_Entry>[];
+    if (clearCache) _scopeSearchCache.clear();
+  }
+
+  void _scheduleScopeSearch({bool immediate = false}) {
+    _scopeSearchDebounce?.cancel();
+    if (!_usingScopeSearch) {
+      if (_scopeSearching ||
+          _scopeSearchError != null ||
+          _scopeSearchRaw.isNotEmpty) {
+        setState(() => _clearScopeSearchState());
+      }
+      return;
+    }
+    setState(() {
+      _scopeSearching = true;
+      _scopeSearchError = null;
+      _scopeSearchRaw = const <_Entry>[];
+    });
+    void run() {
+      // ignore: unawaited_futures
+      _runScopeSearchNow();
+    }
+
+    if (immediate) {
+      run();
+    } else {
+      _scopeSearchDebounce = Timer(const Duration(milliseconds: 260), run);
+    }
+  }
+
+  void _onSearchQueryChanged(String v) {
+    setState(() => _q = v);
+    _scheduleScopeSearch();
+  }
+
+  Future<List<_Entry>> _loadRootEntriesForCollection(
+    FavoriteCollection collection, {
+    String searchQuery = '',
+  }) async {
+    final out = <_Entry>[];
+    final q = searchQuery.trim();
+    for (final src in collection.sources) {
+      try {
+        if (_isEmbySource(src)) {
+          final ref = _parseEmbySource(src);
+          if (ref == null) continue;
+          if (q.isNotEmpty) {
+            out.addAll(await _searchEmbyEntriesBySource(ref, q));
+            continue;
+          }
+          final path = ref.path.trim().isEmpty ? 'favorites' : ref.path.trim();
+          out.addAll(await _loadEmby(ref.accountId, path));
+          continue;
+        }
+
+        if (_isWebDavSource(src)) {
+          final ref = _parseWebDavSource(src);
+          if (ref == null) continue;
+          if (!ref.isDir) {
+            final fileName = p.basename(ref.relPath);
+            out.add(
+              _Entry(
+                isDir: false,
+                name: fileName.isEmpty ? '文件' : fileName,
+                size: 0,
+                modified: DateTime.fromMillisecondsSinceEpoch(0),
+                typeKey: p.extension(fileName).toLowerCase().isEmpty
+                    ? 'file'
+                    : p.extension(fileName).toLowerCase(),
+                origin: null,
+                wdAccountId: ref.accountId,
+                wdRelPath: ref.relPath,
+                wdHref: '',
+              ),
+            );
+            continue;
+          }
+          var rel = ref.relPath.trim();
+          if (rel.isNotEmpty && !rel.endsWith('/')) rel = '$rel/';
+          out.addAll(await _loadWebDavDir(ref.accountId, rel));
+          continue;
+        }
+
+        final folder = src.trim();
+        if (folder.isEmpty) continue;
+        out.addAll(await _loadLocalDir(folder));
+      } catch (_) {
+        // keep searching other sources
+      }
+    }
+    return out;
+  }
+
+  _Entry _entryFromEmbySearchItem({
+    required EmbyAccount account,
+    required EmbyClient client,
+    required EmbyItem item,
+  }) {
+    final isDir = item.isFolder || _embyTypeIsDir(item.type);
+    final isImg = !isDir && _embyTypeIsImage(item.type);
+    final thumbWidth = _active.viewMode == ViewMode.grid ? 420 : 220;
+    return _Entry(
+      isDir: isDir,
+      name: item.name.isEmpty ? '未命名' : item.name,
+      size: isDir ? 0 : item.size,
+      modified: item.dateCreated ??
+          item.dateModified ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      typeKey: isDir ? 'emby_folder' : (isImg ? 'emby_image' : 'emby_video'),
+      origin: null,
+      embyAccountId: account.id,
+      embyItemId: item.id,
+      embyCoverUrl: client.bestCoverUrl(item, maxWidth: thumbWidth),
+    );
+  }
+
+  Future<List<_Entry>> _searchEmbyEntriesByTraversalFallback({
+    required EmbyAccount account,
+    required EmbyClient client,
+    required String sourcePath,
+    required String query,
+  }) async {
+    final qLower = query.trim().toLowerCase();
+    if (qLower.isEmpty) return const <_Entry>[];
+
+    final out = <_Entry>[];
+    final seenItemIds = <String>{};
+    final dirQueue = <String>[];
+    var cursor = 0;
+    final maxVisit = (_maxScopeSearchResults * 10).clamp(400, 5000).toInt();
+
+    void pushItem(EmbyItem item) {
+      final isDirCandidate = item.isFolder || _embyTypeIsDir(item.type);
+      if (!isDirCandidate) return;
+
+      final id = item.id.trim();
+      if (id.isEmpty || !seenItemIds.add(id)) return;
+      final e = _entryFromEmbySearchItem(
+        account: account,
+        client: client,
+        item: item,
+      );
+      if (e.isDir &&
+          e.name.toLowerCase().contains(qLower) &&
+          out.length < _maxScopeSearchResults) {
+        out.add(e);
+      }
+      if (e.isDir && seenItemIds.length < maxVisit) {
+        dirQueue.add(id);
+      }
+    }
+
+    Future<void> seedQueue() async {
+      if (sourcePath.startsWith('view:')) {
+        final pid = sourcePath.substring('view:'.length).trim();
+        if (pid.isEmpty) return;
+        final root = await client.listChildren(parentId: pid);
+        for (final it in root) {
+          pushItem(it);
+        }
+        return;
+      }
+
+      if (sourcePath == 'favorites') {
+        final fav = await client.listFavorites();
+        for (final it in fav) {
+          pushItem(it);
+        }
+        final views = await client.listViews();
+        for (final it in views) {
+          pushItem(it);
+        }
+        return;
+      }
+
+      final firstLevel = await _loadEmby(account.id, sourcePath);
+      for (final e in firstLevel) {
+        if (e.isLoading ||
+            e.typeKey == 'hint' ||
+            e.typeKey == 'emby_login' ||
+            e.typeKey == 'emby_empty') {
+          continue;
+        }
+        final id = (e.embyItemId ?? '').trim();
+        if (e.isDir && id.isNotEmpty) {
+          seenItemIds.add(id);
+        }
+        if (e.isDir &&
+            e.name.toLowerCase().contains(qLower) &&
+            out.length < _maxScopeSearchResults) {
+          out.add(e);
+        }
+        if (e.isDir && id.isNotEmpty && seenItemIds.length < maxVisit) {
+          dirQueue.add(id);
+        }
+      }
+    }
+
+    await seedQueue();
+
+    while (cursor < dirQueue.length &&
+        out.length < _maxScopeSearchResults &&
+        seenItemIds.length < maxVisit) {
+      final parentId = dirQueue[cursor];
+      cursor++;
+
+      List<EmbyItem> children;
+      try {
+        children = await client.listChildren(parentId: parentId);
+      } catch (_) {
+        continue;
+      }
+
+      for (final it in children) {
+        pushItem(it);
+        if (out.length >= _maxScopeSearchResults) break;
+      }
+    }
+
+    return out;
+  }
+
+  Future<List<_Entry>> _searchEmbyEntriesBySource(
+      _EmbyRef ref, String query) async {
+    final accMap = await _loadEmbyAccountsMap();
+    final a = accMap[ref.accountId];
+    if (a == null) return const <_Entry>[];
+
+    final client = EmbyClient(a);
+    final sourcePath = ref.path.trim().isEmpty ? 'favorites' : ref.path.trim();
+    String? parentId;
+
+    if (sourcePath.startsWith('view:')) {
+      final pid = sourcePath.substring('view:'.length).trim();
+      if (pid.isEmpty) return const <_Entry>[];
+      parentId = pid;
+    } else if (sourcePath == 'favorites') {
+      // favorites 入口下，允许全局递归搜索，避免“只能搜到首层”。
+      parentId = null;
+    } else {
+      // 兜底：未知路径格式退回到原有加载并在本地做包含匹配。
+      final qLower = query.trim().toLowerCase();
+      final fallback = await _loadEmby(a.id, sourcePath);
+      return fallback
+          .where((e) => e.isDir && e.name.toLowerCase().contains(qLower))
+          .toList(growable: false);
+    }
+
+    try {
+      final items = await client.searchItems(
+        query: query,
+        parentId: parentId,
+        recursive: true,
+        limit: _maxScopeSearchResults,
+      );
+      final dirs = items
+          .map((it) => _entryFromEmbySearchItem(
+                account: a,
+                client: client,
+                item: it,
+              ))
+          .where((e) => e.isDir)
+          .toList(growable: false);
+      if (dirs.isNotEmpty) return dirs;
+    } catch (_) {
+      // ignore and fallback below
+    }
+    return _searchEmbyEntriesByTraversalFallback(
+      account: a,
+      client: client,
+      sourcePath: sourcePath,
+      query: query,
+    );
+  }
+
+  Future<void> _runScopeSearchNow() async {
+    final qRaw = _q.trim();
+    final qLower = qRaw.toLowerCase();
+    if (!_usingScopeSearch || qLower.isEmpty) {
+      if (!mounted) return;
+      setState(() => _clearScopeSearchState());
+      return;
+    }
+
+    List<FavoriteCollection> targets = <FavoriteCollection>[];
+    switch (_searchScope) {
+      case _FolderSearchScope.currentDirectory:
+        targets = <FavoriteCollection>[];
+        break;
+      case _FolderSearchScope.currentCollection:
+        targets = <FavoriteCollection>[widget.collection];
+        break;
+      case _FolderSearchScope.allCollections:
+        await _ensureSearchCollectionsLoaded();
+        targets = _allSearchCollections();
+        break;
+      case _FolderSearchScope.singleCollection:
+        await _ensureSearchCollectionsLoaded();
+        var selected = _collectionById(_singleSearchCollectionId);
+        if (selected == null) {
+          selected = widget.collection;
+          _singleSearchCollectionId = widget.collection.id;
+          // ignore: unawaited_futures
+          _persistSearchScopeSettings();
+        }
+        targets = <FavoriteCollection>[selected];
+        break;
+    }
+
+    if (targets.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _scopeSearching = false;
+        _scopeSearchError = null;
+        _scopeSearchRaw = const <_Entry>[];
+      });
+      return;
+    }
+
+    final token = ++_scopeSearchToken;
+    final cacheKey = _scopeSearchCacheKey(qLower, targets);
+    final cached = _scopeSearchCache[cacheKey];
+    if (cached != null) {
+      if (!mounted || token != _scopeSearchToken) return;
+      setState(() {
+        _scopeSearching = false;
+        _scopeSearchError = null;
+        _scopeSearchRaw = cached;
+      });
+      return;
+    }
+
+    try {
+      final out = <_Entry>[];
+      final seen = <String>{};
+      for (final c in targets) {
+        if (out.length >= _maxScopeSearchResults) break;
+        final list = await _loadRootEntriesForCollection(c, searchQuery: qRaw);
+        for (final e in list) {
+          if (out.length >= _maxScopeSearchResults) break;
+          final name = e.name.toLowerCase();
+          final matchedByName = name.contains(qLower);
+          // Emby 使用服务端 SearchTerm 时，允许“非纯 contains”命中结果通过。
+          if (!matchedByName && !(e.isEmby && qRaw.isNotEmpty)) continue;
+          if (e.isLoading ||
+              e.typeKey == 'hint' ||
+              e.typeKey == 'wd_error' ||
+              e.typeKey == 'emby_login' ||
+              e.typeKey == 'emby_empty') {
+            continue;
+          }
+          final key = '${c.id}|${e.displayPath}|${e.name}|${e.typeKey}';
+          if (!seen.add(key)) continue;
+          out.add(_asSearchResult(c, e));
+        }
+      }
+      if (!mounted || token != _scopeSearchToken) return;
+      _scopeSearchCache[cacheKey] = out;
+      setState(() {
+        _scopeSearching = false;
+        _scopeSearchError = null;
+        _scopeSearchRaw = out;
+      });
+    } catch (e) {
+      if (!mounted || token != _scopeSearchToken) return;
+      setState(() {
+        _scopeSearching = false;
+        _scopeSearchError = e;
+        _scopeSearchRaw = const <_Entry>[];
+      });
+    }
+  }
+
+  Future<void> _showSearchScopePanel() async {
+    await _ensureSearchCollectionsLoaded();
+    if (!mounted) return;
+    final picked = await showModalBottomSheet<_FolderSearchScope>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (ctx) {
+        Widget tile(_FolderSearchScope scope, {String? subtitle}) {
+          final selected = _searchScope == scope;
+          return ListTile(
+            leading: Icon(_searchScopeIcon(scope)),
+            title: Text(_searchScopeBaseLabel(scope)),
+            subtitle: subtitle == null ? null : Text(subtitle),
+            trailing: selected
+                ? const Icon(Icons.check_circle, color: Colors.green)
+                : null,
+            onTap: () => Navigator.pop(ctx, scope),
+          );
+        }
+
+        final singleName =
+            (_collectionById(_singleSearchCollectionId)?.name ?? '').trim();
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              tile(_FolderSearchScope.currentDirectory, subtitle: '仅筛选当前打开目录'),
+              tile(_FolderSearchScope.currentCollection,
+                  subtitle: '在“${widget.collection.name}”内搜索'),
+              tile(_FolderSearchScope.allCollections, subtitle: '在全部收藏夹内搜索'),
+              tile(
+                _FolderSearchScope.singleCollection,
+                subtitle: singleName.isEmpty ? '选择一个收藏夹' : '当前：$singleName',
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (picked == null || !mounted) return;
+
+    if (picked == _FolderSearchScope.singleCollection) {
+      final id = await _pickSingleSearchCollection();
+      if (id == null || !mounted) return;
+      setState(() {
+        _searchScope = picked;
+        _singleSearchCollectionId = id;
+      });
+      // ignore: unawaited_futures
+      _persistSearchScopeSettings();
+      _scheduleScopeSearch(immediate: true);
+      return;
+    }
+
+    setState(() => _searchScope = picked);
+    // ignore: unawaited_futures
+    _persistSearchScopeSettings();
+    _scheduleScopeSearch(immediate: true);
+  }
+
+  Future<String?> _pickSingleSearchCollection() async {
+    await _ensureSearchCollectionsLoaded();
+    final all = _allSearchCollections()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    if (all.isEmpty) return null;
+
+    return showModalBottomSheet<String>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (ctx) {
+        var q = '';
+        return StatefulBuilder(
+          builder: (ctx2, setS) {
+            final filtered = q.trim().isEmpty
+                ? all
+                : all
+                    .where((c) =>
+                        c.name.toLowerCase().contains(q.trim().toLowerCase()))
+                    .toList(growable: false);
+            final h =
+                (MediaQuery.of(ctx2).size.height * 0.72).clamp(320.0, 560.0);
+            return SizedBox(
+              height: h,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+                    child: TextField(
+                      autofocus: true,
+                      onChanged: (v) => setS(() => q = v),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: '搜索收藏夹',
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        suffixIcon: q.trim().isEmpty
+                            ? null
+                            : IconButton(
+                                tooltip: '清空',
+                                onPressed: () => setS(() => q = ''),
+                                icon: const Icon(Icons.close, size: 18),
+                              ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: filtered.isEmpty
+                        ? const Center(child: Text('没有匹配的收藏夹'))
+                        : ListView.builder(
+                            itemCount: filtered.length,
+                            itemBuilder: (_, i) {
+                              final c = filtered[i];
+                              final selected =
+                                  c.id == _singleSearchCollectionId;
+                              return ListTile(
+                                leading: const Icon(Icons.bookmark_outline),
+                                title: Text(c.name),
+                                subtitle: Text('来源: ${c.sources.length}'),
+                                trailing: selected
+                                    ? const Icon(Icons.check_circle,
+                                        color: Colors.green)
+                                    : null,
+                                onTap: () => Navigator.pop(ctx2, c.id),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   String _stackBreadcrumb() {
     String labelFor(_NavCtx ctx) {
       final t = (ctx.title ?? '').trim();
@@ -2821,17 +3569,61 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     return nodes.join(' / ');
   }
 
+  _NavCtx? _navForDirectoryEntry(_Entry e) {
+    if (!e.isDir) return null;
+    if (e.isEmby) {
+      final id = (e.embyItemId ?? '').trim();
+      final pth = id.isEmpty ? 'favorites' : 'view:$id';
+      return _NavCtx.emby(
+          embyAccountId: e.embyAccountId!, embyPath: pth, title: e.name);
+    }
+    if (e.isWebDav) {
+      var rel = (e.wdRelPath ?? '').trim();
+      if (rel.isNotEmpty && !rel.endsWith('/')) rel = '$rel/';
+      return _NavCtx.webdav(
+          wdAccountId: e.wdAccountId!, wdRel: rel, title: e.name);
+    }
+    final lp = (e.localPath ?? '').trim();
+    if (lp.isEmpty) return null;
+    return _NavCtx.local(lp, title: e.name);
+  }
+
+  Future<bool> _openCrossCollectionDirectoryFromSearch(_Entry e) async {
+    if (!_usingScopeSearch || !e.isDir) return false;
+    final searchCollectionId = (e.searchCollectionId ?? '').trim();
+    if (searchCollectionId.isEmpty ||
+        searchCollectionId == widget.collection.id) {
+      return false;
+    }
+    final target = _collectionById(searchCollectionId);
+    final nav = _navForDirectoryEntry(e);
+    if (target == null || nav == null) return false;
+    if (!mounted) return true;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+          builder: (_) =>
+              FolderDetailPage(collection: target.copy(), initialNav: nav)),
+    );
+    return true;
+  }
+
   Future<void> _openEntry(
     _Entry e, {
+    required List<_Entry> visibleEntries,
     required List<String> imgs,
     required List<String> vids,
   }) async {
     if (e.isDir) {
+      if (await _openCrossCollectionDirectoryFromSearch(e)) return;
       await _openFolder(e);
       return;
     }
     if (e.isEmby) {
-      await _openEmbyItem(e);
+      await _openEmbyItem(
+        e,
+        pool: _usingScopeSearch ? <_Entry>[e] : visibleEntries,
+      );
       return;
     }
     if (e.isWebDav) {
@@ -2841,6 +3633,16 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     final path = e.localPath;
     if (path == null) return;
     if (_isImg(path)) {
+      if (_usingScopeSearch) {
+        if (!mounted) return;
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+              builder: (_) =>
+                  ImageViewerPage(imagePaths: <String>[path], initialIndex: 0)),
+        );
+        return;
+      }
       final idx = imgs.indexOf(path);
       if (idx < 0) return;
       await _recordFolderHistoryIfEnabled();
@@ -2854,6 +3656,16 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       return;
     }
     if (_isVid(path)) {
+      if (_usingScopeSearch) {
+        if (!mounted) return;
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+              builder: (_) =>
+                  VideoPlayerPage(videoPaths: <String>[path], initialIndex: 0)),
+        );
+        return;
+      }
       final idx = vids.indexOf(path);
       if (idx < 0) return;
       if (!mounted) return;
@@ -2868,6 +3680,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
   Future<void> _onEntryTap(
     _Entry e, {
+    required List<_Entry> visibleEntries,
     required List<String> imgs,
     required List<String> vids,
   }) async {
@@ -2875,7 +3688,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       setState(() => _toggleSelection(e));
       return;
     }
-    await _openEntry(e, imgs: imgs, vids: vids);
+    await _openEntry(e, visibleEntries: visibleEntries, imgs: imgs, vids: vids);
   }
 
   void _onEntryLongPress(_Entry e) {
@@ -2986,12 +3799,17 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
   @override
   void initState() {
     super.initState();
+    _singleSearchCollectionId = widget.collection.id;
+    // ignore: unawaited_futures
+    _loadSearchScopeSettings();
     // WebDAV 账号变化通知：清理缓存并重载
     WebDavManager.instance.addListener(_onWebDavAccountsChanged);
     // ignore: unawaited_futures
     _ensureWebDavAccountsLoaded();
     // ignore: unawaited_futures
     _loadFolderMediaCountCache();
+    // ignore: unawaited_futures
+    _ensureSearchCollectionsLoaded();
 
     // ✅ 历史/外部入口：支持直接进入指定目录上下文（尤其是 Emby 多级目录）。
     // 设计原因：
@@ -3034,6 +3852,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     _wdAccMap.clear();
     _wdClientMap.clear();
     _wdVideoThumbJobs.clear();
+    _scopeSearchCache.clear();
+    _clearScopeSearchState();
     if (mounted) {
       // ignore: unawaited_futures
       _refresh();
@@ -3050,6 +3870,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     TagStore.I.removeListener(_onTagStoreChanged);
     _dirCoverJobs.clear();
     _wdVideoThumbJobs.clear();
+    _scopeSearchDebounce?.cancel();
     _scrollController.dispose(); // 🔥 2. 新增：销毁控制器
     super.dispose();
   }
@@ -3200,6 +4021,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         }
       }
     });
+    _scopeSearchCache.clear();
 
     // ✅ Emby：当用户正在使用“按大小排序”时，按需补全 size=0 的条目，
     // 让排序真正对 Emby 文件数据生效。
@@ -3964,9 +4786,11 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
   List<_Entry> _shown() {
     final q = _q.trim().toLowerCase();
-    var out = q.isEmpty
-        ? [..._raw]
-        : _raw.where((e) => e.name.toLowerCase().contains(q)).toList();
+    var out = _usingScopeSearch
+        ? [..._scopeSearchRaw]
+        : (q.isEmpty
+            ? [..._raw]
+            : _raw.where((e) => e.name.toLowerCase().contains(q)).toList());
 
     // Tag 过滤（图片/视频/文件统一）
     final tid = _selectedTagId;
@@ -4115,6 +4939,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
             embyAccountId: e.embyAccountId!, embyPath: pth, title: e.name));
         _q = '';
         _searchExpanded = false;
+        _clearScopeSearchState();
         _clearSelection();
       });
     } else if (e.isWebDav) {
@@ -4125,6 +4950,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
             wdAccountId: e.wdAccountId!, wdRel: rel, title: e.name));
         _q = '';
         _searchExpanded = false;
+        _clearScopeSearchState();
         _clearSelection();
       });
     } else {
@@ -4134,6 +4960,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         _stack.add(_NavCtx.local(path, title: e.name));
         _q = '';
         _searchExpanded = false;
+        _clearScopeSearchState();
         _clearSelection();
       });
     }
@@ -4226,7 +5053,15 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           await FilePicker.platform.getDirectoryPath(dialogTitle: '选择保存位置');
       if (picked == null) return;
       final out = File(p.join(picked, name));
-      await client.downloadToFile(e.wdHref ?? '', out);
+      final href = (e.wdHref ?? '').trim().isNotEmpty
+          ? e.wdHref!.trim()
+          : (e.wdRelPath == null
+              ? ''
+              : client.resolveRel(e.wdRelPath!).toString());
+      if (href.trim().isEmpty) {
+        throw Exception('缺少可下载地址');
+      }
+      await client.downloadToFile(href, out);
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('已保存到：${out.path}')));
@@ -4256,6 +5091,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         _stack.removeLast();
         _q = '';
         _searchExpanded = false;
+        _clearScopeSearchState();
         _clearSelection();
       });
 
@@ -4613,30 +5449,44 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     final hasQuery = _q.trim().isNotEmpty;
     final hasTagFilter =
         _tagEnabled && _selectedTagId != null && _selectedTagId!.isNotEmpty;
+    final hasScopeInfo =
+        hasQuery && _searchScope != _FolderSearchScope.currentDirectory;
     final hasFilterState = hasQuery || hasTagFilter;
+    final scopedLoading = _usingScopeSearch && _scopeSearching;
+    final scopedError = _usingScopeSearch ? _scopeSearchError : null;
     final selectedVisible = _selectedEntriesFrom(list);
     final selectedCount = selectedVisible.length;
 
     final body = _loading
         ? const AppLoadingState()
-        : list.isEmpty
-            ? AppEmptyState(
-                title: hasFilterState ? '没有匹配结果' : '没有内容',
-                subtitle: hasFilterState ? '尝试调整筛选条件' : '试试切换排序、视图或下拉刷新',
-                icon: Icons.folder_off_outlined,
-                actionLabel: hasFilterState ? '清空筛选' : '刷新',
-                onAction: hasFilterState
-                    ? () => setState(() {
-                          _q = '';
-                          _searchExpanded = false;
-                          _selectedTagId = null;
-                        })
-                    : _refresh,
-              )
-            : RefreshIndicator(
-                onRefresh: _refresh,
-                child: _buildByMode(list, imgs, vids),
-              );
+        : (scopedLoading && list.isEmpty)
+            ? const AppLoadingState()
+            : (scopedError != null && list.isEmpty)
+                ? AppErrorState(
+                    title: '搜索失败',
+                    details: friendlyErrorMessage(scopedError),
+                    onRetry: () => _scheduleScopeSearch(immediate: true),
+                  )
+                : list.isEmpty
+                    ? AppEmptyState(
+                        title: hasFilterState ? '没有匹配结果' : '没有内容',
+                        subtitle:
+                            hasFilterState ? '尝试调整筛选条件' : '试试切换排序、视图或下拉刷新',
+                        icon: Icons.folder_off_outlined,
+                        actionLabel: hasFilterState ? '清空筛选' : '刷新',
+                        onAction: hasFilterState
+                            ? () => setState(() {
+                                  _q = '';
+                                  _searchExpanded = false;
+                                  _clearScopeSearchState();
+                                  _selectedTagId = null;
+                                })
+                            : _refresh,
+                      )
+                    : RefreshIndicator(
+                        onRefresh: _refresh,
+                        child: _buildByMode(list, imgs, vids),
+                      );
 
     return WillPopScope(
       onWillPop: _onBack,
@@ -4702,6 +5552,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                                 if (showing) {
                                   _q = '';
                                   _searchExpanded = false;
+                                  _clearScopeSearchState();
                                 } else {
                                   _searchExpanded = true;
                                 }
@@ -4715,6 +5566,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                             TopActionMenu<String>(
                               tooltip: '更多',
                               items: [
+                                const TopActionMenuItem(
+                                    value: 'search_scope',
+                                    icon: Icons.search_outlined,
+                                    label: '搜索范围'),
                                 const TopActionMenuItem(
                                     value: 'history',
                                     icon: Icons.history,
@@ -4744,6 +5599,9 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                               ],
                               onSelected: (v) async {
                                 switch (v) {
+                                  case 'search_scope':
+                                    await _showSearchScopePanel();
+                                    break;
                                   case 'history':
                                     await Navigator.push(
                                       context,
@@ -4788,9 +5646,9 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                         if (_searchExpanded || hasQuery) ...[
                           const SizedBox(height: 8),
                           TextField(
-                            onChanged: (v) => setState(() => _q = v),
+                            onChanged: _onSearchQueryChanged,
                             decoration: InputDecoration(
-                              hintText: '搜索当前目录',
+                              hintText: _searchHintText(),
                               prefixIcon: const Icon(Icons.search),
                               suffixIcon: _q.trim().isEmpty
                                   ? IconButton(
@@ -4802,7 +5660,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                                   : IconButton(
                                       tooltip: '清空',
                                       icon: const Icon(Icons.close),
-                                      onPressed: () => setState(() => _q = ''),
+                                      onPressed: () =>
+                                          _onSearchQueryChanged(''),
                                     ),
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
@@ -4863,7 +5722,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                             child: Text(
                               [
                                 if (hasQuery) '搜索: ${_q.trim()}',
+                                if (hasScopeInfo)
+                                  '范围: ${_searchScope == _FolderSearchScope.singleCollection ? _searchScopeChipLabel().replaceFirst('范围: ', '') : _searchScopeBaseLabel(_searchScope)}',
                                 if (hasTagFilter) '标签筛选',
+                                if (scopedLoading) '搜索中…',
                               ].join('  ·  '),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -4873,6 +5735,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                             onPressed: () => setState(() {
                               _q = '';
                               _searchExpanded = false;
+                              _clearScopeSearchState();
                               _selectedTagId = null;
                             }),
                             child: const Text('清空'),
@@ -4913,7 +5776,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           controller: _scrollController, // 🔥 3. 绑定控制器
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           itemCount: l.length,
-          itemBuilder: (_, i) => _listItem(l[i], imgs, vids),
+          itemBuilder: (_, i) => _listItem(l[i], l, imgs, vids),
         );
       case ViewMode.gallery:
         return GridView.builder(
@@ -4925,7 +5788,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               crossAxisSpacing: 12,
               childAspectRatio: 1.45),
           itemCount: l.length,
-          itemBuilder: (_, i) => _cardItem(l[i], imgs, vids),
+          itemBuilder: (_, i) => _cardItem(l[i], l, imgs, vids),
         );
       case ViewMode.grid:
         return GridView.builder(
@@ -4937,7 +5800,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               crossAxisSpacing: 10,
               childAspectRatio: 0.95),
           itemCount: l.length,
-          itemBuilder: (_, i) => _cardItem(l[i], imgs, vids),
+          itemBuilder: (_, i) => _cardItem(l[i], l, imgs, vids),
         );
     }
   }
@@ -4963,7 +5826,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     );
   }
 
-  Future<void> _openEmbyItem(_Entry e) async {
+  Future<void> _openEmbyItem(_Entry e, {List<_Entry>? pool}) async {
+    final playlistPool = pool ?? _raw;
     final accMap = await _loadEmbyAccountsMap();
     final a = accMap[e.embyAccountId!];
     if (a == null) {
@@ -4997,7 +5861,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       // ✅ 可选：点击图片时把“所在收藏夹”也记入历史（设置可关闭）。
       await _recordFolderHistoryIfEnabled();
       // 从当前目录 _raw 里抽取所有图片（同账号、非目录、typeKey=emby_image）
-      final items = _raw
+      final items = playlistPool
           .where((x) =>
               x.embyAccountId == e.embyAccountId &&
               !x.isDir &&
@@ -5044,7 +5908,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
     // ✅ 视频：播放（从当前列表中抽取同账号的可播放项形成播放列表）
     try {
-      final items = _raw
+      final items = playlistPool
           .where((x) =>
               x.embyAccountId == e.embyAccountId &&
               !x.isDir &&
@@ -5610,11 +6474,16 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
   String _entrySubtitle(_Entry e, {required bool includeSize}) {
     final kind = _entryKindLabel(e);
-    if (!includeSize || e.isDir || e.size <= 0) return kind;
-    return '$kind · ${_fmtSize(e.size)}';
+    final sizePart = (!includeSize || e.isDir || e.size <= 0)
+        ? kind
+        : '$kind · ${_fmtSize(e.size)}';
+    final showOrigin = _usingScopeSearch ? (e.origin ?? '').trim() : '';
+    if (showOrigin.isEmpty) return sizePart;
+    return '$sizePart · $showOrigin';
   }
 
-  Widget _listItem(_Entry e, List<String> imgs, List<String> vids) {
+  Widget _listItem(_Entry e, List<_Entry> visibleEntries, List<String> imgs,
+      List<String> vids) {
     if (e.isLoading) {
       return const Card(
         child: SizedBox(
@@ -5744,13 +6613,15 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           trailing: _selectionMode && selectable && !selected
               ? const Icon(Icons.radio_button_unchecked, size: 20)
               : null,
-          onTap: () => _onEntryTap(e, imgs: imgs, vids: vids),
+          onTap: () => _onEntryTap(e,
+              visibleEntries: visibleEntries, imgs: imgs, vids: vids),
         ),
       ),
     );
   }
 
-  Widget _cardItem(_Entry e, List<String> imgs, List<String> vids) {
+  Widget _cardItem(_Entry e, List<_Entry> visibleEntries, List<String> imgs,
+      List<String> vids) {
     final radius = BorderRadius.circular(14);
 
     if (e.isLoading) {
@@ -5838,7 +6709,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     return InkWell(
       onSecondaryTapDown: (d) => _ctxEntryMenu(e, d.globalPosition),
       onLongPress: () => _onEntryLongPress(e),
-      onTap: () => _onEntryTap(e, imgs: imgs, vids: vids),
+      onTap: () => _onEntryTap(e,
+          visibleEntries: visibleEntries, imgs: imgs, vids: vids),
       borderRadius: radius,
       child: Card(
         elevation: 1,

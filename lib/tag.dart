@@ -2740,7 +2740,7 @@ class _TagFilterHeader extends StatelessWidget {
           children: [
             Icon(active ? Icons.sell : Icons.sell_outlined, size: 18),
             const SizedBox(width: 6),
-            Text(active ? '多选Tag($selectedTagCount)' : '多选Tag(全部)'),
+            Text(active ? 'Tag($selectedTagCount)' : 'Tag选择'),
           ],
         ),
       ),

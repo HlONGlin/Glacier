@@ -76,6 +76,12 @@ class AppSettings {
   // --- 标签(Tag) ---
   static const String _kTagEnabled = '${_kPrefix}tag_enabled';
 
+  // --- 文件夹页搜索范围 ---
+  // 取值：currentDirectory/currentCollection/allCollections/singleCollection
+  static const String _kFolderSearchScope = '${_kPrefix}folder_search_scope';
+  static const String _kFolderSearchSingleCollectionId =
+      '${_kPrefix}folder_search_single_collection_id';
+
   static Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
 
   /// 字幕字号（默认 22）。
@@ -225,6 +231,48 @@ class AppSettings {
   static Future<void> setTagEnabled(bool v) async {
     final sp = await SharedPreferences.getInstance();
     await sp.setBool(_kTagEnabled, v);
+  }
+
+  static Future<String> getFolderSearchScope() async {
+    final sp = await SharedPreferences.getInstance();
+    final raw = (sp.getString(_kFolderSearchScope) ?? '').trim();
+    const allowed = <String>{
+      'currentDirectory',
+      'currentCollection',
+      'allCollections',
+      'singleCollection',
+    };
+    if (!allowed.contains(raw)) return 'currentCollection';
+    return raw;
+  }
+
+  static Future<void> setFolderSearchScope(String value) async {
+    final sp = await SharedPreferences.getInstance();
+    const allowed = <String>{
+      'currentDirectory',
+      'currentCollection',
+      'allCollections',
+      'singleCollection',
+    };
+    final v = allowed.contains(value) ? value : 'currentCollection';
+    await sp.setString(_kFolderSearchScope, v);
+  }
+
+  static Future<String?> getFolderSearchSingleCollectionId() async {
+    final sp = await SharedPreferences.getInstance();
+    final v = (sp.getString(_kFolderSearchSingleCollectionId) ?? '').trim();
+    if (v.isEmpty) return null;
+    return v;
+  }
+
+  static Future<void> setFolderSearchSingleCollectionId(String? id) async {
+    final sp = await SharedPreferences.getInstance();
+    final v = (id ?? '').trim();
+    if (v.isEmpty) {
+      await sp.remove(_kFolderSearchSingleCollectionId);
+      return;
+    }
+    await sp.setString(_kFolderSearchSingleCollectionId, v);
   }
 }
 

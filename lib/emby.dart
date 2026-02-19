@@ -959,6 +959,89 @@ class EmbyClient {
     }
   }
 
+  /// Emby 关键词搜索（服务端递归检索）。
+  ///
+  /// 说明：
+  /// - `parentId` 为空时，在当前用户可见范围内搜索；
+  /// - `parentId` 非空时，限定在该目录（可递归）搜索；
+  /// - 返回值统一复用 EmbyItem，便于页面侧直接映射成目录/媒体条目。
+  Future<List<EmbyItem>> searchItems({
+    required String query,
+    String? parentId,
+    bool recursive = true,
+    int limit = 300,
+  }) async {
+    await validateToken();
+    final q = query.trim();
+    if (q.isEmpty) return const <EmbyItem>[];
+
+    Future<List<EmbyItem>> _fetch({
+      required String fields,
+      String? includeItemTypes,
+    }) async {
+      final qp = <String, String>{
+        'SearchTerm': q,
+        'Recursive': recursive ? 'true' : 'false',
+        'Fields': fields,
+        'SortBy': 'SortName',
+        'SortOrder': 'Ascending',
+        'Limit': '${limit.clamp(1, 600)}',
+      };
+      final include = (includeItemTypes ?? '').trim();
+      if (include.isNotEmpty) {
+        qp['IncludeItemTypes'] = include;
+      }
+      final pid = (parentId ?? '').trim();
+      if (pid.isNotEmpty) qp['ParentId'] = pid;
+
+      final uri = _u('/Users/${account.userId}/Items', qp);
+      final data = await _getJson(uri);
+      final items =
+          (data['Items'] is List) ? (data['Items'] as List) : <dynamic>[];
+      return items
+          .whereType<Map>()
+          .map((m) => EmbyItem.fromJson(m.cast<String, dynamic>()))
+          .toList(growable: false);
+    }
+
+    const full =
+        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,MediaSources';
+    const fallback =
+        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified';
+
+    // 兼容不同 Emby 版本：
+    // - 第一档：目录+常见媒体类型（结果更聚焦）；
+    // - 第二档：仅常见目录/视频/图片类型（避免个别版本对某些类型名敏感）；
+    // - 第三档：不传 IncludeItemTypes，交由服务端默认行为处理。
+    const includeTypesPrimary =
+        'Folder,CollectionFolder,UserView,Series,Season,BoxSet,Movie,Episode,Video,Photo,MusicVideo';
+    const includeTypesCompat =
+        'Folder,Series,Season,BoxSet,Movie,Episode,Video,Photo,MusicVideo';
+
+    Future<List<EmbyItem>> _fetchWithCompat(String fields) async {
+      Object? lastErr;
+      for (final types in <String?>[
+        includeTypesPrimary,
+        includeTypesCompat,
+        null,
+      ]) {
+        try {
+          return await _fetch(fields: fields, includeItemTypes: types);
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (lastErr != null) throw lastErr;
+      return const <EmbyItem>[];
+    }
+
+    try {
+      return await _fetchWithCompat(full);
+    } catch (_) {
+      return await _fetchWithCompat(fallback);
+    }
+  }
+
   /// ✅ Emby 子目录封面兜底（按你测试的 Emby 行为：递归取“第一张图片”）
   /// - 先在该目录下（含所有子子目录）找第一张 Photo
   /// - 找到后返回该 Photo 的 Primary 图片 URL
