@@ -50,6 +50,9 @@ class AppSettings {
   // 播放器目录功能开关（默认开启）。
   static const String _kVideoCatalogEnabled =
       '${_kPrefix}video_catalog_enabled';
+  // 播放器“上下集”按钮开关（默认开启）。
+  static const String _kVideoEpisodeNavButtonsEnabled =
+      '${_kPrefix}video_episode_nav_buttons_enabled';
 
   // --- 图片查看器 ---
   // 说明：是否允许使用音量键翻页（上一张/下一张）。
@@ -57,11 +60,16 @@ class AppSettings {
   // - 开启后：音量+ 下一张，音量- 上一张。
   static const String _kImageVolumeKeyPaging =
       '${_kPrefix}image_volume_key_paging';
+  // 图片查看器退出后，列表是否自动定位到最后浏览的图片（默认开启）。
+  static const String _kImageExitLocateEnabled =
+      '${_kPrefix}image_exit_locate_enabled';
 
   // --- 收藏夹 ---
   static const String _kAutoEnterLastFavorite =
       '${_kPrefix}auto_enter_last_favorite';
   static const String _kLastFavoriteId = '${_kPrefix}last_favorite_id';
+  static const String _kFavoritePerDirectoryDisplaySettingsEnabled =
+      '${_kPrefix}favorite_per_directory_display_settings_enabled';
 
   // --- 历史记录 ---
   static const String _kHistoryEnabled = '${_kPrefix}history_enabled';
@@ -172,6 +180,17 @@ class AppSettings {
     await sp.setBool(_kVideoCatalogEnabled, v);
   }
 
+  /// 播放器“上下集”按钮开关（默认 true）。
+  static Future<bool> getVideoEpisodeNavButtonsEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kVideoEpisodeNavButtonsEnabled) ?? true;
+  }
+
+  static Future<void> setVideoEpisodeNavButtonsEnabled(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kVideoEpisodeNavButtonsEnabled, v);
+  }
+
   /// 图片查看器：是否启用“音量键翻页”（默认关闭）。
   static Future<bool> getImageVolumeKeyPaging() async {
     final sp = await _sp();
@@ -181,6 +200,17 @@ class AppSettings {
   static Future<void> setImageVolumeKeyPaging(bool v) async {
     final sp = await _sp();
     await sp.setBool(_kImageVolumeKeyPaging, v);
+  }
+
+  /// 图片查看器：退出后是否自动定位到最后浏览图片（默认开启）。
+  static Future<bool> getImageExitLocateEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kImageExitLocateEnabled) ?? true;
+  }
+
+  static Future<void> setImageExitLocateEnabled(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kImageExitLocateEnabled, v);
   }
 
   /// 是否自动进入上次选择的收藏夹（默认关闭）。
@@ -208,6 +238,18 @@ class AppSettings {
       return;
     }
     await sp.setString(_kLastFavoriteId, id.trim());
+  }
+
+  /// 收藏夹：每个目录独立记忆视图/排序/升降序（默认关闭）。
+  static Future<bool> getFavoritePerDirectoryDisplaySettingsEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kFavoritePerDirectoryDisplaySettingsEnabled) ?? false;
+  }
+
+  static Future<void> setFavoritePerDirectoryDisplaySettingsEnabled(
+      bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kFavoritePerDirectoryDisplaySettingsEnabled, v);
   }
 
   /// 历史记录开关（默认开启）。

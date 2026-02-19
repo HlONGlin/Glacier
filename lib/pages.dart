@@ -1878,9 +1878,13 @@ class _SettingsPageState extends State<SettingsPage> {
   double _longPressSpeedMultiplier = 2.0;
   bool _videoMiniProgressWhenHidden = true;
   bool _videoCatalogEnabled = true;
+  bool _videoEpisodeNavButtonsEnabled = true;
+  bool _imageVolumeKeyPaging = false;
+  bool _imageExitLocateEnabled = true;
 
   // 收藏夹
   bool _autoEnterLastFavorite = false;
+  bool _favoritePerDirectoryDisplaySettingsEnabled = false;
 
   // 历史
   bool _historyEnabled = true;
@@ -1902,7 +1906,13 @@ class _SettingsPageState extends State<SettingsPage> {
       final lpMul = await AppSettings.getLongPressSpeedMultiplier();
       final miniProgress = await AppSettings.getVideoMiniProgressWhenHidden();
       final catalogEnabled = await AppSettings.getVideoCatalogEnabled();
+      final episodeNavEnabled =
+          await AppSettings.getVideoEpisodeNavButtonsEnabled();
+      final imageVolumePaging = await AppSettings.getImageVolumeKeyPaging();
+      final imageExitLocate = await AppSettings.getImageExitLocateEnabled();
       final autoFav = await AppSettings.getAutoEnterLastFavorite();
+      final perDirDisplay =
+          await AppSettings.getFavoritePerDirectoryDisplaySettingsEnabled();
       final his = await AppSettings.getHistoryEnabled();
       final tagEnabled = await AppSettings.getTagEnabled();
 
@@ -1914,7 +1924,11 @@ class _SettingsPageState extends State<SettingsPage> {
         _longPressSpeedMultiplier = lpMul;
         _videoMiniProgressWhenHidden = miniProgress;
         _videoCatalogEnabled = catalogEnabled;
+        _videoEpisodeNavButtonsEnabled = episodeNavEnabled;
+        _imageVolumeKeyPaging = imageVolumePaging;
+        _imageExitLocateEnabled = imageExitLocate;
         _autoEnterLastFavorite = autoFav;
+        _favoritePerDirectoryDisplaySettingsEnabled = perDirDisplay;
         _historyEnabled = his;
         _tagEnabled = tagEnabled;
         _loading = false;
@@ -2007,12 +2021,42 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('启用播放器目录功能'),
-              subtitle: const Text('关闭后隐藏目录入口，并禁用 L/Ctrl+L 与右上热区'),
+              title: const Text('显示目录按钮'),
+              subtitle: const Text('关闭后隐藏播放器目录入口，并禁用 L/Ctrl+L 与右上热区'),
               value: _videoCatalogEnabled,
               onChanged: (v) async {
                 setState(() => _videoCatalogEnabled = v);
                 await AppSettings.setVideoCatalogEnabled(v);
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('显示上下集按钮'),
+              subtitle: const Text('关闭后隐藏播放器底部的上一集/下一集按钮'),
+              value: _videoEpisodeNavButtonsEnabled,
+              onChanged: (v) async {
+                setState(() => _videoEpisodeNavButtonsEnabled = v);
+                await AppSettings.setVideoEpisodeNavButtonsEnabled(v);
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('图片音量键翻页'),
+              subtitle: const Text('开启后：音量+ 下一张，音量- 上一张（移动端可能受系统限制）'),
+              value: _imageVolumeKeyPaging,
+              onChanged: (v) async {
+                setState(() => _imageVolumeKeyPaging = v);
+                await AppSettings.setImageVolumeKeyPaging(v);
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('退出图片后定位到最后浏览项'),
+              subtitle: const Text('从图片查看器返回时，列表自动跳到你最后浏览的那张图'),
+              value: _imageExitLocateEnabled,
+              onChanged: (v) async {
+                setState(() => _imageExitLocateEnabled = v);
+                await AppSettings.setImageExitLocateEnabled(v);
               },
             ),
             const SizedBox(height: 10),
@@ -2029,6 +2073,17 @@ class _SettingsPageState extends State<SettingsPage> {
                   // 关闭时清理 last id，避免用户误以为还会跳转。
                   await AppSettings.setLastFavoriteId(null);
                 }
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('按目录独立记忆视图与排序'),
+              subtitle: const Text('开启后每个目录独立保存视图模式、排序方式和升降序'),
+              value: _favoritePerDirectoryDisplaySettingsEnabled,
+              onChanged: (v) async {
+                setState(() => _favoritePerDirectoryDisplaySettingsEnabled = v);
+                await AppSettings.setFavoritePerDirectoryDisplaySettingsEnabled(
+                    v);
               },
             ),
             const SizedBox(height: 10),
@@ -2647,6 +2702,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
   bool _tagEnabled = true; // 由设置控制，避免用户不需要时被打扰
   bool _selectionMode = false;
   final Set<String> _selectedEntryKeys = <String>{};
+  final Map<String, GlobalKey> _entryAnchorKeys = <String, GlobalKey>{};
 
   TagKind _tagKindForEntry(_Entry e) {
     if (e.isDir) return TagKind.other;
@@ -2737,6 +2793,180 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       );
     }
     return (e.localPath ?? '').trim();
+  }
+
+  String _imageSourceKeyForEntry(_Entry e) => _entrySelectionKeyRaw(e);
+
+  String _embyImageSourceKey(String accountId, String itemId) {
+    return tagKeyForEntry(
+      isWebDav: false,
+      isEmby: true,
+      localPath: null,
+      wdAccountId: null,
+      wdRelPath: null,
+      wdHref: null,
+      embyAccountId: accountId,
+      embyItemId: itemId,
+    );
+  }
+
+  String _webDavImageSourceKey({
+    required String accountId,
+    required String relPath,
+    String? href,
+  }) {
+    return tagKeyForEntry(
+      isWebDav: true,
+      isEmby: false,
+      localPath: null,
+      wdAccountId: accountId,
+      wdRelPath: relPath,
+      wdHref: href,
+      embyAccountId: null,
+      embyItemId: null,
+    );
+  }
+
+  GlobalKey _entryAnchorKeyForSource(String sourceKey) {
+    return _entryAnchorKeys.putIfAbsent(
+      sourceKey,
+      () => GlobalKey(debugLabel: 'entry_anchor_${_entryAnchorKeys.length}'),
+    );
+  }
+
+  Widget _wrapWithEntryAnchor(_Entry e, Widget child) {
+    final sourceKey = _imageSourceKeyForEntry(e).trim();
+    if (sourceKey.isEmpty) return child;
+    return KeyedSubtree(key: _entryAnchorKeyForSource(sourceKey), child: child);
+  }
+
+  void _syncEntryAnchorKeys(List<_Entry> visibleEntries) {
+    final aliveKeys = visibleEntries
+        .map(_imageSourceKeyForEntry)
+        .where((k) => k.trim().isNotEmpty)
+        .toSet();
+    _entryAnchorKeys.removeWhere((k, _) => !aliveKeys.contains(k));
+  }
+
+  int _gridCrossAxisCount({
+    required double viewportWidth,
+    required double horizontalPadding,
+    required double maxCrossAxisExtent,
+    required double crossAxisSpacing,
+  }) {
+    final usableWidth =
+        (viewportWidth - horizontalPadding * 2).clamp(1.0, 20000.0);
+    int count = ((usableWidth + crossAxisSpacing) /
+            (maxCrossAxisExtent + crossAxisSpacing))
+        .floor();
+    if (count < 1) count = 1;
+    return count;
+  }
+
+  double _estimateScrollOffsetForIndex(int index) {
+    final viewportWidth = MediaQuery.of(context).size.width;
+    if (index <= 0) return 0;
+    switch (_active.viewMode) {
+      case ViewMode.list:
+        const topPadding = 8.0;
+        const estimatedItemExtent = 88.0;
+        return topPadding + index * estimatedItemExtent;
+      case ViewMode.gallery:
+        const horizontalPadding = 12.0;
+        const maxCrossAxisExtent = 420.0;
+        const crossAxisSpacing = 12.0;
+        const mainAxisSpacing = 12.0;
+        const childAspectRatio = 1.45;
+        final crossAxisCount = _gridCrossAxisCount(
+          viewportWidth: viewportWidth,
+          horizontalPadding: horizontalPadding,
+          maxCrossAxisExtent: maxCrossAxisExtent,
+          crossAxisSpacing: crossAxisSpacing,
+        );
+        final usableWidth =
+            (viewportWidth - horizontalPadding * 2).clamp(1.0, 20000.0);
+        final tileWidth =
+            (usableWidth - (crossAxisCount - 1) * crossAxisSpacing) /
+                crossAxisCount;
+        final tileHeight = tileWidth / childAspectRatio;
+        final row = index ~/ crossAxisCount;
+        return horizontalPadding + row * (tileHeight + mainAxisSpacing);
+      case ViewMode.grid:
+        const horizontalPadding = 12.0;
+        const maxCrossAxisExtent = 220.0;
+        const crossAxisSpacing = 10.0;
+        const mainAxisSpacing = 10.0;
+        const childAspectRatio = 0.95;
+        final crossAxisCount = _gridCrossAxisCount(
+          viewportWidth: viewportWidth,
+          horizontalPadding: horizontalPadding,
+          maxCrossAxisExtent: maxCrossAxisExtent,
+          crossAxisSpacing: crossAxisSpacing,
+        );
+        final usableWidth =
+            (viewportWidth - horizontalPadding * 2).clamp(1.0, 20000.0);
+        final tileWidth =
+            (usableWidth - (crossAxisCount - 1) * crossAxisSpacing) /
+                crossAxisCount;
+        final tileHeight = tileWidth / childAspectRatio;
+        final row = index ~/ crossAxisCount;
+        return horizontalPadding + row * (tileHeight + mainAxisSpacing);
+    }
+  }
+
+  Future<void> _maybeLocateAfterImageViewer(String? sourceKey) async {
+    final key = (sourceKey ?? '').trim();
+    if (key.isEmpty || !mounted) return;
+    bool enabled = true;
+    try {
+      enabled = await AppSettings.getImageExitLocateEnabled();
+    } catch (_) {
+      enabled = true;
+    }
+    if (!enabled || !mounted) return;
+    final currentVisible = _shown();
+    final index = currentVisible
+        .indexWhere((entry) => _imageSourceKeyForEntry(entry) == key);
+    if (index < 0) return;
+    if (!_scrollController.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        // ignore: unawaited_futures
+        _maybeLocateAfterImageViewer(key);
+      });
+      return;
+    }
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    final roughOffset =
+        _estimateScrollOffsetForIndex(index).clamp(0.0, maxExtent);
+    try {
+      _scrollController.jumpTo(roughOffset);
+    } catch (_) {
+      // ignored
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final anchorCtx = _entryAnchorKeys[key]?.currentContext;
+      if (anchorCtx != null) {
+        Scrollable.ensureVisible(
+          anchorCtx,
+          alignment: 0.18,
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+        );
+        return;
+      }
+      if (!_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      final ratio = currentVisible.length <= 1
+          ? 0.0
+          : (index / (currentVisible.length - 1)).clamp(0.0, 1.0);
+      final fallback = (max * ratio).clamp(0.0, max);
+      _scrollController.animateTo(
+        fallback,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   bool _isEntrySelected(_Entry e) =>
@@ -3635,24 +3865,34 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     if (_isImg(path)) {
       if (_usingScopeSearch) {
         if (!mounted) return;
-        await Navigator.push(
+        final source = await Navigator.push<String>(
           context,
           MaterialPageRoute(
-              builder: (_) =>
-                  ImageViewerPage(imagePaths: <String>[path], initialIndex: 0)),
+            builder: (_) => ImageViewerPage(
+              imagePaths: <String>[path],
+              initialIndex: 0,
+              sourceKeys: <String>[_imageSourceKeyForEntry(e)],
+            ),
+          ),
         );
+        await _maybeLocateAfterImageViewer(source);
         return;
       }
       final idx = imgs.indexOf(path);
       if (idx < 0) return;
       await _recordFolderHistoryIfEnabled();
       if (!mounted) return;
-      await Navigator.push(
+      final source = await Navigator.push<String>(
         context,
         MaterialPageRoute(
-            builder: (_) =>
-                ImageViewerPage(imagePaths: imgs, initialIndex: idx)),
+          builder: (_) => ImageViewerPage(
+            imagePaths: imgs,
+            initialIndex: idx,
+            sourceKeys: imgs,
+          ),
+        ),
       );
+      await _maybeLocateAfterImageViewer(source);
       return;
     }
     if (_isVid(path)) {
@@ -5005,9 +5245,21 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         final paths = imgs
             .map((x) => _buildWebDavSource(a.id, x.relPath, isDir: false))
             .toList(growable: false);
+        final sourceKeys = imgs
+            .map((x) => _webDavImageSourceKey(
+                  accountId: a.id,
+                  relPath: x.relPath,
+                  href: client.resolveRel(x.relPath).toString(),
+                ))
+            .toList(growable: false);
         final idx = imgs.indexWhere((x) => x.relPath == relFile);
+        final fallbackSourceKey = _webDavImageSourceKey(
+          accountId: a.id,
+          relPath: relFile,
+          href: client.resolveRel(relFile).toString(),
+        );
         if (!mounted) return;
-        await Navigator.push(
+        final source = await Navigator.push<String>(
           context,
           MaterialPageRoute(
             builder: (_) => ImageViewerPage(
@@ -5015,9 +5267,12 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                   ? [_buildWebDavSource(a.id, relFile, isDir: false)]
                   : paths,
               initialIndex: (idx < 0) ? 0 : idx,
+              sourceKeys:
+                  sourceKeys.isEmpty ? <String>[fallbackSourceKey] : sourceKeys,
             ),
           ),
         );
+        await _maybeLocateAfterImageViewer(source);
         return;
       }
 
@@ -5770,13 +6025,28 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
   }
 
   Widget _buildByMode(List<_Entry> l, List<String> imgs, List<String> vids) {
+    _syncEntryAnchorKeys(l);
+    final usedAnchorKeys = <String>{};
+
+    Widget itemWithAnchor(_Entry entry, Widget child) {
+      final sourceKey = _imageSourceKeyForEntry(entry).trim();
+      if (sourceKey.isEmpty || usedAnchorKeys.contains(sourceKey)) {
+        return child;
+      }
+      usedAnchorKeys.add(sourceKey);
+      return _wrapWithEntryAnchor(entry, child);
+    }
+
     switch (_active.viewMode) {
       case ViewMode.list:
         return ListView.builder(
           controller: _scrollController, // 🔥 3. 绑定控制器
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           itemCount: l.length,
-          itemBuilder: (_, i) => _listItem(l[i], l, imgs, vids),
+          itemBuilder: (_, i) {
+            final entry = l[i];
+            return itemWithAnchor(entry, _listItem(entry, l, imgs, vids));
+          },
         );
       case ViewMode.gallery:
         return GridView.builder(
@@ -5788,7 +6058,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               crossAxisSpacing: 12,
               childAspectRatio: 1.45),
           itemCount: l.length,
-          itemBuilder: (_, i) => _cardItem(l[i], l, imgs, vids),
+          itemBuilder: (_, i) {
+            final entry = l[i];
+            return itemWithAnchor(entry, _cardItem(entry, l, imgs, vids));
+          },
         );
       case ViewMode.grid:
         return GridView.builder(
@@ -5800,7 +6073,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               crossAxisSpacing: 10,
               childAspectRatio: 0.95),
           itemCount: l.length,
-          itemBuilder: (_, i) => _cardItem(l[i], l, imgs, vids),
+          itemBuilder: (_, i) {
+            final entry = l[i];
+            return itemWithAnchor(entry, _cardItem(entry, l, imgs, vids));
+          },
         );
     }
   }
@@ -5878,31 +6154,44 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         return client.originalImageUrl(id);
       }
 
-      final single = imgUrlFor(e);
-      final urls = items.isEmpty
-          ? <String>[if (single.isNotEmpty) single]
-          : items
-              .map(imgUrlFor)
-              .where((u) => u.trim().isNotEmpty)
-              .toList(growable: false);
+      final single = imgUrlFor(e).trim();
+      final currentItemId = (e.embyItemId ?? '').trim();
+      final currentSourceKey = _embyImageSourceKey(a.id, currentItemId);
+      final urls = <String>[];
+      final sourceKeys = <String>[];
+      if (items.isEmpty) {
+        if (single.isNotEmpty) {
+          urls.add(single);
+          sourceKeys.add(currentSourceKey);
+        }
+      } else {
+        for (final item in items) {
+          final url = imgUrlFor(item).trim();
+          final itemId = (item.embyItemId ?? '').trim();
+          if (url.isEmpty || itemId.isEmpty) continue;
+          urls.add(url);
+          sourceKeys.add(_embyImageSourceKey(a.id, itemId));
+        }
+      }
 
-      // 定位到当前图片
-      final idx = items.isEmpty
-          ? 0
-          : items.indexWhere((x) => x.embyItemId == e.embyItemId);
-      final fallbackSingle =
-          single.isNotEmpty ? single : client.originalImageUrl(e.embyItemId!);
+      final idx = sourceKeys.indexOf(currentSourceKey);
+      final fallbackSingle = single.isNotEmpty
+          ? single
+          : client.originalImageUrl(e.embyItemId!).trim();
 
       if (!mounted) return;
-      await Navigator.push(
+      final source = await Navigator.push<String>(
         context,
         MaterialPageRoute(
           builder: (_) => ImageViewerPage(
             imagePaths: urls.isEmpty ? <String>[fallbackSingle] : urls,
             initialIndex: (idx < 0) ? 0 : idx,
+            sourceKeys:
+                sourceKeys.isEmpty ? <String>[currentSourceKey] : sourceKeys,
           ),
         ),
       );
+      await _maybeLocateAfterImageViewer(source);
       return;
     }
 

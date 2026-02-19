@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:video_player/video_player.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'tag.dart';
@@ -134,7 +135,13 @@ class VideoPlayerPage extends StatefulWidget {
   });
 
   @override
-  State<VideoPlayerPage> createState() => _VideoPlayerPageState();
+  State<VideoPlayerPage> createState() => _createVideoPlayerPageState();
+}
+
+State<VideoPlayerPage> _createVideoPlayerPageState() {
+  final isMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  if (isMobile) return _MobileVideoPlayerPageState();
+  return _VideoPlayerPageState();
 }
 
 class _VideoPlayerPageState extends State<VideoPlayerPage> {
@@ -390,7 +397,10 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   }
 
   Future<Media?> _createEmbyMediaAsync(
-      String source, Map<String, EmbyAccount> accMap) async {
+    String source,
+    Map<String, EmbyAccount> accMap, {
+    bool prefetchPlaybackInfo = false,
+  }) async {
     try {
       // source: emby://<accId>/item:<itemId>?name=xxx
       final u = Uri.parse(source);
@@ -406,6 +416,20 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
       // ✅ name 仅用于提升可读性；缺失也不影响实际播放。
       final name = (u.queryParameters['name'] ?? '').trim();
+      // 超长 name 只会让 URL 更长，并不影响真实播放；超过阈值时不再带入 streamUrl。
+      final streamName =
+          name.isNotEmpty && name.runes.length <= 96 ? name : null;
+      String? mediaSourceId;
+      if (prefetchPlaybackInfo) {
+        try {
+          mediaSourceId = (await client
+                  .playbackInfo(itemId)
+                  .timeout(const Duration(seconds: 2), onTimeout: () => null))
+              ?.mediaSourceId;
+        } catch (_) {
+          mediaSourceId = null;
+        }
+      }
       // ✅ 与 Emby 播放上报保持同一个 DeviceId。
       // 设计原因：
       // - Emby 以“设备”维度管理会话；
@@ -414,8 +438,9 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       final deviceId = await EmbyStore.getOrCreateDeviceId();
       final url = client.streamUrl(
         itemId,
-        name: name.isEmpty ? null : name,
+        name: streamName,
         deviceId: deviceId,
+        mediaSourceId: mediaSourceId,
       );
       return Media(url);
     } catch (e) {
@@ -479,7 +504,11 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
           out.add(Media('error://load_failed_placeholder_$i'));
         }
       } else if (_isEmbySource(s)) {
-        final media = await _createEmbyMediaAsync(s, embyAccMap);
+        final media = await _createEmbyMediaAsync(
+          s,
+          embyAccMap,
+          prefetchPlaybackInfo: i == _index,
+        );
         if (media != null) {
           out.add(media);
         } else {
@@ -602,11 +631,15 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       final mpv = _player.platform as NativePlayer;
       mpv.setProperty('cache', 'yes');
       mpv.setProperty('cache-on-disk', 'no');
-      // ✅ Emby/HTTP 流在部分场景下会出现“卡一下”的现象。
-      // 适当增加缓存与预读窗口，能改善起播/拖动后的短暂卡顿。
-      mpv.setProperty('cache-secs', '30');
-      mpv.setProperty('demuxer-max-bytes', '${64 * 1024 * 1024}');
-      mpv.setProperty('demuxer-max-back-bytes', '${16 * 1024 * 1024}');
+      // ✅ Emby/HTTP 里有一类“稀疏交错”的 mp4（音视频块相距很远），
+      // 如果 back-cache 太小，会在两个远距离 Range 间反复跳读，表现为
+      // 服务端日志里大量 `206 + client disconnected`。
+      //
+      // 这里提高 demuxer 前/回读上限，尽量把“远距离回读”留在本地缓存内完成，
+      // 减少高频断开重连。注意：这是上限，不是一次性常驻分配。
+      mpv.setProperty('cache-secs', '45');
+      mpv.setProperty('demuxer-max-bytes', '${192 * 1024 * 1024}');
+      mpv.setProperty('demuxer-max-back-bytes', '${128 * 1024 * 1024}');
       mpv.setProperty('demuxer-readahead-secs', '120');
       mpv.setProperty('network-timeout', '60');
       // cache-pause 会在缓存不足时“停住画面”，体感像卡顿；这里关闭更像主流播放器。
@@ -4284,5 +4317,2179 @@ class _FullWidthSliderTrackShape extends RoundedRectSliderTrackShape {
     final trackTop = offset.dy + (parentBox.size.height - trackHeight) / 2;
     final trackWidth = parentBox.size.width;
     return Rect.fromLTWH(trackLeft, trackTop, trackWidth, trackHeight);
+  }
+}
+
+class _MobileResolvedSource {
+  final Uri? networkUri;
+  final String? localPath;
+  final Map<String, String> headers;
+  final String title;
+
+  const _MobileResolvedSource.network(
+    this.networkUri, {
+    required this.title,
+    this.headers = const <String, String>{},
+  }) : localPath = null;
+
+  const _MobileResolvedSource.local(
+    this.localPath, {
+    required this.title,
+  })  : networkUri = null,
+        headers = const <String, String>{};
+
+  bool get isLocal => localPath != null && localPath!.trim().isNotEmpty;
+}
+
+class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
+    with WidgetsBindingObserver {
+  late final List<String> _sources;
+  int _index = 0;
+
+  VideoPlayerController? _controller;
+  int _openSeq = 0;
+  bool _opening = false;
+  String? _error;
+  String _title = '视频播放';
+
+  bool _controlsVisible = true;
+  Timer? _hideTimer;
+  bool _draggingSeek = false;
+  double _dragSeekMs = 0;
+  bool _endHandled = false;
+  double _rate = 1.0;
+  double _volume = 100.0;
+  bool _autoNextAfterEnd = false;
+  bool _longPressSpeedEnabled = true;
+  double _longPressSpeedMultiplier = 2.0;
+  int _doubleTapSeekSeconds = 10;
+  double _subtitleFontSize = 22.0;
+  double _subtitleBottomOffset = 36.0;
+  bool _showMiniProgressWhenHidden = true;
+  bool _videoCatalogEnabled = true;
+  bool _videoEpisodeNavButtonsEnabled = true;
+  bool _isScreenLocked = false;
+  bool _lockButtonVisible = true;
+  double _brightness = 1.0;
+  bool _autoRotateEnabled = true;
+  StreamSubscription<NativeDeviceOrientation>? _nativeOriSub;
+  NativeDeviceOrientation _appliedNativeOri = NativeDeviceOrientation.unknown;
+  NativeDeviceOrientation? _lastOriCandidate;
+  int _oriStableCount = 0;
+  DateTime _lastOriApplyAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool _gestureActive = false;
+  String _gestureType = '';
+  String _gestureText = '';
+  IconData? _gestureIcon;
+  Timer? _gestureHideTimer;
+  Timer? _lockButtonHideTimer;
+  Offset? _lastDoubleTapPos;
+  Duration _dragStartPos = Duration.zero;
+  Duration _dragTargetPos = Duration.zero;
+  double? _rateBeforeLongPress;
+
+  static const int _historyMinPlayMs = 800;
+  int _historyLastCommitAt = 0;
+  String _historyLastCommitPath = '';
+  String? _historyArmedPath;
+  bool _historyArmed = false;
+
+  Map<String, Map<String, String>>? _webDavAccounts;
+  Map<String, EmbyAccount>? _embyAccounts;
+  Future<Map<String, EmbyAccount>>? _embyAccountMapFuture;
+  _EmbyPlaybackSession? _embyPlayback;
+  Timer? _embyProgressTimer;
+  Future<void> _embyReportQueue = Future.value();
+  DateTime _embyLastInteractiveReportAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
+  List<EmbySubtitleTrack> _embySubtitleCandidates = <EmbySubtitleTrack>[];
+  EmbySubtitleTrack? _embySubtitleSelected;
+  List<String> _localSubtitleCandidates = <String>[];
+  String? _localSubtitleSelected;
+  String? _lastAutoSubtitleKey;
+
+  bool get _hasPlaylist => _sources.isNotEmpty;
+  String get _currentPath => _hasPlaylist ? _sources[_index] : '';
+  bool get _canPrev => _index > 0;
+  bool get _canNext => _index < _sources.length - 1;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _sources = List<String>.from(widget.videoPaths);
+    if (_sources.isNotEmpty) {
+      _index = widget.initialIndex.clamp(0, _sources.length - 1);
+    }
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _startAutoRotateIfMobile();
+    unawaited(_loadMobileSettings());
+    unawaited(_openCurrent(autoPlay: true));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_controller?.pause());
+      unawaited(_reportEmbyProgress(eventName: 'Pause'));
+      unawaited(_flushHistoryProgress());
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_stopEmbyPlaybackCheckIns(reason: 'mobile dispose'));
+    unawaited(_flushHistoryProgress());
+    WidgetsBinding.instance.removeObserver(this);
+    _hideTimer?.cancel();
+    _gestureHideTimer?.cancel();
+    _lockButtonHideTimer?.cancel();
+    _stopAutoRotateIfAny();
+    final c = _controller;
+    _controller = null;
+    unawaited(c?.dispose());
+    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
+  }
+
+  Future<void> _loadMobileSettings() async {
+    try {
+      final subtitleFont = await AppSettings.getSubtitleFontSize();
+      final subtitleBottom = await AppSettings.getSubtitleBottomOffset();
+      final lpEnabled = await AppSettings.getLongPressSpeedEnabled();
+      final lpMul = await AppSettings.getLongPressSpeedMultiplier();
+      final autoNext = await AppSettings.getVideoAutoNextAfterEnd();
+      final miniProgress = await AppSettings.getVideoMiniProgressWhenHidden();
+      final catalogEnabled = await AppSettings.getVideoCatalogEnabled();
+      final episodeNavButtonsEnabled =
+          await AppSettings.getVideoEpisodeNavButtonsEnabled();
+      final dblTap = await AppSettings.getDoubleTapSeekSeconds();
+      if (!mounted) return;
+      setState(() {
+        _subtitleFontSize = subtitleFont.clamp(12.0, 48.0);
+        _subtitleBottomOffset = subtitleBottom.clamp(0.0, 200.0);
+        _longPressSpeedEnabled = lpEnabled;
+        _longPressSpeedMultiplier = lpMul;
+        _autoNextAfterEnd = autoNext;
+        _showMiniProgressWhenHidden = miniProgress;
+        _videoCatalogEnabled = catalogEnabled;
+        _videoEpisodeNavButtonsEnabled = episodeNavButtonsEnabled;
+        _doubleTapSeekSeconds = dblTap.clamp(5, 60);
+      });
+    } catch (_) {}
+  }
+
+  void _armHistoryRecordForCurrent() {
+    try {
+      final path = _currentPath.trim();
+      if (path.isEmpty) return;
+      _historyArmedPath = path;
+      _historyArmed = true;
+    } catch (_) {}
+  }
+
+  Future<void> _upsertHistoryForCurrent({int? positionMs}) async {
+    try {
+      final path = _currentPath.trim();
+      if (path.isEmpty) return;
+
+      var title = _displayName(path);
+      final ref = _parseEmbyRef(path);
+      if (ref != null) {
+        _embyAccounts ??= await _loadEmbyAccountMap();
+        final acc = _embyAccounts![ref.accountId];
+        if (acc != null) {
+          final remote = await EmbyClient(acc).getItemName(ref.itemId);
+          if (remote != null && remote.trim().isNotEmpty) {
+            title = remote.trim();
+          }
+        }
+      }
+
+      await AppHistory.upsert(path: path, title: title, positionMs: positionMs);
+    } catch (_) {}
+  }
+
+  void _tryCommitHistoryRecord({
+    required Duration position,
+    required bool playing,
+  }) {
+    if (!_historyArmed) return;
+    final path = (_historyArmedPath ?? '').trim();
+    if (path.isEmpty) {
+      _historyArmed = false;
+      _historyArmedPath = null;
+      return;
+    }
+    if (!playing) return;
+    if (position.inMilliseconds < _historyMinPlayMs) return;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_historyLastCommitPath == path && (now - _historyLastCommitAt) < 2500) {
+      _historyArmed = false;
+      _historyArmedPath = null;
+      return;
+    }
+    _historyLastCommitPath = path;
+    _historyLastCommitAt = now;
+    _historyArmed = false;
+    _historyArmedPath = null;
+    unawaited(_upsertHistoryForCurrent(positionMs: position.inMilliseconds));
+  }
+
+  Future<void> _flushHistoryProgress() async {
+    try {
+      final c = _controller;
+      if (c == null || !c.value.isInitialized) return;
+      final path = _currentPath.trim();
+      if (path.isEmpty) return;
+      await AppHistory.updateProgress(
+        path: path,
+        positionMs: c.value.position.inMilliseconds.clamp(0, 0x7fffffff),
+      );
+    } catch (_) {}
+  }
+
+  Future<int?> _loadResumePositionMs(String path) async {
+    try {
+      final p0 = path.trim();
+      if (p0.isEmpty) return null;
+      if (!await AppSettings.getHistoryEnabled()) return null;
+      final list = await AppHistory.load();
+      final hit = list.firstWhereOrNull(
+        (e) => (e['path'] ?? '').toString().trim() == p0,
+      );
+      if (hit == null) return null;
+      final raw = hit['pos'];
+      final ms = (raw is int) ? raw : int.tryParse('$raw');
+      if (ms == null || ms <= 0) return null;
+      return ms;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _startAutoRotateIfMobile() {
+    if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
+    _nativeOriSub?.cancel();
+    _nativeOriSub = NativeDeviceOrientationCommunicator()
+        .onOrientationChanged(useSensor: true)
+        .listen((ori) {
+      if (!_autoRotateEnabled || _isScreenLocked) return;
+      if (ori == NativeDeviceOrientation.unknown) return;
+
+      if (_lastOriCandidate == ori) {
+        _oriStableCount += 1;
+      } else {
+        _lastOriCandidate = ori;
+        _oriStableCount = 1;
+      }
+      if (_oriStableCount < 2) return;
+
+      final now = DateTime.now();
+      if (now.difference(_lastOriApplyAt).inMilliseconds < 450) return;
+      if (_appliedNativeOri == ori) return;
+      _appliedNativeOri = ori;
+      _lastOriApplyAt = now;
+      unawaited(_applyPreferredOrientationByOri(ori));
+    });
+  }
+
+  void _stopAutoRotateIfAny() {
+    _nativeOriSub?.cancel();
+    _nativeOriSub = null;
+  }
+
+  Future<void> _applyPreferredOrientationByOri(
+    NativeDeviceOrientation ori,
+  ) async {
+    try {
+      switch (ori) {
+        case NativeDeviceOrientation.landscapeLeft:
+        case NativeDeviceOrientation.landscapeRight:
+          await SystemChrome.setPreferredOrientations(const [
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ]);
+          break;
+        case NativeDeviceOrientation.portraitDown:
+        case NativeDeviceOrientation.portraitUp:
+        default:
+          await SystemChrome.setPreferredOrientations(const [
+            DeviceOrientation.portraitUp,
+            DeviceOrientation.portraitDown,
+          ]);
+          break;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _showResumeHint(int resumedMs, String sourcePath) async {
+    if (!mounted) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    if (resumedMs < 5000) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 4),
+        content: Text('从 ${_fmt(Duration(milliseconds: resumedMs))} 继续播放'),
+        action: SnackBarAction(
+          label: '从头播放',
+          onPressed: () {
+            final cur = _controller;
+            if (cur == null || !cur.value.isInitialized) return;
+            if (_currentPath.trim() != sourcePath.trim()) return;
+            unawaited(cur.seekTo(Duration.zero));
+            unawaited(
+              _reportEmbyProgress(eventName: 'TimeUpdate', interactive: true),
+            );
+            unawaited(
+                AppHistory.updateProgress(path: sourcePath, positionMs: 0));
+            _showGestureOverlay('从头播放', Icons.replay);
+          },
+        ),
+      ),
+    );
+  }
+
+  bool _isWebDavSource(String s) {
+    try {
+      final u = Uri.parse(s);
+      return u.scheme.toLowerCase() == 'webdav' && u.host.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _isEmbySource(String s) {
+    try {
+      final u = Uri.parse(s);
+      return u.scheme.toLowerCase() == 'emby' && u.host.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<Map<String, Map<String, String>>> _loadWebDavAccountCache() async {
+    final out = <String, Map<String, String>>{};
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('webdav_accounts_v1');
+      if (raw == null || raw.trim().isEmpty) return out;
+      final list = jsonDecode(raw);
+      if (list is! List) return out;
+      for (final e in list) {
+        if (e is! Map) continue;
+        final id = (e['id'] ?? '').toString().trim();
+        final baseUrl = (e['baseUrl'] ?? '').toString().trim();
+        final username = (e['username'] ?? '').toString();
+        final password = (e['password'] ?? '').toString();
+        if (id.isEmpty || baseUrl.isEmpty) continue;
+        out[id] = <String, String>{
+          'baseUrl': baseUrl,
+          'username': username,
+          'password': password,
+        };
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  Future<Map<String, EmbyAccount>> _loadEmbyAccountMap() async {
+    final out = <String, EmbyAccount>{};
+    try {
+      final list = await EmbyStore.load();
+      for (final a in list) {
+        final id = a.id.trim();
+        if (id.isEmpty) continue;
+        out[id] = a;
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  Future<Map<String, EmbyAccount>> _ensureEmbyAccounts() async {
+    final cached = _embyAccounts;
+    if (cached != null) return cached;
+    final loaded = await (_embyAccountMapFuture ??= _loadEmbyAccountMap());
+    _embyAccounts = loaded;
+    return loaded;
+  }
+
+  String _displayName(String source) {
+    if (_isEmbySource(source)) {
+      try {
+        final u = Uri.parse(source);
+        final name = (u.queryParameters['name'] ?? '').trim();
+        if (name.isNotEmpty) return safeDecodeUriComponent(name);
+      } catch (_) {}
+      return 'Emby 媒体';
+    }
+    if (_isWebDavSource(source)) {
+      try {
+        final u = Uri.parse(source);
+        final rel = u.path.startsWith('/') ? u.path.substring(1) : u.path;
+        final base = rel.split('/').isEmpty ? rel : rel.split('/').last;
+        return safeDecodeUriComponent(base);
+      } catch (_) {}
+    }
+    if (source.startsWith('http://') || source.startsWith('https://')) {
+      try {
+        final u = Uri.parse(source);
+        final qName = (u.queryParameters['name'] ?? '').trim();
+        if (qName.isNotEmpty) return safeDecodeUriComponent(qName);
+        if (u.pathSegments.isNotEmpty) {
+          return safeDecodeUriComponent(u.pathSegments.last);
+        }
+      } catch (_) {}
+    }
+    return p.basename(source);
+  }
+
+  _EmbyRef? _parseEmbyRef(String source) {
+    try {
+      final u = Uri.parse(source);
+      if (u.scheme.toLowerCase() != 'emby') return null;
+      final accountId = u.host.trim();
+      final raw = u.path.startsWith('/') ? u.path.substring(1) : u.path;
+      final m = RegExp(r'^item:([^/?#]+)').firstMatch(raw);
+      final itemId = (m?.group(1) ?? '').trim();
+      if (accountId.isEmpty || itemId.isEmpty) return null;
+      return _EmbyRef(accountId: accountId, itemId: itemId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<_MobileResolvedSource> _resolveEmbySource(String source) async {
+    final ref = _parseEmbyRef(source);
+    if (ref == null) {
+      throw Exception('不支持的 Emby 源：$source');
+    }
+
+    _embyAccounts ??= await _loadEmbyAccountMap();
+    final acc = _embyAccounts![ref.accountId];
+    if (acc == null) {
+      throw Exception('Emby 账号不存在：${ref.accountId}');
+    }
+
+    final client = EmbyClient(acc);
+    final name = (() {
+      try {
+        final u = Uri.parse(source);
+        return (u.queryParameters['name'] ?? '').trim();
+      } catch (_) {
+        return '';
+      }
+    })();
+    final streamName = name.isNotEmpty && name.runes.length <= 96 ? name : null;
+    String? mediaSourceId;
+    try {
+      mediaSourceId = (await client
+              .playbackInfo(ref.itemId)
+              .timeout(const Duration(seconds: 2), onTimeout: () => null))
+          ?.mediaSourceId;
+    } catch (_) {}
+
+    final deviceId = await EmbyStore.getOrCreateDeviceId();
+    final url = client.streamUrl(
+      ref.itemId,
+      name: streamName,
+      deviceId: deviceId,
+      mediaSourceId: mediaSourceId,
+    );
+    return _MobileResolvedSource.network(
+      Uri.parse(url),
+      title: _displayName(source),
+    );
+  }
+
+  Future<_MobileResolvedSource> _resolveWebDavSource(String source) async {
+    String accountId = '';
+    String relEncoded = '';
+    try {
+      final u = Uri.parse(source);
+      accountId = u.host.trim();
+      final segs = u.pathSegments.where((s) => s.isNotEmpty).toList();
+      relEncoded = segs.map(Uri.encodeComponent).join('/');
+    } catch (_) {
+      const prefix = 'webdav://';
+      if (!source.startsWith(prefix)) {
+        throw Exception('无效的 WebDAV 源：$source');
+      }
+      final raw = source.substring(prefix.length);
+      final slash = raw.indexOf('/');
+      if (slash == -1) throw Exception('无效的 WebDAV 源：$source');
+      accountId = raw.substring(0, slash).trim();
+      var relRaw = raw.substring(slash + 1);
+      relRaw = relRaw.split('?').first.split('#').first;
+      final segs = relRaw.split('/').where((s) => s.isNotEmpty).map((seg) {
+        var decoded = seg;
+        try {
+          decoded = safeDecodeUriComponent(seg);
+        } catch (_) {}
+        return Uri.encodeComponent(decoded);
+      }).toList();
+      relEncoded = segs.join('/');
+    }
+
+    _webDavAccounts ??= await _loadWebDavAccountCache();
+    final acc = _webDavAccounts![accountId];
+    if (acc == null) {
+      throw Exception('WebDAV 账号不存在：$accountId');
+    }
+    final baseUrl = (acc['baseUrl'] ?? '').trim();
+    final username = (acc['username'] ?? '');
+    final password = (acc['password'] ?? '');
+    if (baseUrl.isEmpty) {
+      throw Exception('WebDAV 账号缺少 baseUrl：$accountId');
+    }
+    final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
+    final resolvedUrl = Uri.parse(base).resolve(relEncoded);
+    final token = base64Encode(utf8.encode('$username:$password'));
+    return _MobileResolvedSource.network(
+      resolvedUrl,
+      title: _displayName(source),
+      headers: <String, String>{
+        HttpHeaders.authorizationHeader: 'Basic $token',
+      },
+    );
+  }
+
+  Future<_MobileResolvedSource> _resolveSource(String source) async {
+    if (_isEmbySource(source)) return _resolveEmbySource(source);
+    if (_isWebDavSource(source)) return _resolveWebDavSource(source);
+    if (source.startsWith('http://') || source.startsWith('https://')) {
+      return _MobileResolvedSource.network(
+        Uri.parse(source),
+        title: _displayName(source),
+      );
+    }
+    return _MobileResolvedSource.local(source, title: _displayName(source));
+  }
+
+  _EmbyStreamInfo? _parseEmbyStreamInfo(String url) {
+    try {
+      final u = Uri.parse(url);
+      final segs = u.pathSegments;
+      final i = segs.indexWhere((s) => s.toLowerCase() == 'videos');
+      if (i < 0 || i + 2 >= segs.length) return null;
+      final itemId = segs[i + 1].trim();
+      final tail = segs[i + 2].toLowerCase();
+      if (!tail.startsWith('stream')) return null;
+      if (itemId.isEmpty) return null;
+      return _EmbyStreamInfo(itemId: itemId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<EmbyAccount?> _resolveEmbyAccountForStream(String url) async {
+    try {
+      final u = Uri.parse(url);
+      final key = (u.queryParameters['api_key'] ??
+              u.queryParameters['X-Emby-Token'] ??
+              '')
+          .trim();
+      if (key.isEmpty) return null;
+      _embyAccounts ??= await _loadEmbyAccountMap();
+      for (final a in _embyAccounts!.values) {
+        if (a.apiKey.trim() == key) return a;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<_EmbyNowPlaying?> _resolveEmbyNowPlaying(String source) async {
+    final ref = _parseEmbyRef(source);
+    if (ref != null) {
+      _embyAccounts ??= await _loadEmbyAccountMap();
+      final acc = _embyAccounts![ref.accountId];
+      if (acc == null) return null;
+      return _EmbyNowPlaying(account: acc, itemId: ref.itemId);
+    }
+
+    final info = _parseEmbyStreamInfo(source);
+    if (info != null) {
+      final acc = await _resolveEmbyAccountForStream(source);
+      if (acc == null) return null;
+      return _EmbyNowPlaying(account: acc, itemId: info.itemId);
+    }
+    return null;
+  }
+
+  Future<String?> _buildEmbySubtitleUrl(EmbySubtitleTrack track) async {
+    final np = await _resolveEmbyNowPlaying(_currentPath);
+    if (np == null) return null;
+    final client = EmbyClient(np.account);
+    final deviceId = await EmbyStore.getOrCreateDeviceId();
+    return client.subtitleStreamUrl(
+      itemId: np.itemId,
+      mediaSourceId: track.mediaSourceId,
+      subtitleIndex: track.index,
+      format: 'srt',
+      deviceId: deviceId,
+    );
+  }
+
+  EmbySubtitleTrack? _pickBestEmbySubtitle(List<EmbySubtitleTrack> tracks) {
+    if (tracks.isEmpty) return null;
+    final def = tracks.firstWhereOrNull((t) => t.isDefault);
+    if (def != null) return def;
+
+    bool isZh(EmbySubtitleTrack t) {
+      final s =
+          ('${t.language ?? ''} ${t.title} ${t.codec ?? ''}').toLowerCase();
+      return s.contains('chi') ||
+          s.contains('zho') ||
+          s.contains('zh') ||
+          s.contains('中文') ||
+          s.contains('chinese') ||
+          s.contains('简体') ||
+          s.contains('繁体');
+    }
+
+    final zhExternal = tracks.firstWhereOrNull((t) => t.isExternal && isZh(t));
+    if (zhExternal != null) return zhExternal;
+
+    final anyExternal = tracks.firstWhereOrNull((t) => t.isExternal);
+    if (anyExternal != null) return anyExternal;
+
+    return tracks.first;
+  }
+
+  Future<void> _refreshEmbySubtitleCandidatesIfAny() async {
+    final np = await _resolveEmbyNowPlaying(_currentPath);
+    if (np == null) {
+      _embySubtitleCandidates = <EmbySubtitleTrack>[];
+      _embySubtitleSelected = null;
+      if (mounted) setState(() {});
+      return;
+    }
+    try {
+      final tracks = await EmbyClient(np.account).listSubtitleTracks(np.itemId);
+      _embySubtitleCandidates = tracks;
+      if (_embySubtitleSelected != null) {
+        final keep = tracks.firstWhereOrNull(
+          (t) =>
+              t.index == _embySubtitleSelected!.index &&
+              t.mediaSourceId == _embySubtitleSelected!.mediaSourceId,
+        );
+        _embySubtitleSelected = keep;
+      }
+      if (mounted) setState(() {});
+    } catch (_) {
+      _embySubtitleCandidates = <EmbySubtitleTrack>[];
+      _embySubtitleSelected = null;
+      if (mounted) setState(() {});
+    }
+  }
+
+  bool _looksLikeLocalFilePath(String s) {
+    if (s.startsWith('http://') || s.startsWith('https://')) return false;
+    if (_isWebDavSource(s) || _isEmbySource(s)) return false;
+    return true;
+  }
+
+  Future<void> _refreshLocalSubtitleCandidatesIfAny() async {
+    if (!_looksLikeLocalFilePath(_currentPath)) {
+      _localSubtitleCandidates = <String>[];
+      _localSubtitleSelected = null;
+      if (mounted) setState(() {});
+      return;
+    }
+    try {
+      final cur = File(_currentPath);
+      if (!await cur.exists()) {
+        _localSubtitleCandidates = <String>[];
+        _localSubtitleSelected = null;
+        if (mounted) setState(() {});
+        return;
+      }
+      final dir = cur.parent;
+      final entries = await dir
+          .list(followLinks: false)
+          .where((e) => e is File)
+          .cast<File>()
+          .toList();
+      final subs = <String>[];
+      for (final f in entries) {
+        final ext = p.extension(f.path).toLowerCase();
+        if (ext == '.srt' || ext == '.vtt') {
+          subs.add(f.path);
+        }
+      }
+      subs.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      _localSubtitleCandidates = subs;
+      if (_localSubtitleSelected != null &&
+          !subs.contains(_localSubtitleSelected)) {
+        _localSubtitleSelected = null;
+      }
+      if (mounted) setState(() {});
+    } catch (_) {
+      _localSubtitleCandidates = <String>[];
+      _localSubtitleSelected = null;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _refreshSubtitleCandidates() async {
+    await _refreshEmbySubtitleCandidatesIfAny();
+    await _refreshLocalSubtitleCandidatesIfAny();
+  }
+
+  Future<String> _downloadText(Uri uri, {Map<String, String>? headers}) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final req = await client.getUrl(uri);
+      req.headers.set('Accept', '*/*');
+      headers?.forEach((k, v) => req.headers.set(k, v));
+      final res = await req.close();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw HttpException('GET failed: ${res.statusCode}', uri: uri);
+      }
+      final bytes = await consolidateHttpClientResponseBytes(res);
+      return utf8.decode(bytes, allowMalformed: true);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg)),
+    );
+  }
+
+  Future<void> _applySubtitleOff({bool report = true}) async {
+    try {
+      await _controller?.setClosedCaptionFile(null);
+    } catch (_) {}
+    _localSubtitleSelected = null;
+    _embySubtitleSelected = null;
+    if (_embyPlayback != null) {
+      _embyPlayback!.subtitleStreamIndex = null;
+    }
+    if (mounted) setState(() {});
+    if (report) {
+      unawaited(
+        _reportEmbyProgress(
+            eventName: 'SubtitleTrackChange', interactive: true),
+      );
+    }
+  }
+
+  Future<void> _applyLocalSubtitle(String path, {bool report = true}) async {
+    try {
+      final bytes = await File(path).readAsBytes();
+      final text = utf8.decode(bytes, allowMalformed: true);
+      final ext = p.extension(path).toLowerCase();
+      final file =
+          (ext == '.vtt') ? WebVTTCaptionFile(text) : SubRipCaptionFile(text);
+      await _controller?.setClosedCaptionFile(Future.value(file));
+      _localSubtitleSelected = path;
+      _embySubtitleSelected = null;
+      if (_embyPlayback != null) {
+        _embyPlayback!.subtitleStreamIndex = null;
+      }
+      if (mounted) setState(() {});
+      if (report) {
+        unawaited(_reportEmbyProgress(
+            eventName: 'SubtitleTrackChange', interactive: true));
+      }
+    } catch (e) {
+      _showSnack('加载字幕失败：${redactSensitiveText(e.toString())}');
+    }
+  }
+
+  Future<void> _applyEmbySubtitle(
+    EmbySubtitleTrack track, {
+    bool report = true,
+  }) async {
+    try {
+      final url = await _buildEmbySubtitleUrl(track);
+      if (url == null || url.trim().isEmpty) {
+        _showSnack('无法获取 Emby 字幕地址');
+        return;
+      }
+      final text = await _downloadText(Uri.parse(url));
+      final file = SubRipCaptionFile(text);
+      await _controller?.setClosedCaptionFile(Future.value(file));
+      _embySubtitleSelected = track;
+      _localSubtitleSelected = null;
+      if (_embyPlayback != null) {
+        _embyPlayback!.subtitleStreamIndex = track.index;
+      }
+      if (mounted) setState(() {});
+      if (report) {
+        unawaited(_reportEmbyProgress(
+            eventName: 'SubtitleTrackChange', interactive: true));
+      }
+    } catch (e) {
+      _showSnack('加载 Emby 字幕失败：${redactSensitiveText(e.toString())}');
+    }
+  }
+
+  Future<void> _prepareSubtitleForCurrent() async {
+    await _refreshSubtitleCandidates();
+    if (!mounted) return;
+    final key = await (() async {
+      final np = await _resolveEmbyNowPlaying(_currentPath);
+      if (np != null) return 'emby:${np.account.id}:${np.itemId}';
+      return 'path:${_currentPath}';
+    })();
+    if (_lastAutoSubtitleKey == key) return;
+
+    if (_embySubtitleCandidates.isNotEmpty && _embySubtitleSelected == null) {
+      final pick = _pickBestEmbySubtitle(_embySubtitleCandidates);
+      if (pick != null) {
+        _lastAutoSubtitleKey = key;
+        await _applyEmbySubtitle(pick, report: false);
+        return;
+      }
+    }
+
+    if (_localSubtitleCandidates.isNotEmpty && _localSubtitleSelected == null) {
+      String pick = _localSubtitleCandidates.first;
+      final base = p.basenameWithoutExtension(_currentPath).toLowerCase();
+      for (final s in _localSubtitleCandidates) {
+        if (p.basenameWithoutExtension(s).toLowerCase() == base) {
+          pick = s;
+          break;
+        }
+      }
+      _lastAutoSubtitleKey = key;
+      await _applyLocalSubtitle(pick, report: false);
+    }
+  }
+
+  Future<void> _showSubtitleMenu() async {
+    await _refreshSubtitleCandidates();
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      builder: (ctx) {
+        final items = <Widget>[
+          ListTile(
+            title: const Text('关闭字幕', style: TextStyle(color: Colors.white)),
+            trailing: (_localSubtitleSelected == null &&
+                    _embySubtitleSelected == null)
+                ? const Icon(Icons.check, color: Colors.white)
+                : null,
+            onTap: () {
+              Navigator.pop(ctx);
+              unawaited(_applySubtitleOff());
+            },
+          ),
+        ];
+
+        if (_embySubtitleCandidates.isNotEmpty) {
+          items.add(const Padding(
+            padding: EdgeInsets.fromLTRB(16, 10, 16, 6),
+            child: Text('Emby 字幕',
+                style: TextStyle(color: Colors.white70, fontSize: 12)),
+          ));
+          for (final t in _embySubtitleCandidates) {
+            final selected = (_embySubtitleSelected?.index == t.index) &&
+                (_embySubtitleSelected?.mediaSourceId == t.mediaSourceId);
+            items.add(ListTile(
+              title: Text(t.title, style: const TextStyle(color: Colors.white)),
+              trailing: selected
+                  ? const Icon(Icons.check, color: Colors.white)
+                  : null,
+              onTap: () {
+                Navigator.pop(ctx);
+                unawaited(_applyEmbySubtitle(t));
+              },
+            ));
+          }
+        }
+
+        if (_localSubtitleCandidates.isNotEmpty) {
+          items.add(const Padding(
+            padding: EdgeInsets.fromLTRB(16, 10, 16, 6),
+            child: Text('本地字幕',
+                style: TextStyle(color: Colors.white70, fontSize: 12)),
+          ));
+          for (final pth in _localSubtitleCandidates) {
+            final selected = (_localSubtitleSelected == pth);
+            items.add(ListTile(
+              title: Text(
+                p.basename(pth),
+                style: const TextStyle(color: Colors.white),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: selected
+                  ? const Icon(Icons.check, color: Colors.white)
+                  : null,
+              onTap: () {
+                Navigator.pop(ctx);
+                unawaited(_applyLocalSubtitle(pth));
+              },
+            ));
+          }
+        }
+
+        if (_embySubtitleCandidates.isEmpty &&
+            _localSubtitleCandidates.isEmpty) {
+          items.add(const Padding(
+            padding: EdgeInsets.all(12),
+            child: Text('未找到可用字幕', style: TextStyle(color: Colors.white70)),
+          ));
+        }
+        return SafeArea(child: ListView(shrinkWrap: true, children: items));
+      },
+    );
+  }
+
+  Future<void> _showCatalogMenu() async {
+    if (!_hasPlaylist || !_videoCatalogEnabled) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      isScrollControlled: true,
+      builder: (ctx) {
+        return SafeArea(
+          child: SizedBox(
+            height: min(MediaQuery.of(ctx).size.height * 0.78, 540),
+            child: ListView.builder(
+              itemCount: _sources.length,
+              itemBuilder: (_, i) {
+                final selected = i == _index;
+                final source = _sources[i];
+                return ListTile(
+                  dense: true,
+                  minLeadingWidth: 72,
+                  leading: SizedBox(
+                    width: 72,
+                    height: 40,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _buildMobileCatalogCover(source, cacheWidth: 260),
+                        if (selected)
+                          DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: Colors.black45,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: const Icon(
+                              Icons.play_arrow,
+                              color: Colors.white,
+                              size: 18,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  title: Text(
+                    _displayName(source),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: selected ? Colors.white : Colors.white70,
+                    ),
+                  ),
+                  trailing: selected
+                      ? const Icon(Icons.check_circle,
+                          color: Colors.white70, size: 18)
+                      : null,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    if (i != _index) {
+                      unawaited(_jumpTo(i));
+                    }
+                  },
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _mobileCatalogCoverPlaceholder() {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.white10,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: const Center(
+        child: Icon(Icons.movie_outlined, size: 16, color: Colors.white54),
+      ),
+    );
+  }
+
+  Widget _buildMobileCatalogEmbyCover(
+    EmbyAccount account,
+    String itemId, {
+    int cacheWidth = 260,
+  }) {
+    final client = EmbyClient(account);
+    final url = client.coverUrl(
+      itemId,
+      type: 'Primary',
+      maxWidth: cacheWidth,
+      quality: 85,
+    );
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: Image.network(
+        url,
+        headers: client.imageHeaders(),
+        fit: BoxFit.cover,
+        cacheWidth: cacheWidth,
+        errorBuilder: (_, __, ___) => _mobileCatalogCoverPlaceholder(),
+      ),
+    );
+  }
+
+  Widget _buildMobileCatalogCover(String source, {int cacheWidth = 260}) {
+    final embyRef = _parseEmbyRef(source);
+    if (embyRef != null) {
+      return FutureBuilder<Map<String, EmbyAccount>>(
+        future: _ensureEmbyAccounts(),
+        builder: (_, snap) {
+          final account = snap.data?[embyRef.accountId];
+          if (account == null) return _mobileCatalogCoverPlaceholder();
+          return _buildMobileCatalogEmbyCover(
+            account,
+            embyRef.itemId,
+            cacheWidth: cacheWidth,
+          );
+        },
+      );
+    }
+
+    final stream = _parseEmbyStreamInfo(source);
+    if (stream != null) {
+      return FutureBuilder<EmbyAccount?>(
+        future: _resolveEmbyAccountForStream(source),
+        builder: (_, snap) {
+          final account = snap.data;
+          if (account == null) return _mobileCatalogCoverPlaceholder();
+          return _buildMobileCatalogEmbyCover(
+            account,
+            stream.itemId,
+            cacheWidth: cacheWidth,
+          );
+        },
+      );
+    }
+
+    if (_looksLikeLocalFilePath(source)) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: VideoThumbImage(videoPath: source, cacheOnly: false),
+      );
+    }
+
+    return _mobileCatalogCoverPlaceholder();
+  }
+
+  int _toEmbyTicks(Duration d) {
+    final us = d.inMicroseconds;
+    if (us <= 0) return 0;
+    return us * 10;
+  }
+
+  Map<String, dynamic> _buildEmbyCheckInBody(
+    _EmbyPlaybackSession s, {
+    String? eventName,
+    bool? isPaused,
+  }) {
+    final c = _controller;
+    final v = c?.value;
+    final paused = isPaused ?? !(v?.isPlaying ?? false);
+    final pos = v?.position ?? Duration.zero;
+
+    final body = <String, dynamic>{
+      'QueueableMediaTypes': const ['Video'],
+      'CanSeek': true,
+      'ItemId': s.itemId,
+      'MediaSourceId': s.mediaSourceId,
+      if (s.audioStreamIndex != null) 'AudioStreamIndex': s.audioStreamIndex,
+      if (s.subtitleStreamIndex != null)
+        'SubtitleStreamIndex': s.subtitleStreamIndex,
+      'IsPaused': paused,
+      'IsMuted': _volume <= 0,
+      'PositionTicks': _toEmbyTicks(pos),
+      'VolumeLevel': _volume.round().clamp(0, 100),
+      'PlayMethod': 'DirectStream',
+      'PlaySessionId': s.playSessionId,
+      'PlaylistIndex': _index,
+      'PlaylistLength': max(1, _sources.length),
+      'PlaybackRate': _rate,
+    };
+    if (eventName != null && eventName.trim().isNotEmpty) {
+      body['EventName'] = eventName.trim();
+    }
+    return body;
+  }
+
+  Future<void> _enqueueEmbyReport(Future<void> Function() job) {
+    _embyReportQueue = _embyReportQueue.then((_) => job()).catchError((e) {
+      debugPrint(
+          'Mobile Emby report failed: ${redactSensitiveText(e.toString())}');
+    });
+    return _embyReportQueue;
+  }
+
+  void _ensureEmbyProgressTimer() {
+    if (_embyPlayback == null) return;
+    _embyProgressTimer ??= Timer.periodic(const Duration(seconds: 10), (_) {
+      unawaited(_reportEmbyProgress(eventName: 'TimeUpdate'));
+    });
+  }
+
+  Future<void> _startEmbyPlaybackCheckInsIfNeeded({String reason = ''}) async {
+    final np = await _resolveEmbyNowPlaying(_currentPath);
+    if (np == null) {
+      await _stopEmbyPlaybackCheckIns(reason: 'non emby source');
+      return;
+    }
+
+    final cur = _embyPlayback;
+    if (cur != null &&
+        cur.account.id == np.account.id &&
+        cur.itemId == np.itemId) {
+      _ensureEmbyProgressTimer();
+      return;
+    }
+
+    await _stopEmbyPlaybackCheckIns(reason: 'switch item');
+
+    try {
+      final client = EmbyClient(np.account);
+      final pb = await client.playbackInfo(np.itemId);
+      if (pb == null) return;
+
+      final session = _EmbyPlaybackSession(
+        account: np.account,
+        itemId: np.itemId,
+        mediaSourceId: pb.mediaSourceId,
+        playSessionId: pb.playSessionId,
+        audioStreamIndex: pb.audioStreamIndex,
+        subtitleStreamIndex: pb.subtitleStreamIndex,
+      );
+      _embyPlayback = session;
+
+      await _enqueueEmbyReport(() async {
+        await client.reportPlaybackStarted(
+          _buildEmbyCheckInBody(
+            session,
+            isPaused: !(_controller?.value.isPlaying ?? false),
+          ),
+        );
+      });
+
+      _ensureEmbyProgressTimer();
+    } catch (e) {
+      debugPrint(
+        'Mobile Emby session start failed: ${redactSensitiveText(e.toString())}',
+      );
+    }
+  }
+
+  Future<void> _reportEmbyProgress({
+    required String eventName,
+    bool interactive = false,
+  }) async {
+    final s = _embyPlayback;
+    if (s == null) return;
+
+    if (interactive) {
+      final now = DateTime.now();
+      if (now.difference(_embyLastInteractiveReportAt).inMilliseconds < 650) {
+        return;
+      }
+      _embyLastInteractiveReportAt = now;
+    }
+
+    final client = EmbyClient(s.account);
+    final body = _buildEmbyCheckInBody(s, eventName: eventName);
+    await _enqueueEmbyReport(() async {
+      await client.reportPlaybackProgress(body);
+    });
+  }
+
+  Future<void> _stopEmbyPlaybackCheckIns({String reason = ''}) async {
+    _embyProgressTimer?.cancel();
+    _embyProgressTimer = null;
+
+    final s = _embyPlayback;
+    _embyPlayback = null;
+    if (s == null) return;
+
+    try {
+      final client = EmbyClient(s.account);
+      await _enqueueEmbyReport(() async {
+        await client.reportPlaybackStopped(
+          _buildEmbyCheckInBody(s, isPaused: true),
+        );
+      });
+    } catch (e) {
+      debugPrint(
+        'Mobile Emby session stop failed: ${redactSensitiveText(e.toString())}',
+      );
+    }
+  }
+
+  void _showGestureOverlay(
+    String text,
+    IconData icon, {
+    Duration ttl = const Duration(milliseconds: 650),
+  }) {
+    _gestureHideTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _gestureActive = true;
+      _gestureText = text;
+      _gestureIcon = icon;
+    });
+    _gestureHideTimer = Timer(ttl, () {
+      if (!mounted) return;
+      setState(() => _gestureActive = false);
+    });
+  }
+
+  void _beginGestureOverlay(String text, IconData icon) {
+    _gestureHideTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _gestureActive = true;
+      _gestureText = text;
+      _gestureIcon = icon;
+    });
+  }
+
+  void _endGestureOverlay() {
+    _gestureHideTimer?.cancel();
+    _gestureHideTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      setState(() => _gestureActive = false);
+    });
+  }
+
+  void _onDoubleTapDown(TapDownDetails details) {
+    _lastDoubleTapPos = details.localPosition;
+  }
+
+  Future<void> _onDoubleTap() async {
+    if (_isScreenLocked) return;
+    final pos = _lastDoubleTapPos;
+    final box = context.findRenderObject();
+    if (pos != null && box is RenderBox) {
+      final w = box.size.width;
+      final x = pos.dx;
+      final secs = _doubleTapSeekSeconds.clamp(5, 60);
+      if (x < w * 0.33) {
+        await _seekRelative(-secs);
+        _showGestureOverlay('-${secs}s', Icons.fast_rewind);
+        return;
+      }
+      if (x > w * 0.67) {
+        await _seekRelative(secs);
+        _showGestureOverlay('+${secs}s', Icons.fast_forward);
+        return;
+      }
+    }
+    await _togglePlayPause();
+  }
+
+  void _onHorizontalDragStart(DragStartDetails details) {
+    if (_isScreenLocked) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    _gestureType = 'seek';
+    _dragStartPos = c.value.position;
+    _dragTargetPos = _dragStartPos;
+    _beginGestureOverlay(_fmt(_dragTargetPos), Icons.fast_forward);
+  }
+
+  void _onHorizontalDragUpdate(DragUpdateDetails details) {
+    if (_gestureType != 'seek') return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    final duration = c.value.duration;
+    final width = max(1.0, MediaQuery.of(context).size.width);
+    const maxJumpMs = 180000.0; // one full-screen drag maps to 3 minutes
+    final deltaMs = (details.delta.dx / width * maxJumpMs).round();
+    var target = _dragTargetPos + Duration(milliseconds: deltaMs);
+    if (target < Duration.zero) target = Duration.zero;
+    if (duration > Duration.zero && target > duration) target = duration;
+    _dragTargetPos = target;
+    final diffSec = (_dragTargetPos - _dragStartPos).inSeconds;
+    final sign = diffSec >= 0 ? '+' : '';
+    final icon = diffSec >= 0 ? Icons.fast_forward : Icons.fast_rewind;
+    _beginGestureOverlay('${_fmt(_dragTargetPos)}\n($sign${diffSec}s)', icon);
+  }
+
+  Future<void> _onHorizontalDragEnd(DragEndDetails details) async {
+    if (_gestureType != 'seek') return;
+    _gestureType = '';
+    final c = _controller;
+    if (c != null && c.value.isInitialized) {
+      try {
+        await c.seekTo(_dragTargetPos);
+        unawaited(
+          _reportEmbyProgress(eventName: 'TimeUpdate', interactive: true),
+        );
+      } catch (_) {}
+    }
+    _scheduleAutoHide();
+    _endGestureOverlay();
+  }
+
+  void _onVerticalDragStart(DragStartDetails details) {
+    if (_isScreenLocked) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    final width = MediaQuery.of(context).size.width;
+    final onRight = details.localPosition.dx >= width * 0.5;
+    _gestureType = onRight ? 'volume' : 'brightness';
+    if (onRight) {
+      _beginGestureOverlay('${_volume.round()}%', Icons.volume_up);
+    } else {
+      _beginGestureOverlay(
+        '${(_brightness * 100).round()}%',
+        Icons.brightness_6,
+      );
+    }
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (_gestureType != 'volume' && _gestureType != 'brightness') return;
+    final h = max(1.0, MediaQuery.of(context).size.height);
+    final ratio = -details.delta.dy / h;
+    if (_gestureType == 'volume') {
+      _volume = (_volume + ratio * 140).clamp(0.0, 100.0);
+      final c = _controller;
+      if (c != null && c.value.isInitialized) {
+        unawaited(c.setVolume((_volume / 100).clamp(0, 1).toDouble()));
+      }
+      final icon = _volume == 0
+          ? Icons.volume_mute
+          : (_volume < 50 ? Icons.volume_down : Icons.volume_up);
+      _beginGestureOverlay('${_volume.round()}%', icon);
+      return;
+    }
+    _brightness = (_brightness + ratio * 1.2).clamp(0.0, 1.0);
+    _beginGestureOverlay('${(_brightness * 100).round()}%', Icons.brightness_6);
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) {
+    final wasVolume = _gestureType == 'volume';
+    _gestureType = '';
+    if (mounted) setState(() {});
+    _endGestureOverlay();
+    if (wasVolume) {
+      unawaited(
+        _reportEmbyProgress(eventName: 'TimeUpdate', interactive: true),
+      );
+    }
+  }
+
+  Future<void> _onLongPressStart(LongPressStartDetails details) async {
+    if (_isScreenLocked || !_longPressSpeedEnabled) return;
+    if (_rateBeforeLongPress != null) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    _rateBeforeLongPress = _rate;
+    final boosted = (_rate * _longPressSpeedMultiplier).clamp(0.25, 3.0);
+    await _setPlaybackRate(boosted);
+    _beginGestureOverlay(
+      '${boosted.toStringAsFixed((boosted % 1) == 0 ? 0 : 2)}x',
+      Icons.speed,
+    );
+  }
+
+  Future<void> _onLongPressEnd(LongPressEndDetails details) async {
+    final prev = _rateBeforeLongPress;
+    _rateBeforeLongPress = null;
+    if (prev == null) return;
+    await _setPlaybackRate(prev);
+    _endGestureOverlay();
+  }
+
+  void _scheduleLockButtonAutoHide() {
+    _lockButtonHideTimer?.cancel();
+    if (!_isScreenLocked || !_lockButtonVisible) return;
+    _lockButtonHideTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted || !_isScreenLocked) return;
+      setState(() => _lockButtonVisible = false);
+    });
+  }
+
+  void _toggleScreenLock() {
+    if (!mounted) return;
+    final nextLocked = !_isScreenLocked;
+    setState(() {
+      _isScreenLocked = nextLocked;
+      _lockButtonVisible = true;
+      if (nextLocked) {
+        _controlsVisible = false;
+      }
+    });
+    if (_isScreenLocked) {
+      _hideTimer?.cancel();
+      _autoRotateEnabled = false;
+      _stopAutoRotateIfAny();
+      final isLandscape =
+          MediaQuery.of(context).orientation == Orientation.landscape;
+      unawaited(
+        SystemChrome.setPreferredOrientations(
+          isLandscape
+              ? const [
+                  DeviceOrientation.landscapeLeft,
+                  DeviceOrientation.landscapeRight,
+                ]
+              : const [
+                  DeviceOrientation.portraitUp,
+                  DeviceOrientation.portraitDown,
+                ],
+        ),
+      );
+      _scheduleLockButtonAutoHide();
+      _showGestureOverlay('方向已锁定', Icons.screen_lock_rotation);
+      return;
+    }
+
+    _lockButtonHideTimer?.cancel();
+    _autoRotateEnabled = true;
+    _lastOriCandidate = null;
+    _oriStableCount = 0;
+    _lastOriApplyAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _appliedNativeOri = NativeDeviceOrientation.unknown;
+    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
+    Future<void>.delayed(const Duration(milliseconds: 220), () async {
+      if (!mounted || _isScreenLocked) return;
+      _startAutoRotateIfMobile();
+    });
+    _showGestureOverlay('方向已解锁', Icons.screen_rotation);
+    _scheduleAutoHide();
+  }
+
+  void _scheduleAutoHide() {
+    _hideTimer?.cancel();
+    if (_isScreenLocked) return;
+    if (!_controlsVisible) return;
+    final c = _controller;
+    if (c == null || !c.value.isPlaying) return;
+    _hideTimer = Timer(const Duration(seconds: 4), () {
+      if (!mounted) return;
+      setState(() => _controlsVisible = false);
+    });
+  }
+
+  void _toggleControls() {
+    if (_isScreenLocked) {
+      setState(() => _lockButtonVisible = !_lockButtonVisible);
+      _scheduleLockButtonAutoHide();
+      return;
+    }
+    setState(() => _controlsVisible = !_controlsVisible);
+    _scheduleAutoHide();
+  }
+
+  void _onControllerTick() {
+    final c = _controller;
+    if (c == null) return;
+    final v = c.value;
+    if (!mounted) return;
+
+    if (v.hasError && (_error ?? '').trim().isEmpty) {
+      setState(() => _error = v.errorDescription ?? '播放失败');
+      return;
+    }
+
+    final ended = v.isInitialized &&
+        v.duration > Duration.zero &&
+        v.position >= (v.duration - const Duration(milliseconds: 350));
+    if (ended && !_endHandled) {
+      _endHandled = true;
+      if (_autoNextAfterEnd && _canNext) {
+        unawaited(_next());
+      } else {
+        unawaited(c.pause());
+        if (!_isScreenLocked) {
+          setState(() => _controlsVisible = true);
+        }
+      }
+    }
+    if (!ended) _endHandled = false;
+
+    _tryCommitHistoryRecord(position: v.position, playing: v.isPlaying);
+
+    if (v.isPlaying) {
+      _scheduleAutoHide();
+    }
+    setState(() {});
+  }
+
+  Future<void> _openCurrent({required bool autoPlay}) async {
+    if (!_hasPlaylist) {
+      if (mounted) setState(() => _error = '没有可播放视频');
+      return;
+    }
+
+    final seq = ++_openSeq;
+    setState(() {
+      _opening = true;
+      _error = null;
+      _title = _displayName(_currentPath);
+      _draggingSeek = false;
+      _dragSeekMs = 0;
+    });
+
+    VideoPlayerController? nextController;
+    try {
+      final source = _currentPath;
+      final resolved = await _resolveSource(source);
+      if (!mounted || seq != _openSeq) return;
+      int? resumedAtMs;
+
+      _title = resolved.title;
+      if (resolved.isLocal) {
+        nextController = VideoPlayerController.file(File(resolved.localPath!));
+      } else {
+        nextController = VideoPlayerController.networkUrl(
+          resolved.networkUri!,
+          httpHeaders: resolved.headers,
+        );
+      }
+      await nextController.initialize();
+      await nextController.setLooping(false);
+      await nextController.setPlaybackSpeed(_rate);
+      await nextController.setVolume((_volume / 100).clamp(0, 1).toDouble());
+
+      final resumeMs = await _loadResumePositionMs(source);
+      if (!mounted || seq != _openSeq) {
+        await nextController.dispose();
+        return;
+      }
+      if (resumeMs != null) {
+        try {
+          final durMs = nextController.value.duration.inMilliseconds;
+          final safeMaxMs = max(0, durMs - 1200);
+          final targetMs = resumeMs.clamp(0, safeMaxMs);
+          if (targetMs > 0) {
+            await nextController.seekTo(Duration(milliseconds: targetMs));
+            resumedAtMs = targetMs;
+          }
+        } catch (_) {}
+      }
+
+      nextController.addListener(_onControllerTick);
+
+      if (!mounted || seq != _openSeq) {
+        nextController.removeListener(_onControllerTick);
+        await nextController.dispose();
+        return;
+      }
+
+      final old = _controller;
+      _controller = nextController;
+      _endHandled = false;
+      _opening = false;
+      if (mounted) setState(() {});
+
+      if (autoPlay) {
+        await _controller?.play();
+      }
+      _scheduleAutoHide();
+      unawaited(_startEmbyPlaybackCheckInsIfNeeded(reason: 'mobile open'));
+      unawaited(_prepareSubtitleForCurrent());
+      _armHistoryRecordForCurrent();
+      if (resumedAtMs != null && resumedAtMs > 0) {
+        unawaited(_showResumeHint(resumedAtMs, source));
+      }
+
+      if (old != null) {
+        old.removeListener(_onControllerTick);
+        await old.dispose();
+      }
+    } catch (e) {
+      if (nextController != null) {
+        nextController.removeListener(_onControllerTick);
+        await nextController.dispose();
+      }
+      if (!mounted || seq != _openSeq) return;
+      setState(() {
+        _opening = false;
+        _error = redactSensitiveText(e.toString());
+      });
+    }
+  }
+
+  Future<void> _togglePlayPause() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    if (c.value.isPlaying) {
+      await c.pause();
+      setState(() => _controlsVisible = true);
+      _hideTimer?.cancel();
+      unawaited(_reportEmbyProgress(eventName: 'Pause'));
+    } else {
+      await c.play();
+      _scheduleAutoHide();
+      unawaited(_reportEmbyProgress(eventName: 'Unpause'));
+    }
+  }
+
+  Future<void> _setPlaybackRate(double next) async {
+    final rate = next.clamp(0.25, 3.0).toDouble();
+    _rate = rate;
+    final c = _controller;
+    if (c != null && c.value.isInitialized) {
+      try {
+        await c.setPlaybackSpeed(rate);
+      } catch (_) {}
+    }
+    if (mounted) setState(() {});
+    unawaited(
+      _reportEmbyProgress(eventName: 'PlaybackRateChange', interactive: true),
+    );
+  }
+
+  Future<void> _showSpeedMenu() async {
+    final picked = await showModalBottomSheet<double>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      builder: (ctx) {
+        const options = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final r in options)
+                ListTile(
+                  title: Text(
+                    '${r.toStringAsFixed(r == r.roundToDouble() ? 0 : 2)}x',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  trailing: (_rate - r).abs() < 0.001
+                      ? const Icon(Icons.check, color: Colors.white)
+                      : null,
+                  onTap: () => Navigator.pop(ctx, r),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+    if (picked != null) {
+      await _setPlaybackRate(picked);
+    }
+  }
+
+  Future<void> _seekRelative(int seconds) async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    final cur = c.value.position;
+    final dur = c.value.duration;
+    var target = cur + Duration(seconds: seconds);
+    if (target < Duration.zero) target = Duration.zero;
+    if (dur > Duration.zero && target > dur) target = dur;
+    await c.seekTo(target);
+    _scheduleAutoHide();
+    unawaited(_reportEmbyProgress(eventName: 'TimeUpdate', interactive: true));
+  }
+
+  Future<void> _jumpTo(int newIndex) async {
+    if (newIndex < 0 || newIndex >= _sources.length) return;
+    await _flushHistoryProgress();
+    setState(() => _index = newIndex);
+    await _openCurrent(autoPlay: true);
+  }
+
+  Future<void> _prev() => _jumpTo(_index - 1);
+  Future<void> _next() => _jumpTo(_index + 1);
+
+  Widget _buildFloatingLockButton({required bool locked}) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: IconButton(
+        tooltip: locked ? 'Unlock' : 'Lock',
+        onPressed: _toggleScreenLock,
+        iconSize: 18,
+        color: Colors.white,
+        constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+        padding: EdgeInsets.zero,
+        icon: Icon(locked ? Icons.lock : Icons.lock_open),
+      ),
+    );
+  }
+
+  String _fmt(Duration d) {
+    if (d.isNegative) d = Duration.zero;
+    final h = d.inHours;
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    if (h > 0) return '$h:$m:$s';
+    return '${d.inMinutes.remainder(60)}:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = _controller;
+    final value = c?.value;
+    final initialized = value?.isInitialized ?? false;
+    final playing = value?.isPlaying ?? false;
+    final buffering = value?.isBuffering ?? false;
+    final duration = initialized ? value!.duration : Duration.zero;
+    final position = initialized ? value!.position : Duration.zero;
+    final captionText = initialized ? (value!.caption.text.trim()) : '';
+    final maxMs = max(1, duration.inMilliseconds);
+    final currentMs = _draggingSeek
+        ? _dragSeekMs.clamp(0, maxMs.toDouble()).toDouble()
+        : position.inMilliseconds
+            .toDouble()
+            .clamp(0, maxMs.toDouble())
+            .toDouble();
+    double bufferedMs = 0;
+    if (initialized && value != null && duration > Duration.zero) {
+      for (final r in value.buffered) {
+        final endMs = r.end.inMilliseconds.toDouble();
+        if (endMs > bufferedMs) bufferedMs = endMs;
+      }
+      bufferedMs = bufferedMs.clamp(0.0, maxMs.toDouble());
+    }
+    final showEpisodeNavButtons =
+        _videoEpisodeNavButtonsEnabled && _sources.length > 1;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _toggleControls,
+        onDoubleTapDown: _onDoubleTapDown,
+        onDoubleTap: _onDoubleTap,
+        onHorizontalDragStart:
+            initialized && !_isScreenLocked ? _onHorizontalDragStart : null,
+        onHorizontalDragUpdate:
+            initialized && !_isScreenLocked ? _onHorizontalDragUpdate : null,
+        onHorizontalDragEnd:
+            initialized && !_isScreenLocked ? _onHorizontalDragEnd : null,
+        onVerticalDragStart:
+            initialized && !_isScreenLocked ? _onVerticalDragStart : null,
+        onVerticalDragUpdate:
+            initialized && !_isScreenLocked ? _onVerticalDragUpdate : null,
+        onVerticalDragEnd:
+            initialized && !_isScreenLocked ? _onVerticalDragEnd : null,
+        onLongPressStart:
+            initialized && !_isScreenLocked ? _onLongPressStart : null,
+        onLongPressEnd:
+            initialized && !_isScreenLocked ? _onLongPressEnd : null,
+        child: Stack(
+          children: [
+            Center(
+              child: (initialized && c != null)
+                  ? AspectRatio(
+                      aspectRatio:
+                          value!.aspectRatio > 0 ? value.aspectRatio : 16 / 9,
+                      child: VideoPlayer(c),
+                    )
+                  : const CircularProgressIndicator(color: Colors.white),
+            ),
+            if (_brightness < 0.999)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: Colors.black.withValues(
+                      alpha: ((1.0 - _brightness).clamp(0.0, 1.0) * 0.75),
+                    ),
+                  ),
+                ),
+              ),
+            if (captionText.isNotEmpty)
+              Positioned(
+                left: 14,
+                right: 14,
+                bottom: (_controlsVisible && !_isScreenLocked)
+                    ? max(_subtitleBottomOffset, 136.0)
+                    : _subtitleBottomOffset,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      child: Text(
+                        captionText,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: _subtitleFontSize,
+                          height: 1.25,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (!_controlsVisible &&
+                !_isScreenLocked &&
+                initialized &&
+                _showMiniProgressWhenHidden &&
+                duration > Duration.zero)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: IgnorePointer(
+                  child: SafeArea(
+                    top: false,
+                    child: SizedBox(
+                      height: 2,
+                      child: LinearProgressIndicator(
+                        value: (currentMs / maxMs).clamp(0.0, 1.0),
+                        minHeight: 2,
+                        backgroundColor: Colors.white24,
+                        valueColor:
+                            const AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (_opening)
+              const Center(
+                child: CircularProgressIndicator(color: Colors.white70),
+              ),
+            if (_error != null && _error!.trim().isNotEmpty)
+              Positioned.fill(
+                child: ColoredBox(
+                  color: Colors.black54,
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _error!,
+                            style: const TextStyle(color: Colors.white),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 10),
+                          FilledButton(
+                            onPressed: () => _openCurrent(autoPlay: true),
+                            child: const Text('重试'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (_controlsVisible && !_isScreenLocked) ...[
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: SafeArea(
+                  bottom: false,
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(6, 4, 10, 6),
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Color(0x88000000), Color(0x00000000)],
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        IconButton(
+                          onPressed: () async {
+                            final navigator = Navigator.of(context);
+                            await _flushHistoryProgress();
+                            if (!mounted) return;
+                            navigator.maybePop();
+                          },
+                          icon:
+                              const Icon(Icons.arrow_back, color: Colors.white),
+                        ),
+                        Expanded(
+                          child: Text(
+                            _title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: initialized ? _showSubtitleMenu : null,
+                          icon: const Icon(Icons.closed_caption,
+                              color: Colors.white),
+                        ),
+                        IconButton(
+                          onPressed: (_hasPlaylist && _videoCatalogEnabled)
+                              ? _showCatalogMenu
+                              : null,
+                          icon: const Icon(Icons.playlist_play,
+                              color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SafeArea(
+                  top: false,
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.bottomCenter,
+                        end: Alignment.topCenter,
+                        colors: [Color(0x99000000), Color(0x00000000)],
+                      ),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              _fmt(Duration(milliseconds: currentMs.round())),
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 2.6,
+                                  activeTrackColor: Colors.white,
+                                  inactiveTrackColor: Colors.white24,
+                                  secondaryActiveTrackColor: Colors.white38,
+                                  thumbColor: Colors.white,
+                                  overlayColor: Colors.white24,
+                                ),
+                                child: Slider(
+                                  value: currentMs,
+                                  secondaryTrackValue:
+                                      max(currentMs, bufferedMs)
+                                          .clamp(0.0, maxMs.toDouble()),
+                                  min: 0,
+                                  max: maxMs.toDouble(),
+                                  onChanged: initialized
+                                      ? (v) {
+                                          setState(() {
+                                            _draggingSeek = true;
+                                            _dragSeekMs = v;
+                                          });
+                                        }
+                                      : null,
+                                  onChangeEnd: initialized
+                                      ? (v) async {
+                                          _draggingSeek = false;
+                                          await c?.seekTo(
+                                            Duration(milliseconds: v.round()),
+                                          );
+                                          _scheduleAutoHide();
+                                          unawaited(_reportEmbyProgress(
+                                            eventName: 'TimeUpdate',
+                                            interactive: true,
+                                          ));
+                                        }
+                                      : null,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              _fmt(duration),
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            const SizedBox(width: 42, height: 42),
+                            Expanded(
+                              child: Center(
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (showEpisodeNavButtons)
+                                      SizedBox(
+                                        width: 42,
+                                        height: 42,
+                                        child: IconButton(
+                                          onPressed: _canPrev ? _prev : null,
+                                          iconSize: 22,
+                                          color: Colors.white,
+                                          padding: EdgeInsets.zero,
+                                          icon: const Icon(Icons.skip_previous),
+                                        ),
+                                      ),
+                                    SizedBox(
+                                      width: 42,
+                                      height: 42,
+                                      child: IconButton(
+                                        onPressed: initialized
+                                            ? _togglePlayPause
+                                            : null,
+                                        iconSize: 22,
+                                        color: Colors.white,
+                                        padding: EdgeInsets.zero,
+                                        icon: Icon(
+                                          playing
+                                              ? Icons.pause
+                                              : Icons.play_arrow,
+                                        ),
+                                      ),
+                                    ),
+                                    if (showEpisodeNavButtons)
+                                      SizedBox(
+                                        width: 42,
+                                        height: 42,
+                                        child: IconButton(
+                                          onPressed: _canNext ? _next : null,
+                                          iconSize: 22,
+                                          color: Colors.white,
+                                          padding: EdgeInsets.zero,
+                                          icon: const Icon(Icons.skip_next),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: 42,
+                              height: 42,
+                              child: TextButton(
+                                onPressed: initialized ? _showSpeedMenu : null,
+                                style: TextButton.styleFrom(
+                                  foregroundColor: Colors.white70,
+                                  padding: EdgeInsets.zero,
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: Text(
+                                  '${_rate.toStringAsFixed((_rate % 1) == 0 ? 0 : 2)}x',
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            if (!_isScreenLocked && _controlsVisible)
+              Positioned(
+                right: 10,
+                top: 0,
+                bottom: 0,
+                child: SafeArea(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: _buildFloatingLockButton(locked: false),
+                  ),
+                ),
+              ),
+            if (_isScreenLocked && _lockButtonVisible)
+              Positioned(
+                right: 10,
+                top: 0,
+                bottom: 0,
+                child: SafeArea(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: _buildFloatingLockButton(locked: true),
+                  ),
+                ),
+              ),
+            if (_gestureActive && (_gestureIcon != null))
+              Center(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.65),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 12,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(_gestureIcon, color: Colors.white, size: 30),
+                          const SizedBox(height: 8),
+                          Text(
+                            _gestureText,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              height: 1.25,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (buffering && !_opening)
+              const Center(
+                child: SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.6,
+                    color: Colors.white70,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }

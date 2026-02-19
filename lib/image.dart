@@ -9,7 +9,6 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'video.dart';
 import 'utils.dart';
-import 'pages.dart';
 
 // ===== media_image.dart =====
 
@@ -54,12 +53,16 @@ class VideoThumbImage extends StatelessWidget {
             return Stack(
               fit: StackFit.expand,
               children: [
-                Image.file(f, fit: fit, filterQuality: FilterQuality.medium, gaplessPlayback: true),
+                Image.file(f,
+                    fit: fit,
+                    filterQuality: FilterQuality.medium,
+                    gaplessPlayback: true),
                 const Align(
                   alignment: Alignment.bottomRight,
                   child: Padding(
                     padding: EdgeInsets.all(4),
-                    child: Icon(Icons.play_circle_fill, size: 18, color: Colors.white70),
+                    child: Icon(Icons.play_circle_fill,
+                        size: 18, color: Colors.white70),
                   ),
                 ),
               ],
@@ -91,7 +94,8 @@ class VideoThumbImage extends StatelessWidget {
                 alignment: Alignment.bottomRight,
                 child: Padding(
                   padding: EdgeInsets.all(6),
-                  child: Icon(Icons.play_circle_fill, size: 18, color: Colors.white70),
+                  child: Icon(Icons.play_circle_fill,
+                      size: 18, color: Colors.white70),
                 ),
               ),
             ],
@@ -104,6 +108,7 @@ class VideoThumbImage extends StatelessWidget {
     );
   }
 }
+
 class MediaTile extends StatelessWidget {
   final String filePath;
   final String? subtitleText;
@@ -124,13 +129,19 @@ class MediaTile extends StatelessWidget {
     this.onBeforeOpenImage,
   });
 
-  bool get _isImage =>
-      ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']
-          .contains(p.extension(filePath).toLowerCase());
+  bool get _isImage => ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']
+      .contains(p.extension(filePath).toLowerCase());
 
-  bool get _isVideo =>
-      ['.mp4', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.webm', '.m4v']
-          .contains(p.extension(filePath).toLowerCase());
+  bool get _isVideo => [
+        '.mp4',
+        '.mkv',
+        '.mov',
+        '.avi',
+        '.wmv',
+        '.flv',
+        '.webm',
+        '.m4v'
+      ].contains(p.extension(filePath).toLowerCase());
 
   @override
   Widget build(BuildContext context) {
@@ -143,19 +154,21 @@ class MediaTile extends StatelessWidget {
           height: 90,
           child: _isImage
               ? Image.file(
-            File(filePath),
-            fit: BoxFit.cover,
-            filterQuality: FilterQuality.medium,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
-          )
+                  File(filePath),
+                  fit: BoxFit.cover,
+                  filterQuality: FilterQuality.medium,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
+                )
               : _isVideo
-              ? VideoThumbImage(videoPath: filePath)
-              : const _ThumbPlaceholder(),
+                  ? VideoThumbImage(videoPath: filePath)
+                  : const _ThumbPlaceholder(),
         ),
         title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(subtitleText ?? filePath, maxLines: 1, overflow: TextOverflow.ellipsis),
-        trailing: Icon(_isImage ? Icons.image_outlined : Icons.play_circle_outline),
+        subtitle: Text(subtitleText ?? filePath,
+            maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing:
+            Icon(_isImage ? Icons.image_outlined : Icons.play_circle_outline),
         onTap: () async {
           if (_isImage && imagePaths.isNotEmpty && initialImageIndex >= 0) {
             // ✅ 允许外部在“打开图片前”做一些附加逻辑（例如：记录所在目录到历史）。
@@ -172,7 +185,9 @@ class MediaTile extends StatelessWidget {
                 ),
               ),
             );
-          } else if (_isVideo && videoPaths.isNotEmpty && initialVideoIndex >= 0) {
+          } else if (_isVideo &&
+              videoPaths.isNotEmpty &&
+              initialVideoIndex >= 0) {
             Navigator.push(
               context,
               MaterialPageRoute(
@@ -195,11 +210,14 @@ class MediaTile extends StatelessWidget {
 class ImageViewerPage extends StatefulWidget {
   final List<String> imagePaths;
   final int initialIndex;
+  // 用于退出时回传“稳定定位键”；为空时默认回传 imagePaths[index]。
+  final List<String>? sourceKeys;
 
   const ImageViewerPage({
     super.key,
     required this.imagePaths,
     required this.initialIndex,
+    this.sourceKeys,
   });
 
   @override
@@ -246,13 +264,11 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   // Prefs Keys
   static const _kStripModeKey = 'img_view_strip_mode_v1';
   static const _kStripScaleKey = 'img_view_strip_scale_v1';
-  static const _kBgKey = 'img_view_bg_v1';
   static const _kIndexBadgeKey = 'img_view_index_badge_v1';
-
 
   // WebDAV 解析缓存
   final Map<String, Future<({String url, Map<String, String> headers})?>>
-  _webdavResolveFutureCache = {};
+      _webdavResolveFutureCache = {};
 
   // 预加载控制
   final Set<int> _preloadedIndices = {};
@@ -286,6 +302,32 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
   late final ValueNotifier<int> _indexVN;
 
+  String _sourceKeyAt(int index) {
+    final i = index.clamp(0, widget.imagePaths.length - 1);
+    final keys = widget.sourceKeys;
+    if (keys != null && keys.length == widget.imagePaths.length) {
+      final key = keys[i].trim();
+      if (key.isNotEmpty) return key;
+    }
+    return widget.imagePaths[i].trim();
+  }
+
+  void _ensureKeyFocus() {
+    if (!_isMobile || !mounted) return;
+    if (_keyFocusNode.hasFocus) return;
+    _keyFocusNode.requestFocus();
+  }
+
+  void _popWithCurrentSource() {
+    if (!mounted) return;
+    if (widget.imagePaths.isEmpty) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    final key = _sourceKeyAt(_index);
+    Navigator.of(context).pop<String>(key);
+  }
+
   bool _isWebDavSource(String s) {
     try {
       final u = Uri.parse(s);
@@ -315,8 +357,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     try {
       final u = Uri.parse(source);
       final accountId = u.host;
-      final rel = Uri.decodeFull(
-          u.path.startsWith('/') ? u.path.substring(1) : u.path);
+      final rel =
+          Uri.decodeFull(u.path.startsWith('/') ? u.path.substring(1) : u.path);
       final j = await _loadWebDavAccountJson(accountId);
       if (j == null) return null;
 
@@ -415,11 +457,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         future: _webdavFutureFor(source),
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
-            return Center(child: _LoadingThumb(progress: null, lightText: !isLightBg));
+            return Center(
+                child: _LoadingThumb(progress: null, lightText: !isLightBg));
           }
           final resolved = snap.data;
           if (resolved == null) {
-            return const Center(child: Text('无法解析', style: TextStyle(color: Colors.white54)));
+            return const Center(
+                child: Text('无法解析', style: TextStyle(color: Colors.white54)));
           }
           return Image.network(
             resolved.url,
@@ -437,7 +481,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
               final p = (expected != null && expected > 0)
                   ? (loaded / expected).clamp(0.0, 1.0)
                   : null;
-              return Center(child: _LoadingThumb(progress: p, lightText: !isLightBg));
+              return Center(
+                  child: _LoadingThumb(progress: p, lightText: !isLightBg));
             },
           );
         },
@@ -458,7 +503,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
           final p = (expected != null && expected > 0)
               ? (loaded / expected).clamp(0.0, 1.0)
               : null;
-          return Center(child: _LoadingThumb(progress: p, lightText: !isLightBg));
+          return Center(
+              child: _LoadingThumb(progress: p, lightText: !isLightBg));
         },
       );
     } else {
@@ -472,7 +518,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         ),
         frameBuilder: (ctx, child, frame, wasSyncLoaded) {
           if (wasSyncLoaded || frame != null) return child;
-          return Center(child: _LoadingThumb(progress: null, lightText: !isLightBg));
+          return Center(
+              child: _LoadingThumb(progress: null, lightText: !isLightBg));
         },
       );
     }
@@ -507,14 +554,12 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       final prefs = await SharedPreferences.getInstance();
       final sm = prefs.getBool(_kStripModeKey);
       final ss = prefs.getDouble(_kStripScaleKey);
-      final bgv = prefs.getInt(_kBgKey);
       final ib = prefs.getBool(_kIndexBadgeKey); // ✅ 角标
 
       if (!mounted) return;
       setState(() {
         if (sm != null) _stripMode = sm;
         if (ss != null) _stripScale = ss;
-        if (bgv != null) _bg = Color(bgv);
 
         // ✅ 如果没存过，就保持默认 false（无角标）
         if (ib != null) _showIndexBadge = ib;
@@ -526,7 +571,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           _jumpStripNearIndex(_index);
-          WidgetsBinding.instance.addPostFrameCallback((_) => _ensureStripVisible(_index));
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => _ensureStripVisible(_index));
         });
       }
     } catch (_) {}
@@ -557,19 +603,16 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     }
   }
 
-
   Future<void> _saveViewerPrefs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_kStripModeKey, _stripMode);
       await prefs.setDouble(_kStripScaleKey, _stripScale);
-      await prefs.setInt(_kBgKey, _bg.value);
 
       // ✅ 保存角标状态
       await prefs.setBool(_kIndexBadgeKey, _showIndexBadge);
     } catch (_) {}
   }
-
 
   Future<void> _applyImmersiveAndOrientation({required bool landscape}) async {
     if (!_isMobile) return;
@@ -609,10 +652,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
     // 排序并修正 initialIndex
     String? currentPath;
-    if (widget.initialIndex >= 0 && widget.initialIndex < widget.imagePaths.length) {
+    if (widget.initialIndex >= 0 &&
+        widget.initialIndex < widget.imagePaths.length) {
       currentPath = widget.imagePaths[widget.initialIndex];
     }
-
 
     int newIndex = 0;
     if (currentPath != null) {
@@ -627,14 +670,17 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _controller = PageController(initialPage: _index);
 
     _stripKeys =
-    List<GlobalKey>.generate(widget.imagePaths.length, (_) => GlobalKey());
+        List<GlobalKey>.generate(widget.imagePaths.length, (_) => GlobalKey());
 
     _loadViewerPrefs();
     _loadImageSettings();
     _stripController.addListener(_onStripScroll);
     _applyImmersiveAndOrientation(landscape: false);
 
-    WidgetsBinding.instance.addPostFrameCallback((_) => _updatePreloadWindow(_index));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updatePreloadWindow(_index);
+      _ensureKeyFocus();
+    });
   }
 
   Future<void> _loadImageSettings() async {
@@ -681,7 +727,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _lastWheelAt = now;
     _removeContextMenu();
     final dy = e.scrollDelta.dy;
-    if (dy > 0) _jumpToIndex(_index + 1);
+    if (dy > 0)
+      _jumpToIndex(_index + 1);
     else if (dy < 0) _jumpToIndex(_index - 1);
   }
 
@@ -737,7 +784,6 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     );
   }
 
-
   // ============================
   // 菜单（保留：模式、宽度、旋转、角标、背景）
   // ============================
@@ -772,7 +818,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     final isLight = _bg == Colors.white;
     final fg = isLight ? Colors.black : Colors.white;
 
-    Widget item({required String label, required double value, IconData? icon}) {
+    Widget item(
+        {required String label, required double value, IconData? icon}) {
       final selected = (_stripScale - value).abs() < 0.0001;
       return InkWell(
         onTap: () {
@@ -784,7 +831,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
             children: [
-              Icon(selected ? Icons.check : (icon ?? Icons.tune), size: 18, color: fg),
+              Icon(selected ? Icons.check : (icon ?? Icons.tune),
+                  size: 18, color: fg),
               const SizedBox(width: 10),
               Expanded(child: Text(label, style: TextStyle(color: fg))),
             ],
@@ -812,8 +860,14 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                item(label: '拼接宽度：80%', value: 0.80, icon: Icons.photo_size_select_small),
-                item(label: '拼接宽度：90%', value: 0.90, icon: Icons.photo_size_select_small),
+                item(
+                    label: '拼接宽度：80%',
+                    value: 0.80,
+                    icon: Icons.photo_size_select_small),
+                item(
+                    label: '拼接宽度：90%',
+                    value: 0.90,
+                    icon: Icons.photo_size_select_small),
                 item(label: '拼接宽度：100%', value: 1.00, icon: Icons.fullscreen),
               ],
             ),
@@ -842,7 +896,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       final isLight = _bg == Colors.white;
       final fg = isLight ? Colors.black : Colors.white;
 
-      Widget item({required String label, required VoidCallback onTap, IconData? icon}) {
+      Widget item(
+          {required String label,
+          required VoidCallback onTap,
+          IconData? icon}) {
         return InkWell(
           onTap: () {
             _removeContextMenu();
@@ -868,8 +925,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
           : (dx - menuWidth).clamp(pad, overlaySize.width - menuWidth - pad);
 
       // ✅ 菜单项数量：用于估算高度，避免弹窗跑出屏幕。
-      // 额外加入“音量键翻页”开关。
-      final itemCount = 1 + (_stripMode ? 1 : 0) + (_canRotate ? 1 : 0) + 1 + 1 + 2;
+      final itemCount = 1 + (_stripMode ? 1 : 0) + (_canRotate ? 1 : 0) + 1 + 1;
       final estH = itemCount * 44.0;
 
       final top = (dy + estH <= overlaySize.height - pad)
@@ -901,8 +957,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       item(
-                        label: _stripMode ? '模式：单张翻页' : '模式：上下拼接',
-                        icon: _stripMode ? Icons.view_carousel : Icons.view_stream,
+                        label: _stripMode ? '模式：连续浏览' : '模式：分页浏览',
+                        icon: _stripMode
+                            ? Icons.view_stream
+                            : Icons.view_carousel,
                         onTap: () {
                           setState(() => _stripMode = !_stripMode);
                           _saveViewerPrefs();
@@ -928,16 +986,20 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                         ),
                       item(
                         label: _showIndexBadge ? '角标：开启' : '角标：关闭',
-                        icon: _showIndexBadge ? Icons.filter_1 : Icons.filter_1_outlined,
+                        icon: _showIndexBadge
+                            ? Icons.filter_1
+                            : Icons.filter_1_outlined,
                         onTap: () {
                           setState(() => _showIndexBadge = !_showIndexBadge);
                           _saveViewerPrefs();
                         },
-
                       ),
                       item(
-                        label: _volumeKeyPagingEnabled ? '音量键翻页：开启' : '音量键翻页：关闭',
-                        icon: _volumeKeyPagingEnabled ? Icons.volume_up : Icons.volume_off,
+                        label:
+                            _volumeKeyPagingEnabled ? '音量键翻页：开启' : '音量键翻页：关闭',
+                        icon: _volumeKeyPagingEnabled
+                            ? Icons.volume_up
+                            : Icons.volume_off,
                         onTap: () async {
                           final next = !_volumeKeyPagingEnabled;
                           setState(() => _volumeKeyPagingEnabled = next);
@@ -946,22 +1008,6 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                           } catch (_) {
                             // 持久化失败不应影响本次看图。
                           }
-                        },
-                      ),
-                      item(
-                        label: '背景：白色',
-                        icon: Icons.circle_outlined,
-                        onTap: () {
-                          setState(() => _bg = Colors.white);
-                          _saveViewerPrefs();
-                        },
-                      ),
-                      item(
-                        label: '背景：黑色',
-                        icon: Icons.circle,
-                        onTap: () {
-                          setState(() => _bg = Colors.black);
-                          _saveViewerPrefs();
                         },
                       ),
                     ],
@@ -992,6 +1038,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _sizeMenuEntry = null;
     _contextMenuEntry?.remove();
     _contextMenuEntry = null;
+    _ensureKeyFocus();
+  }
+
+  void _showContextMenuFromToolbar() {
+    final media = MediaQuery.of(context);
+    final pos = Offset(media.size.width - 14, media.padding.top + 14);
+    _showContextMenu(pos);
   }
 
   // ============================
@@ -1002,222 +1055,299 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     final total = widget.imagePaths.length;
     final fg = Colors.white;
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      body: Container(
-        color: _bg,
-        child: total == 0
-            ? const Center(child: Text('没有图片', style: TextStyle(color: Colors.white)))
-            : Focus(
-          autofocus: true,
-          focusNode: _keyFocusNode,
-          onKeyEvent: (node, event) {
-            // ✅ 音量键翻页：同时支持“单张模式”和“拼接模式”。
-            // 说明：部分设备上音量键事件可能仍会调节系统音量，这是系统层行为；
-            // 我们在 Flutter 侧尽量捕获并执行翻页。
-            if (!_isMobile) return KeyEventResult.ignored;
-            if (!_volumeKeyPagingEnabled) return KeyEventResult.ignored;
-            if (event is! KeyDownEvent) return KeyEventResult.handled;
+    return WillPopScope(
+      onWillPop: () async {
+        _popWithCurrentSource();
+        return false;
+      },
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: Container(
+          color: _bg,
+          child: total == 0
+              ? const Center(
+                  child: Text('没有图片', style: TextStyle(color: Colors.white)))
+              : Focus(
+                  autofocus: true,
+                  focusNode: _keyFocusNode,
+                  onKeyEvent: (node, event) {
+                    // ✅ 音量键翻页：同时支持“单张模式”和“拼接模式”。
+                    // 说明：部分设备上音量键事件可能仍会调节系统音量，这是系统层行为；
+                    // 我们在 Flutter 侧尽量捕获并执行翻页。
+                    if (!_isMobile) return KeyEventResult.ignored;
+                    if (!_volumeKeyPagingEnabled) return KeyEventResult.ignored;
+                    if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
-            if (event.logicalKey == LogicalKeyboardKey.audioVolumeUp) {
-              _jumpToIndex(_index + 1);
-              return KeyEventResult.handled;
-            }
-            if (event.logicalKey == LogicalKeyboardKey.audioVolumeDown) {
-              _jumpToIndex(_index - 1);
-              return KeyEventResult.handled;
-            }
-            return KeyEventResult.ignored;
-          },
-          child: Listener(
-            onPointerSignal: (ps) {
-              if (ps is PointerScrollEvent) _onMouseWheel(ps);
-            },
-            child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _uiVisible = !_uiVisible),
-            onSecondaryTapDown: (d) => _showContextMenu(d.globalPosition),
-            onLongPressStart: (d) => _showContextMenu(d.globalPosition),
-            child: Stack(
-              children: [
-                // ===== 单张模式 =====
-                if (!_stripMode)
-                  PageView.builder(
-                    controller: _controller,
-                    physics: const BouncingScrollPhysics(),
-                    itemCount: total,
-                    onPageChanged: (i) {
-                      setState(() => _index = i);
-                      _indexVN.value = i;
-                      _updatePreloadWindow(i);
-                    },
-                    itemBuilder: (_, i) {
-                      final path = widget.imagePaths[i];
-                      return Center(
-                        child: RepaintBoundary(
-                          child: _buildSingleImage(path, index: i),
-                        ),
-                      );
-                    },
-                  )
-                // ===== 拼接模式（关键实现：占位高度 -> 真实高度动画）=====
-                else
-                  ListView.builder(
-                    controller: _stripController,
-                    padding: EdgeInsets.zero,
-                    itemCount: total,
-                    cacheExtent: 1200,
-                    itemBuilder: (_, i) {
-                      final path = widget.imagePaths[i];
-                      final screenW = MediaQuery.of(context).size.width;
-                      final targetW = (screenW * _stripScale).clamp(1.0, screenW);
+                    final key = event.logicalKey;
+                    final label = key.keyLabel.trim().toLowerCase();
 
-                      return RepaintBoundary(
-                        child: KeyedSubtree(
-                          key: _stripKeys[i],
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: () {
-                              if (_index != i) {
-                                _index = i;
+                    if (key == LogicalKeyboardKey.audioVolumeUp ||
+                        label == 'volume up' ||
+                        label == 'audio volume up') {
+                      _jumpToIndex(_index + 1);
+                      return KeyEventResult.handled;
+                    }
+                    if (key == LogicalKeyboardKey.audioVolumeDown ||
+                        label == 'volume down' ||
+                        label == 'audio volume down') {
+                      _jumpToIndex(_index - 1);
+                      return KeyEventResult.handled;
+                    }
+                    return KeyEventResult.ignored;
+                  },
+                  child: Listener(
+                    onPointerSignal: (ps) {
+                      if (ps is PointerScrollEvent) _onMouseWheel(ps);
+                    },
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        setState(() => _uiVisible = !_uiVisible);
+                        _ensureKeyFocus();
+                      },
+                      onSecondaryTapDown: (d) =>
+                          _showContextMenu(d.globalPosition),
+                      onLongPressStart: (d) =>
+                          _showContextMenu(d.globalPosition),
+                      child: Stack(
+                        children: [
+                          // ===== 单张模式 =====
+                          if (!_stripMode)
+                            PageView.builder(
+                              controller: _controller,
+                              physics: const BouncingScrollPhysics(),
+                              itemCount: total,
+                              onPageChanged: (i) {
+                                setState(() => _index = i);
                                 _indexVN.value = i;
-                              }
-                              // ✅ 点击条目时主动滚到当前项附近，避免“点击后跳回第一张/找不到当前位置”。
-                              _ensureStripVisible(i);
-                              setState(() => _uiVisible = !_uiVisible);
-                            },
-                            child: Center(
-                              child: StripImageItem(
-                                source: path,
-                                targetW: targetW,
-                                bg: _bg,
-                                showIndexBadge: _showIndexBadge,
-                                index: i,
-                                isWebDavSource: _isWebDavSource,
-                                webdavFutureFor: _webdavFutureFor,
-                                placeholderH: 220, // ✅ 你要的“默认高度”
+                                _updatePreloadWindow(i);
+                              },
+                              itemBuilder: (_, i) {
+                                final path = widget.imagePaths[i];
+                                return Center(
+                                  child: RepaintBoundary(
+                                    child: _buildSingleImage(path, index: i),
+                                  ),
+                                );
+                              },
+                            )
+                          // ===== 拼接模式（关键实现：占位高度 -> 真实高度动画）=====
+                          else
+                            ListView.builder(
+                              controller: _stripController,
+                              padding: EdgeInsets.zero,
+                              itemCount: total,
+                              cacheExtent: 1200,
+                              itemBuilder: (_, i) {
+                                final path = widget.imagePaths[i];
+                                final screenW =
+                                    MediaQuery.of(context).size.width;
+                                final targetW =
+                                    (screenW * _stripScale).clamp(1.0, screenW);
+
+                                return RepaintBoundary(
+                                  child: KeyedSubtree(
+                                    key: _stripKeys[i],
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () {
+                                        if (_index != i) {
+                                          _index = i;
+                                          _indexVN.value = i;
+                                        }
+                                        // ✅ 点击条目时主动滚到当前项附近，避免“点击后跳回第一张/找不到当前位置”。
+                                        _ensureStripVisible(i);
+                                        setState(
+                                            () => _uiVisible = !_uiVisible);
+                                      },
+                                      child: Center(
+                                        child: StripImageItem(
+                                          source: path,
+                                          targetW: targetW,
+                                          bg: _bg,
+                                          showIndexBadge: _showIndexBadge,
+                                          index: i,
+                                          isWebDavSource: _isWebDavSource,
+                                          webdavFutureFor: _webdavFutureFor,
+                                          placeholderH: 220, // ✅ 你要的“默认高度”
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+
+                          // 桌面端左右按钮
+                          if (!_stripMode && !_isMobile)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                ignoring: !_uiVisible,
+                                child: Row(
+                                  children: [
+                                    SizedBox(
+                                      width: 80,
+                                      child: IconButton(
+                                        icon: Icon(Icons.chevron_left,
+                                            size: 48,
+                                            color: fg.withOpacity(0.5)),
+                                        onPressed: _index <= 0
+                                            ? null
+                                            : () => _jumpToIndex(_index - 1),
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    SizedBox(
+                                      width: 80,
+                                      child: IconButton(
+                                        icon: Icon(Icons.chevron_right,
+                                            size: 48,
+                                            color: fg.withOpacity(0.5)),
+                                        onPressed: _index >= total - 1
+                                            ? null
+                                            : () => _jumpToIndex(_index + 1),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+
+                          // 顶部工具栏
+                          Positioned(
+                            left: 0,
+                            top: 0,
+                            child: SafeArea(
+                              child: MouseRegion(
+                                onEnter: (_) =>
+                                    setState(() => _topHover = true),
+                                onExit: (_) =>
+                                    setState(() => _topHover = false),
+                                child: AnimatedOpacity(
+                                  duration: const Duration(milliseconds: 200),
+                                  opacity: _uiVisible || _topHover ? 1.0 : 0.0,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(12),
+                                    child: Row(
+                                      children: [
+                                        DecoratedBox(
+                                          decoration: _pillDecoration(),
+                                          child: IconButton(
+                                            tooltip: '返回',
+                                            icon: const Icon(Icons.arrow_back,
+                                                color: Colors.white),
+                                            onPressed: _popWithCurrentSource,
+                                          ),
+                                        ),
+                                        if (_canRotate) ...[
+                                          const SizedBox(width: 8),
+                                          DecoratedBox(
+                                            decoration: _pillDecoration(),
+                                            child: IconButton(
+                                              tooltip: '旋转屏幕',
+                                              icon: const Icon(
+                                                  Icons.screen_rotation,
+                                                  color: Colors.white),
+                                              onPressed: _toggleLandscape,
+                                            ),
+                                          ),
+                                        ],
+                                        const SizedBox(width: 8),
+                                        DecoratedBox(
+                                          decoration: _pillDecoration(),
+                                          child: IconButton(
+                                            tooltip: '菜单',
+                                            icon: const Icon(Icons.more_vert,
+                                                color: Colors.white),
+                                            onPressed:
+                                                _showContextMenuFromToolbar,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      );
-                    },
-                  ),
 
-                // 桌面端左右按钮
-                if (!_stripMode && !_isMobile)
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      ignoring: !_uiVisible,
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 80,
-                            child: IconButton(
-                              icon: Icon(Icons.chevron_left,
-                                  size: 48, color: fg.withOpacity(0.5)),
-                              onPressed: _index <= 0 ? null : () => _jumpToIndex(_index - 1),
-                            ),
-                          ),
-                          const Spacer(),
-                          SizedBox(
-                            width: 80,
-                            child: IconButton(
-                              icon: Icon(Icons.chevron_right,
-                                  size: 48, color: fg.withOpacity(0.5)),
-                              onPressed:
-                              _index >= total - 1 ? null : () => _jumpToIndex(_index + 1),
+                          // 底部页码
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 20,
+                            child: SafeArea(
+                              child: AnimatedOpacity(
+                                duration: const Duration(milliseconds: 200),
+                                opacity: _uiVisible ? 1.0 : 0.0,
+                                child: Align(
+                                  alignment: Alignment.bottomCenter,
+                                  child: DecoratedBox(
+                                    decoration: _pageIndicatorDecoration(),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 4),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (_isMobile)
+                                            IconButton(
+                                              onPressed: _index <= 0
+                                                  ? null
+                                                  : () =>
+                                                      _jumpToIndex(_index - 1),
+                                              iconSize: 20,
+                                              color: Colors.white,
+                                              icon: const Icon(
+                                                  Icons.chevron_left),
+                                              tooltip: '上一张',
+                                            ),
+                                          ValueListenableBuilder<int>(
+                                            valueListenable: _indexVN,
+                                            builder: (_, idx, __) {
+                                              return Text(
+                                                '${idx + 1} / $total',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 14,
+                                                  shadows: [
+                                                    Shadow(
+                                                        blurRadius: 2,
+                                                        color: Colors.black)
+                                                  ],
+                                                ),
+                                              );
+                                            },
+                                          ),
+                                          if (_isMobile)
+                                            IconButton(
+                                              onPressed: _index >= total - 1
+                                                  ? null
+                                                  : () =>
+                                                      _jumpToIndex(_index + 1),
+                                              iconSize: 20,
+                                              color: Colors.white,
+                                              icon: const Icon(
+                                                  Icons.chevron_right),
+                                              tooltip: '下一张',
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
                         ],
                       ),
                     ),
                   ),
-
-                // 顶部工具栏
-                Positioned(
-                  left: 0,
-                  top: 0,
-                  child: SafeArea(
-                    child: MouseRegion(
-                      onEnter: (_) => setState(() => _topHover = true),
-                      onExit: (_) => setState(() => _topHover = false),
-                      child: AnimatedOpacity(
-                        duration: const Duration(milliseconds: 200),
-                        opacity: _uiVisible || _topHover ? 1.0 : 0.0,
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Row(
-                            children: [
-                              DecoratedBox(
-                                decoration: _pillDecoration(),
-                                child: IconButton(
-                                  tooltip: '返回',
-                                  icon: const Icon(Icons.arrow_back, color: Colors.white),
-                                  onPressed: () => Navigator.of(context).maybePop(),
-                                ),
-                              ),
-                              if (_canRotate) ...[
-                                const SizedBox(width: 8),
-                                DecoratedBox(
-                                  decoration: _pillDecoration(),
-                                  child: IconButton(
-                                    tooltip: '旋转屏幕',
-                                    icon: const Icon(Icons.screen_rotation, color: Colors.white),
-                                    onPressed: _toggleLandscape,
-                                  ),
-                                ),
-                              ]
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
                 ),
-
-                // 底部页码
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 20,
-                  child: SafeArea(
-                    child: AnimatedOpacity(
-                      duration: const Duration(milliseconds: 200),
-                      opacity: _uiVisible ? 1.0 : 0.0,
-                      child: Align(
-                        alignment: Alignment.bottomCenter,
-                        child: DecoratedBox(
-                          decoration: _pageIndicatorDecoration(),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                            child: ValueListenableBuilder<int>(
-                              valueListenable: _indexVN,
-                              builder: (_, idx, __) {
-                                return Text(
-                                  '${idx + 1} / $total',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
-                                    shadows: [Shadow(blurRadius: 2, color: Colors.black)],
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-	          ),
-	        ),
-	          )
-	      ),
-	    );
+        ),
+      ),
+    );
   }
 }
 
@@ -1232,7 +1362,8 @@ class StripImageItem extends StatefulWidget {
   final int index;
   final double placeholderH;
 
-  final Future<({String url, Map<String, String> headers})?> Function(String) webdavFutureFor;
+  final Future<({String url, Map<String, String> headers})?> Function(String)
+      webdavFutureFor;
   final bool Function(String) isWebDavSource;
 
   const StripImageItem({
@@ -1251,7 +1382,8 @@ class StripImageItem extends StatefulWidget {
   State<StripImageItem> createState() => _StripImageItemState();
 }
 
-class _StripImageItemState extends State<StripImageItem> with TickerProviderStateMixin {
+class _StripImageItemState extends State<StripImageItem>
+    with TickerProviderStateMixin {
   double? _ratio; // w/h
   bool _listening = false;
 
@@ -1268,7 +1400,8 @@ class _StripImageItemState extends State<StripImageItem> with TickerProviderStat
     return Stack(
       children: [
         Positioned.fill(child: child),
-        Positioned(left: 10, top: 10, child: _IndexBadge(text: '${widget.index + 1}')),
+        Positioned(
+            left: 10, top: 10, child: _IndexBadge(text: '${widget.index + 1}')),
       ],
     );
   }
@@ -1336,10 +1469,12 @@ class _StripImageItemState extends State<StripImageItem> with TickerProviderStat
           }
           final resolved = snap.data;
           if (resolved == null) {
-            return const Center(child: Icon(Icons.broken_image, color: Colors.white54));
+            return const Center(
+                child: Icon(Icons.broken_image, color: Colors.white54));
           }
 
-          final provider = NetworkImage(resolved.url, headers: resolved.headers);
+          final provider =
+              NetworkImage(resolved.url, headers: resolved.headers);
           _resolveSizeOnce(provider);
 
           return Image(
@@ -1347,8 +1482,8 @@ class _StripImageItemState extends State<StripImageItem> with TickerProviderStat
             fit: BoxFit.fitWidth,
             filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
-            errorBuilder: (_, __, ___) =>
-            const Center(child: Icon(Icons.broken_image, color: Colors.white54)),
+            errorBuilder: (_, __, ___) => const Center(
+                child: Icon(Icons.broken_image, color: Colors.white54)),
             loadingBuilder: (ctx, child, loading) {
               if (loading == null) return child;
               final expected = loading.expectedTotalBytes;
@@ -1373,8 +1508,8 @@ class _StripImageItemState extends State<StripImageItem> with TickerProviderStat
         fit: BoxFit.fitWidth,
         filterQuality: FilterQuality.medium,
         gaplessPlayback: true,
-        errorBuilder: (_, __, ___) =>
-        const Center(child: Icon(Icons.broken_image, color: Colors.white54)),
+        errorBuilder: (_, __, ___) => const Center(
+            child: Icon(Icons.broken_image, color: Colors.white54)),
         loadingBuilder: (ctx, child, loading) {
           if (loading == null) return child;
           final expected = loading.expectedTotalBytes;
@@ -1397,7 +1532,7 @@ class _StripImageItemState extends State<StripImageItem> with TickerProviderStat
       filterQuality: FilterQuality.medium,
       gaplessPlayback: true,
       errorBuilder: (_, __, ___) =>
-      const Center(child: Icon(Icons.broken_image, color: Colors.white54)),
+          const Center(child: Icon(Icons.broken_image, color: Colors.white54)),
       frameBuilder: (ctx, child, frame, wasSyncLoaded) {
         if (wasSyncLoaded || frame != null) return child;
         return _LoadingThumb(progress: null, lightText: _lightText);
@@ -1441,7 +1576,8 @@ class _LoadingThumb extends StatelessWidget {
     // ✅ 必须给“安全高度”，避免 ListView 子项高度无穷导致 viewport 崩
     return LayoutBuilder(
       builder: (context, constraints) {
-        final boundedH = constraints.hasBoundedHeight && constraints.maxHeight.isFinite;
+        final boundedH =
+            constraints.hasBoundedHeight && constraints.maxHeight.isFinite;
         final safeH = boundedH ? constraints.maxHeight : 220.0;
 
         return SizedBox(
@@ -1453,14 +1589,16 @@ class _LoadingThumb extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.image_outlined, color: fg.withOpacity(0.55), size: 52),
+                  Icon(Icons.image_outlined,
+                      color: fg.withOpacity(0.55), size: 52),
                   const SizedBox(height: 12),
                   if (progress != null) ...[
                     LinearProgressIndicator(value: progress),
                     const SizedBox(height: 10),
                     Text(
                       '${(progress! * 100).clamp(0, 100).toStringAsFixed(0)}%',
-                      style: TextStyle(color: fg.withOpacity(0.75), fontSize: 13),
+                      style:
+                          TextStyle(color: fg.withOpacity(0.75), fontSize: 13),
                     ),
                   ] else ...[
                     SizedBox(
@@ -1474,7 +1612,8 @@ class _LoadingThumb extends StatelessWidget {
                     const SizedBox(height: 10),
                     Text(
                       '加载中...',
-                      style: TextStyle(color: fg.withOpacity(0.75), fontSize: 13),
+                      style:
+                          TextStyle(color: fg.withOpacity(0.75), fontSize: 13),
                     ),
                   ],
                 ],

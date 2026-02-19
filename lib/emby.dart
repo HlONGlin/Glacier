@@ -1311,8 +1311,14 @@ class EmbyClient {
   /// - 额外携带 `name`（文件名）是为了让播放器标题能显示“真实媒体名”，
   ///   避免 UI 左上角出现 stream/stream.mp4 这种无意义文本。
   /// - 这是纯客户端参数，不影响 Emby 服务端解析。
-  String streamUrl(String itemId,
-      {String? name, String? deviceId, String deviceName = 'Flutter'}) {
+  String streamUrl(
+    String itemId, {
+    String? name,
+    String? deviceId,
+    String deviceName = 'Flutter',
+    String? mediaSourceId,
+  }) {
+    final msId = (mediaSourceId ?? '').trim();
     final did = (deviceId ?? 'flutter_client').trim();
     final uri = _u('/Videos/$itemId/stream', {
       'static': 'true',
@@ -1321,6 +1327,7 @@ class EmbyClient {
       'UserId': account.userId,
       if (did.isNotEmpty) 'DeviceId': did,
       'DeviceName': deviceName,
+      if (msId.isNotEmpty) 'MediaSourceId': msId,
       if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
     });
     return uri.toString();
