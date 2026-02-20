@@ -4886,45 +4886,31 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           }
         }
 
-        // 收藏夹根层：优先展示收藏；如果收藏为空，则展示“媒体库（Views）”
+        // Emby 根入口：优先展示媒体库（Views）；无媒体库时再回退到收藏。
         try {
-          final fav = await client.listFavorites();
-          if (fav.isNotEmpty) {
-            for (final it in fav) {
-              final cover = client.bestCoverUrl(
-                it,
-                maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-              );
-
-              // ✅ 修复点：目录优先判定，避免 PhotoAlbum/UserView 等被当成图片
-              final isDir = _embyTypeIsDir(it.type);
-              final isImg = _embyTypeIsImage(it.type);
-
+          final views = await client.listViews();
+          if (views.isNotEmpty) {
+            for (final v in views) {
+              // ✅ views 本质就是目录（UserView）
               out.add(
                 _Entry(
-                  isDir: isDir,
-                  name: it.name.isEmpty ? '未命名' : it.name,
-                  size: isDir ? 0 : it.size,
-                  // ✅ Emby 日期排序增强：优先 DateCreated（加入库时间），兜底 DateModified。
-                  modified: it.dateCreated ??
-                      it.dateModified ??
-                      DateTime.fromMillisecondsSinceEpoch(0),
-                  typeKey: isDir
-                      ? 'emby_folder'
-                      : (isImg ? 'emby_image' : 'emby_video'),
+                  isDir: true,
+                  name: v.name.isEmpty ? '未命名库' : v.name,
+                  size: 0,
+                  modified: DateTime.fromMillisecondsSinceEpoch(0),
+                  typeKey: 'emby_folder',
                   origin: origin,
                   embyAccountId: a.id,
-                  embyItemId: it.id,
-                  embyCoverUrl: cover,
+                  embyItemId: v.id,
+                  embyCoverUrl: client.bestCoverUrl(v, maxWidth: 420),
                 ),
               );
             }
             continue;
           }
 
-          // favorites empty -> show views as folders
-          final views = await client.listViews();
-          if (views.isEmpty) {
+          final fav = await client.listFavorites();
+          if (fav.isEmpty) {
             out.add(
               _Entry(
                 isDir: false,
@@ -4939,19 +4925,32 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
             continue;
           }
 
-          for (final v in views) {
-            // ✅ views 本质就是目录（UserView）
+          for (final it in fav) {
+            final cover = client.bestCoverUrl(
+              it,
+              maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
+            );
+
+            // ✅ 修复点：目录优先判定，避免 PhotoAlbum/UserView 等被当成图片
+            final isDir = _embyTypeIsDir(it.type);
+            final isImg = _embyTypeIsImage(it.type);
+
             out.add(
               _Entry(
-                isDir: true,
-                name: v.name.isEmpty ? '未命名库' : v.name,
-                size: 0,
-                modified: DateTime.fromMillisecondsSinceEpoch(0),
-                typeKey: 'emby_folder',
+                isDir: isDir,
+                name: it.name.isEmpty ? '未命名' : it.name,
+                size: isDir ? 0 : it.size,
+                // ✅ Emby 日期排序增强：优先 DateCreated（加入库时间），兜底 DateModified。
+                modified: it.dateCreated ??
+                    it.dateModified ??
+                    DateTime.fromMillisecondsSinceEpoch(0),
+                typeKey: isDir
+                    ? 'emby_folder'
+                    : (isImg ? 'emby_image' : 'emby_video'),
                 origin: origin,
                 embyAccountId: a.id,
-                embyItemId: v.id,
-                embyCoverUrl: client.bestCoverUrl(v, maxWidth: 420),
+                embyItemId: it.id,
+                embyCoverUrl: cover,
               ),
             );
           }
@@ -6589,34 +6588,21 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
     try {
       if (path == 'favorites') {
-        final items = await client.listFavorites();
-        if (items.isNotEmpty) {
-          for (final it in items) {
-            final cover = client.bestCoverUrl(
-              it,
-              maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-            );
-
-            // ✅ 目录优先判定，避免 PhotoAlbum / UserView 等被当成图片
-            final isDir = _embyTypeIsDir(it.type);
-            final isImg = _embyTypeIsImage(it.type);
-
+        // Emby 根入口：优先展示媒体库（Views）；无媒体库时再回退到收藏。
+        final views = await client.listViews();
+        if (views.isNotEmpty) {
+          for (final v in views) {
             out.add(
               _Entry(
-                isDir: isDir,
-                name: it.name.isEmpty ? '未命名' : it.name,
-                size: isDir ? 0 : it.size,
-                // ✅ Emby 日期排序增强：优先 DateCreated（加入库时间），兜底 DateModified。
-                modified: it.dateCreated ??
-                    it.dateModified ??
-                    DateTime.fromMillisecondsSinceEpoch(0),
-                typeKey: isDir
-                    ? 'emby_folder'
-                    : (isImg ? 'emby_image' : 'emby_video'),
-                origin: null,
-                embyAccountId: accountId,
-                embyItemId: it.id,
-                embyCoverUrl: cover,
+                isDir: true,
+                name: v.name.isEmpty ? '未命名库' : v.name,
+                size: 0,
+                modified: DateTime.fromMillisecondsSinceEpoch(0),
+                typeKey: 'emby_folder',
+                origin: 'Emby：${a.name}',
+                embyAccountId: a.id,
+                embyItemId: v.id,
+                embyCoverUrl: client.bestCoverUrl(v, maxWidth: 420),
               ),
             );
           }
@@ -6624,9 +6610,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           return out;
         }
 
-        // favorites empty -> show views
-        final views = await client.listViews();
-        if (views.isEmpty) {
+        final items = await client.listFavorites();
+        if (items.isEmpty) {
           out.add(
             _Entry(
               isDir: false,
@@ -6641,18 +6626,31 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           return out;
         }
 
-        for (final v in views) {
+        for (final it in items) {
+          final cover = client.bestCoverUrl(
+            it,
+            maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
+          );
+
+          // ✅ 目录优先判定，避免 PhotoAlbum / UserView 等被当成图片
+          final isDir = _embyTypeIsDir(it.type);
+          final isImg = _embyTypeIsImage(it.type);
+
           out.add(
             _Entry(
-              isDir: true,
-              name: v.name.isEmpty ? '未命名库' : v.name,
-              size: 0,
-              modified: DateTime.fromMillisecondsSinceEpoch(0),
-              typeKey: 'emby_folder',
-              origin: 'Emby：${a.name}',
-              embyAccountId: a.id,
-              embyItemId: v.id,
-              embyCoverUrl: client.bestCoverUrl(v, maxWidth: 420),
+              isDir: isDir,
+              name: it.name.isEmpty ? '未命名' : it.name,
+              size: isDir ? 0 : it.size,
+              // ✅ Emby 日期排序增强：优先 DateCreated（加入库时间），兜底 DateModified。
+              modified: it.dateCreated ??
+                  it.dateModified ??
+                  DateTime.fromMillisecondsSinceEpoch(0),
+              typeKey:
+                  isDir ? 'emby_folder' : (isImg ? 'emby_image' : 'emby_video'),
+              origin: null,
+              embyAccountId: accountId,
+              embyItemId: it.id,
+              embyCoverUrl: cover,
             ),
           );
         }
