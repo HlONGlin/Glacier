@@ -13,6 +13,12 @@ import 'image.dart';
 import 'video.dart';
 import 'tag.dart';
 
+const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.dark,
+  statusBarBrightness: Brightness.light,
+);
+
 // ===== network_webdav.dart (auto-grouped) =====
 
 // --- from webdav.dart ---
@@ -962,7 +968,9 @@ class _WebDavAccountsPageState extends State<WebDavAccountsPage> {
                     ),
                   );
 
-    return Scaffold(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: Scaffold(
       appBar: GlassAppBar(
         title: const Text('WebDAV'),
         actions: [
@@ -978,6 +986,7 @@ class _WebDavAccountsPageState extends State<WebDavAccountsPage> {
         onPressed: _add,
         icon: const Icon(Icons.add),
         label: const Text('添加 WebDAV'),
+      ),
       ),
     );
   }
@@ -1341,9 +1350,11 @@ class _WebDavBrowserPageState extends State<WebDavBrowserPage> {
                     child: AppViewport(child: _buildByMode(list)),
                   );
 
-    return WillPopScope(
-      onWillPop: _onBack,
-      child: Scaffold(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: WillPopScope(
+        onWillPop: _onBack,
+        child: Scaffold(
         appBar: GlassAppBar(
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
@@ -1387,6 +1398,7 @@ class _WebDavBrowserPageState extends State<WebDavBrowserPage> {
           ],
         ),
         body: body,
+      ),
       ),
     );
   }
@@ -1597,9 +1609,11 @@ class WebDavPickSourcePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<WebDavAccount>>(
-      future: WebDavStore.load(),
-      builder: (_, snap) {
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: FutureBuilder<List<WebDavAccount>>(
+        future: WebDavStore.load(),
+        builder: (_, snap) {
         final accs = snap.data ?? [];
         if (snap.connectionState != ConnectionState.done) {
           return const Scaffold(body: AppLoadingState());
@@ -1646,7 +1660,8 @@ class WebDavPickSourcePage extends StatelessWidget {
             ),
           ),
         );
-      },
+        },
+      ),
     );
   }
 }
@@ -1828,9 +1843,11 @@ class _WebDavPickBrowserPageState extends State<_WebDavPickBrowserPage> {
                     ),
                   );
 
-    return WillPopScope(
-      onWillPop: _onBack,
-      child: Scaffold(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: WillPopScope(
+        onWillPop: _onBack,
+        child: Scaffold(
         appBar: GlassAppBar(
           leading: IconButton(
               icon: const Icon(Icons.arrow_back),
@@ -1865,6 +1882,7 @@ class _WebDavPickBrowserPageState extends State<_WebDavPickBrowserPage> {
           ],
         ),
         body: body,
+      ),
       ),
     );
   }

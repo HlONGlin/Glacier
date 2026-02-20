@@ -3,9 +3,16 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ui_kit.dart';
+
+const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.dark,
+  statusBarBrightness: Brightness.light,
+);
 
 /// =========================
 /// Emby models & store
@@ -1628,8 +1635,10 @@ class _EmbyPageState extends State<EmbyPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: GlassAppBar(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: Scaffold(
+        appBar: GlassAppBar(
         title: const Text('Emby 账号'),
         actions: [
           IconButton(
@@ -1696,6 +1705,7 @@ class _EmbyPageState extends State<EmbyPage> {
                         ),
                       ),
                     )),
+      ),
     );
   }
 }
@@ -1709,9 +1719,11 @@ class EmbyPickSourcePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<EmbyAccount>>(
-      future: EmbyStore.load(),
-      builder: (_, snap) {
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: FutureBuilder<List<EmbyAccount>>(
+        future: EmbyStore.load(),
+        builder: (_, snap) {
         final accs = snap.data ?? [];
         if (snap.connectionState != ConnectionState.done) {
           return const Scaffold(body: AppLoadingState());
@@ -1760,7 +1772,8 @@ class EmbyPickSourcePage extends StatelessWidget {
             ),
           ),
         );
-      },
+        },
+      ),
     );
   }
 }

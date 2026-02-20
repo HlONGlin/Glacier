@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
@@ -20,6 +21,12 @@ import 'tag.dart';
 // ===== app_pages.dart (auto-grouped) =====
 
 // --- from pages.dart ---
+
+const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.dark,
+  statusBarBrightness: Brightness.light,
+);
 
 /// =========================
 /// Tag Module integration helpers
@@ -1335,213 +1342,218 @@ class _FavoritesPageState extends State<FavoritesPage> {
                         ),
                       );
 
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFFF7F6FF), Color(0xFFEFF4FF), Color(0xFFF6FBFF)],
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: Scaffold(
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFFF7F6FF), Color(0xFFEFF4FF), Color(0xFFF6FBFF)],
+            ),
           ),
-        ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-                child: Glass(
-                  radius: 16,
-                  blur: 16,
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          const Expanded(
-                            child: Text(
-                              '收藏夹控制台',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w700,
+          child: SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+                  child: Glass(
+                    radius: 16,
+                    blur: 16,
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                    child: Column(
+                      children: [
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                '收藏夹控制台',
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
-                          ),
-                          IconButton(
-                            tooltip: _favoritesSearchExpanded ||
-                                    _favoritesQuery.trim().isNotEmpty
-                                ? '收起搜索'
-                                : '展开搜索',
-                            onPressed: () => setState(() {
-                              final showing = _favoritesSearchExpanded ||
-                                  _favoritesQuery.trim().isNotEmpty;
-                              if (showing) {
-                                _favoritesQuery = '';
-                                _favoritesSearchExpanded = false;
-                              } else {
-                                _favoritesSearchExpanded = true;
-                              }
-                            }),
-                            icon: Icon(
-                              _favoritesSearchExpanded ||
+                            IconButton(
+                              tooltip: _favoritesSearchExpanded ||
                                       _favoritesQuery.trim().isNotEmpty
-                                  ? Icons.close
-                                  : Icons.search,
+                                  ? '收起搜索'
+                                  : '展开搜索',
+                              onPressed: () => setState(() {
+                                final showing = _favoritesSearchExpanded ||
+                                    _favoritesQuery.trim().isNotEmpty;
+                                if (showing) {
+                                  _favoritesQuery = '';
+                                  _favoritesSearchExpanded = false;
+                                } else {
+                                  _favoritesSearchExpanded = true;
+                                }
+                              }),
+                              icon: Icon(
+                                _favoritesSearchExpanded ||
+                                        _favoritesQuery.trim().isNotEmpty
+                                    ? Icons.close
+                                    : Icons.search,
+                              ),
+                            ),
+                            TopActionMenu<String>(
+                              tooltip: '更多',
+                              items: const [
+                                TopActionMenuItem(
+                                    value: 'history',
+                                    icon: Icons.history,
+                                    label: '历史记录'),
+                                TopActionMenuItem(
+                                    value: 'settings',
+                                    icon: Icons.settings_outlined,
+                                    label: '设置'),
+                                TopActionMenuItem(
+                                    value: 'tags',
+                                    icon: Icons.sell_outlined,
+                                    label: '标签管理'),
+                                TopActionMenuItem(
+                                    value: 'webdav',
+                                    icon: Icons.cloud_outlined,
+                                    label: 'WebDAV'),
+                                TopActionMenuItem(
+                                    value: 'emby',
+                                    icon: Icons.video_library_outlined,
+                                    label: 'Emby'),
+                                TopActionMenuItem(
+                                    value: 'refresh',
+                                    icon: Icons.refresh,
+                                    label: '刷新'),
+                              ],
+                              onSelected: (v) async {
+                                switch (v) {
+                                  case 'history':
+                                    await Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                            builder: (_) =>
+                                                const HistoryPage()));
+                                    break;
+                                  case 'settings':
+                                    await Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                            builder: (_) =>
+                                                const SettingsPage()));
+                                    break;
+                                  case 'tags':
+                                    if (!mounted) return;
+                                    await showAdaptivePanel<void>(
+                                      context: context,
+                                      barrierLabel: 'tag_manager',
+                                      child: TagManagerPage(
+                                        onOpenItem: (item) =>
+                                            openTagTarget(context, item),
+                                        onLocateItem: (item) =>
+                                            locateTagTarget(context, item),
+                                      ),
+                                    );
+                                    break;
+                                  case 'webdav':
+                                    if (!mounted) return;
+                                    await Navigator.push(
+                                        context, WebDavPage.routeNoAnim());
+                                    break;
+                                  case 'emby':
+                                    if (!mounted) return;
+                                    await Navigator.push(
+                                        context, EmbyPage.routeNoAnim());
+                                    break;
+                                  case 'refresh':
+                                    await _reload();
+                                    break;
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                        if (_favoritesSearchExpanded ||
+                            _favoritesQuery.trim().isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          TextField(
+                            onChanged: (v) =>
+                                setState(() => _favoritesQuery = v),
+                            decoration: InputDecoration(
+                              hintText: '搜索收藏夹',
+                              prefixIcon: const Icon(Icons.search),
+                              suffixIcon: _favoritesQuery.trim().isEmpty
+                                  ? IconButton(
+                                      tooltip: '收起',
+                                      icon: const Icon(Icons.expand_less),
+                                      onPressed: () => setState(() =>
+                                          _favoritesSearchExpanded = false),
+                                    )
+                                  : IconButton(
+                                      tooltip: '清空',
+                                      icon: const Icon(Icons.close),
+                                      onPressed: () =>
+                                          setState(() => _favoritesQuery = ''),
+                                    ),
+                              border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                              isDense: true,
                             ),
                           ),
-                          TopActionMenu<String>(
-                            tooltip: '更多',
-                            items: const [
-                              TopActionMenuItem(
-                                  value: 'history',
-                                  icon: Icons.history,
-                                  label: '历史记录'),
-                              TopActionMenuItem(
-                                  value: 'settings',
-                                  icon: Icons.settings_outlined,
-                                  label: '设置'),
-                              TopActionMenuItem(
-                                  value: 'tags',
-                                  icon: Icons.sell_outlined,
-                                  label: '标签管理'),
-                              TopActionMenuItem(
-                                  value: 'webdav',
-                                  icon: Icons.cloud_outlined,
-                                  label: 'WebDAV'),
-                              TopActionMenuItem(
-                                  value: 'emby',
-                                  icon: Icons.video_library_outlined,
-                                  label: 'Emby'),
-                              TopActionMenuItem(
-                                  value: 'refresh',
-                                  icon: Icons.refresh,
-                                  label: '刷新'),
-                            ],
-                            onSelected: (v) async {
-                              switch (v) {
-                                case 'history':
-                                  await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) => const HistoryPage()));
-                                  break;
-                                case 'settings':
-                                  await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) =>
-                                              const SettingsPage()));
-                                  break;
-                                case 'tags':
-                                  if (!mounted) return;
-                                  await showAdaptivePanel<void>(
-                                    context: context,
-                                    barrierLabel: 'tag_manager',
-                                    child: TagManagerPage(
-                                      onOpenItem: (item) =>
-                                          openTagTarget(context, item),
-                                      onLocateItem: (item) =>
-                                          locateTagTarget(context, item),
-                                    ),
-                                  );
-                                  break;
-                                case 'webdav':
-                                  if (!mounted) return;
-                                  await Navigator.push(
-                                      context, WebDavPage.routeNoAnim());
-                                  break;
-                                case 'emby':
-                                  if (!mounted) return;
-                                  await Navigator.push(
-                                      context, EmbyPage.routeNoAnim());
-                                  break;
-                                case 'refresh':
-                                  await _reload();
-                                  break;
-                              }
-                            },
-                          ),
                         ],
-                      ),
-                      if (_favoritesSearchExpanded ||
-                          _favoritesQuery.trim().isNotEmpty) ...[
-                        const SizedBox(height: 10),
-                        TextField(
-                          onChanged: (v) => setState(() => _favoritesQuery = v),
-                          decoration: InputDecoration(
-                            hintText: '搜索收藏夹',
-                            prefixIcon: const Icon(Icons.search),
-                            suffixIcon: _favoritesQuery.trim().isEmpty
-                                ? IconButton(
-                                    tooltip: '收起',
-                                    icon: const Icon(Icons.expand_less),
-                                    onPressed: () => setState(
-                                        () => _favoritesSearchExpanded = false),
-                                  )
-                                : IconButton(
-                                    tooltip: '清空',
-                                    icon: const Icon(Icons.close),
-                                    onPressed: () =>
-                                        setState(() => _favoritesQuery = ''),
-                                  ),
-                            border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12)),
-                            isDense: true,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-              FilterBar(
-                children: [
-                  ControlChip(
-                    icon: _favoritesGrid
-                        ? Icons.grid_view_outlined
-                        : Icons.view_list_outlined,
-                    label: _favoritesGrid ? '卡片' : '列表',
-                    selected: true,
-                    onTap: () =>
-                        setState(() => _favoritesGrid = !_favoritesGrid),
-                  ),
-                ],
-              ),
-              if (hasFilterState)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                  child: Glass(
-                    radius: 12,
-                    blur: 12,
-                    padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '已生效: ${activeTokens.join('  ·  ')}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: () => setState(() {
-                            _favoritesQuery = '';
-                            _favoritesSearchExpanded = false;
-                          }),
-                          child: const Text('清空'),
-                        ),
                       ],
                     ),
                   ),
                 ),
-              Expanded(child: body),
-            ],
+                FilterBar(
+                  children: [
+                    ControlChip(
+                      icon: _favoritesGrid
+                          ? Icons.grid_view_outlined
+                          : Icons.view_list_outlined,
+                      label: _favoritesGrid ? '卡片' : '列表',
+                      selected: true,
+                      onTap: () =>
+                          setState(() => _favoritesGrid = !_favoritesGrid),
+                    ),
+                  ],
+                ),
+                if (hasFilterState)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                    child: Glass(
+                      radius: 12,
+                      blur: 12,
+                      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '已生效: ${activeTokens.join('  ·  ')}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => setState(() {
+                              _favoritesQuery = '';
+                              _favoritesSearchExpanded = false;
+                            }),
+                            child: const Text('清空'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                Expanded(child: body),
+              ],
+            ),
           ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _newCollection,
-        icon: const Icon(Icons.create_new_folder_outlined),
-        label: const Text('新建收藏夹'),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: _newCollection,
+          icon: const Icon(Icons.create_new_folder_outlined),
+          label: const Text('新建收藏夹'),
+        ),
       ),
     );
   }
@@ -1879,6 +1891,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _videoMiniProgressWhenHidden = true;
   bool _videoCatalogEnabled = true;
   bool _videoEpisodeNavButtonsEnabled = true;
+  bool _videoResumeEnabled = true;
+  bool _videoResumeHintEnabled = true;
   bool _imageVolumeKeyPaging = false;
   bool _imageExitLocateEnabled = true;
 
@@ -1908,6 +1922,8 @@ class _SettingsPageState extends State<SettingsPage> {
       final catalogEnabled = await AppSettings.getVideoCatalogEnabled();
       final episodeNavEnabled =
           await AppSettings.getVideoEpisodeNavButtonsEnabled();
+      final videoResumeEnabled = await AppSettings.getVideoResumeEnabled();
+      final videoResumeHint = await AppSettings.getVideoResumeHintEnabled();
       final imageVolumePaging = await AppSettings.getImageVolumeKeyPaging();
       final imageExitLocate = await AppSettings.getImageExitLocateEnabled();
       final autoFav = await AppSettings.getAutoEnterLastFavorite();
@@ -1925,6 +1941,8 @@ class _SettingsPageState extends State<SettingsPage> {
         _videoMiniProgressWhenHidden = miniProgress;
         _videoCatalogEnabled = catalogEnabled;
         _videoEpisodeNavButtonsEnabled = episodeNavEnabled;
+        _videoResumeEnabled = videoResumeEnabled;
+        _videoResumeHintEnabled = videoResumeHint;
         _imageVolumeKeyPaging = imageVolumePaging;
         _imageExitLocateEnabled = imageExitLocate;
         _autoEnterLastFavorite = autoFav;
@@ -1942,189 +1960,225 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(body: AppLoadingState());
+      return const AnnotatedRegion<SystemUiOverlayStyle>(
+        value: _kDarkStatusBarStyle,
+        child: Scaffold(body: AppLoadingState()),
+      );
     }
 
-    return Scaffold(
-      appBar: GlassAppBar(title: const Text('设置')),
-      body: AppViewport(
-        child: ListView(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          children: [
-            const _SettingsSectionTitle('字幕'),
-            _SettingsSliderTile(
-              title: '字幕大小',
-              subtitle: '调整字幕字号（建议 18~30 之间）',
-              value: _subtitleFontSize,
-              min: 12,
-              max: 48,
-              divisions: 36,
-              valueText: _subtitleFontSize.toStringAsFixed(0),
-              onChanged: (v) async {
-                setState(() => _subtitleFontSize = v);
-                await AppSettings.setSubtitleFontSize(v);
-              },
-            ),
-            _SettingsSliderTile(
-              title: '字幕位置（距底部）',
-              subtitle: '避免遮挡画面关键区域',
-              value: _subtitleBottomOffset,
-              min: 0,
-              max: 200,
-              divisions: 40,
-              valueText: _subtitleBottomOffset.toStringAsFixed(0),
-              onChanged: (v) async {
-                setState(() => _subtitleBottomOffset = v);
-                await AppSettings.setSubtitleBottomOffset(v);
-              },
-            ),
-            const SizedBox(height: 10),
-            const _SettingsSectionTitle('交互'),
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text('单击唤出控制栏 / 双击播放暂停'),
-              subtitle: Text('移动端采用主流观影播放器交互'),
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('长按倍数播放'),
-              subtitle: const Text('按住屏幕临时加速播放，松开恢复原倍速'),
-              value: _longPressSpeedEnabled,
-              onChanged: (v) async {
-                setState(() => _longPressSpeedEnabled = v);
-                await AppSettings.setLongPressSpeedEnabled(v);
-              },
-            ),
-            if (_longPressSpeedEnabled)
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: Scaffold(
+        appBar: GlassAppBar(title: const Text('设置')),
+        body: AppViewport(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            children: [
+              const _SettingsSectionTitle('字幕'),
               _SettingsSliderTile(
-                title: '长按倍速乘数',
-                subtitle: '最终倍速 = 当前倍速 × 乘数',
-                value: _longPressSpeedMultiplier,
-                min: 1.25,
-                max: 4.0,
-                divisions: 11,
-                valueText: _longPressSpeedMultiplier.toStringAsFixed(2),
+                title: '字幕大小',
+                subtitle: '调整字幕字号（建议 18~30 之间）',
+                value: _subtitleFontSize,
+                min: 12,
+                max: 48,
+                divisions: 36,
+                valueText: _subtitleFontSize.toStringAsFixed(0),
                 onChanged: (v) async {
-                  setState(() => _longPressSpeedMultiplier = v);
-                  await AppSettings.setLongPressSpeedMultiplier(v);
+                  setState(() => _subtitleFontSize = v);
+                  await AppSettings.setSubtitleFontSize(v);
                 },
               ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('隐藏控制栏时显示底部细进度'),
-              subtitle: const Text('关闭后全屏更干净，但无法看到当前进度'),
-              value: _videoMiniProgressWhenHidden,
-              onChanged: (v) async {
-                setState(() => _videoMiniProgressWhenHidden = v);
-                await AppSettings.setVideoMiniProgressWhenHidden(v);
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('显示目录按钮'),
-              subtitle: const Text('关闭后隐藏播放器目录入口，并禁用 L/Ctrl+L 与右上热区'),
-              value: _videoCatalogEnabled,
-              onChanged: (v) async {
-                setState(() => _videoCatalogEnabled = v);
-                await AppSettings.setVideoCatalogEnabled(v);
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('显示上下集按钮'),
-              subtitle: const Text('关闭后隐藏播放器底部的上一集/下一集按钮'),
-              value: _videoEpisodeNavButtonsEnabled,
-              onChanged: (v) async {
-                setState(() => _videoEpisodeNavButtonsEnabled = v);
-                await AppSettings.setVideoEpisodeNavButtonsEnabled(v);
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('图片音量键翻页'),
-              subtitle: const Text('开启后：音量+ 下一张，音量- 上一张（移动端可能受系统限制）'),
-              value: _imageVolumeKeyPaging,
-              onChanged: (v) async {
-                setState(() => _imageVolumeKeyPaging = v);
-                await AppSettings.setImageVolumeKeyPaging(v);
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('退出图片后定位到最后浏览项'),
-              subtitle: const Text('从图片查看器返回时，列表自动跳到你最后浏览的那张图'),
-              value: _imageExitLocateEnabled,
-              onChanged: (v) async {
-                setState(() => _imageExitLocateEnabled = v);
-                await AppSettings.setImageExitLocateEnabled(v);
-              },
-            ),
-            const SizedBox(height: 10),
-            const _SettingsSectionTitle('收藏夹'),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('启动后自动进入上次收藏夹'),
-              subtitle: const Text('开启后，下次打开软件会自动进入你上次打开的收藏夹'),
-              value: _autoEnterLastFavorite,
-              onChanged: (v) async {
-                setState(() => _autoEnterLastFavorite = v);
-                await AppSettings.setAutoEnterLastFavorite(v);
-                if (!v) {
-                  // 关闭时清理 last id，避免用户误以为还会跳转。
-                  await AppSettings.setLastFavoriteId(null);
-                }
-              },
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('按目录独立记忆视图与排序'),
-              subtitle: const Text('开启后每个目录独立保存视图模式、排序方式和升降序'),
-              value: _favoritePerDirectoryDisplaySettingsEnabled,
-              onChanged: (v) async {
-                setState(() => _favoritePerDirectoryDisplaySettingsEnabled = v);
-                await AppSettings.setFavoritePerDirectoryDisplaySettingsEnabled(
-                    v);
-              },
-            ),
-            const SizedBox(height: 10),
-            const _SettingsSectionTitle('历史记录'),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('记录播放历史'),
-              subtitle: const Text('关闭后不会新增历史记录（已有历史不会自动删除）'),
-              value: _historyEnabled,
-              onChanged: (v) async {
-                setState(() => _historyEnabled = v);
-                await AppSettings.setHistoryEnabled(v);
-              },
-            ),
-            const SizedBox(height: 10),
-            const _SettingsSectionTitle('标签'),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('启用标签功能'),
-              subtitle: const Text('关闭后隐藏标签管理入口，并禁用长按打 Tag 与标签筛选'),
-              value: _tagEnabled,
-              onChanged: (v) async {
-                setState(() => _tagEnabled = v);
-                await AppSettings.setTagEnabled(v);
-              },
-            ),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('清空历史记录'),
-              subtitle: const Text('不可恢复，请谨慎操作'),
-              trailing: const Icon(Icons.delete_outline),
-              onTap: () async {
-                final ok = await _confirm(context,
-                    title: '清空历史', message: '确定要清空全部历史记录吗？');
-                if (!ok) return;
-                await AppHistory.clear();
-                if (!mounted) return;
-                showAppToast(context, '已清空历史记录');
-              },
-            ),
-          ],
+              _SettingsSliderTile(
+                title: '字幕位置（距底部）',
+                subtitle: '避免遮挡画面关键区域',
+                value: _subtitleBottomOffset,
+                min: 0,
+                max: 200,
+                divisions: 40,
+                valueText: _subtitleBottomOffset.toStringAsFixed(0),
+                onChanged: (v) async {
+                  setState(() => _subtitleBottomOffset = v);
+                  await AppSettings.setSubtitleBottomOffset(v);
+                },
+              ),
+              const SizedBox(height: 10),
+              const _SettingsSectionTitle('交互'),
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text('单击唤出控制栏 / 双击播放暂停'),
+                subtitle: Text('移动端采用主流观影播放器交互'),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('长按倍数播放'),
+                subtitle: const Text('按住屏幕临时加速播放，松开恢复原倍速'),
+                value: _longPressSpeedEnabled,
+                onChanged: (v) async {
+                  setState(() => _longPressSpeedEnabled = v);
+                  await AppSettings.setLongPressSpeedEnabled(v);
+                },
+              ),
+              if (_longPressSpeedEnabled)
+                _SettingsSliderTile(
+                  title: '长按倍速乘数',
+                  subtitle: '最终倍速 = 当前倍速 × 乘数',
+                  value: _longPressSpeedMultiplier,
+                  min: 1.25,
+                  max: 4.0,
+                  divisions: 11,
+                  valueText: _longPressSpeedMultiplier.toStringAsFixed(2),
+                  onChanged: (v) async {
+                    setState(() => _longPressSpeedMultiplier = v);
+                    await AppSettings.setLongPressSpeedMultiplier(v);
+                  },
+                ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('隐藏控制栏时显示底部细进度'),
+                subtitle: const Text('关闭后全屏更干净，但无法看到当前进度'),
+                value: _videoMiniProgressWhenHidden,
+                onChanged: (v) async {
+                  setState(() => _videoMiniProgressWhenHidden = v);
+                  await AppSettings.setVideoMiniProgressWhenHidden(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('显示目录按钮'),
+                subtitle: const Text('关闭后隐藏播放器目录入口，并禁用 L/Ctrl+L 与右上热区'),
+                value: _videoCatalogEnabled,
+                onChanged: (v) async {
+                  setState(() => _videoCatalogEnabled = v);
+                  await AppSettings.setVideoCatalogEnabled(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('显示上下集按钮'),
+                subtitle: const Text('关闭后隐藏播放器底部的上一集/下一集按钮'),
+                value: _videoEpisodeNavButtonsEnabled,
+                onChanged: (v) async {
+                  setState(() => _videoEpisodeNavButtonsEnabled = v);
+                  await AppSettings.setVideoEpisodeNavButtonsEnabled(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('图片音量键翻页'),
+                subtitle: const Text('开启后：音量+ 上一张，音量- 下一张（移动端可能受系统限制）'),
+                value: _imageVolumeKeyPaging,
+                onChanged: (v) async {
+                  setState(() => _imageVolumeKeyPaging = v);
+                  await AppSettings.setImageVolumeKeyPaging(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('退出图片后定位到最后浏览项'),
+                subtitle: const Text('从图片查看器返回时，列表自动跳到你最后浏览的那张图'),
+                value: _imageExitLocateEnabled,
+                onChanged: (v) async {
+                  setState(() => _imageExitLocateEnabled = v);
+                  await AppSettings.setImageExitLocateEnabled(v);
+                },
+              ),
+              const SizedBox(height: 10),
+              const _SettingsSectionTitle('收藏夹'),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启动后自动进入上次收藏夹'),
+                subtitle: const Text('开启后，下次打开软件会自动进入你上次打开的收藏夹'),
+                value: _autoEnterLastFavorite,
+                onChanged: (v) async {
+                  setState(() => _autoEnterLastFavorite = v);
+                  await AppSettings.setAutoEnterLastFavorite(v);
+                  if (!v) {
+                    // 关闭时清理 last id，避免用户误以为还会跳转。
+                    await AppSettings.setLastFavoriteId(null);
+                  }
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('按目录独立记忆视图与排序'),
+                subtitle:
+                    const Text('开启后每个目录独立保存视图模式、排序方式和升降序（本地/WebDAV/Emby）'),
+                value: _favoritePerDirectoryDisplaySettingsEnabled,
+                onChanged: (v) async {
+                  setState(
+                      () => _favoritePerDirectoryDisplaySettingsEnabled = v);
+                  await AppSettings
+                      .setFavoritePerDirectoryDisplaySettingsEnabled(v);
+                },
+              ),
+              const SizedBox(height: 10),
+              const _SettingsSectionTitle('历史记录'),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('记录播放历史'),
+                subtitle: const Text('关闭后不会新增历史记录（已有历史不会自动删除）'),
+                value: _historyEnabled,
+                onChanged: (v) async {
+                  setState(() => _historyEnabled = v);
+                  await AppSettings.setHistoryEnabled(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('自动从上次进度继续播放'),
+                subtitle: const Text('关闭后每次都从头播放'),
+                value: _videoResumeEnabled,
+                onChanged: (v) async {
+                  setState(() {
+                    _videoResumeEnabled = v;
+                    if (!v) _videoResumeHintEnabled = false;
+                  });
+                  await AppSettings.setVideoResumeEnabled(v);
+                  if (!v) {
+                    await AppSettings.setVideoResumeHintEnabled(false);
+                  }
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('显示“继续播放”提示'),
+                subtitle: const Text('关闭后仍会续播，但不显示“从 xx 继续播放”提示'),
+                value: _videoResumeHintEnabled,
+                onChanged: _videoResumeEnabled
+                    ? (v) async {
+                        setState(() => _videoResumeHintEnabled = v);
+                        await AppSettings.setVideoResumeHintEnabled(v);
+                      }
+                    : null,
+              ),
+              const SizedBox(height: 10),
+              const _SettingsSectionTitle('标签'),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启用标签功能'),
+                subtitle: const Text('关闭后隐藏标签管理入口，并禁用长按打 Tag 与标签筛选'),
+                value: _tagEnabled,
+                onChanged: (v) async {
+                  setState(() => _tagEnabled = v);
+                  await AppSettings.setTagEnabled(v);
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('清空历史记录'),
+                subtitle: const Text('不可恢复，请谨慎操作'),
+                trailing: const Icon(Icons.delete_outline),
+                onTap: () async {
+                  final ok = await _confirm(context,
+                      title: '清空历史', message: '确定要清空全部历史记录吗？');
+                  if (!ok) return;
+                  await AppHistory.clear();
+                  if (!mounted) return;
+                  showAppToast(context, '已清空历史记录');
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2410,151 +2464,159 @@ class _HistoryPageState extends State<HistoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: GlassAppBar(
-        title: const Text('历史记录'),
-        actions: [
-          IconButton(
-              onPressed: _reloading ? null : _reload,
-              icon: const Icon(Icons.refresh),
-              tooltip: '刷新'),
-        ],
-      ),
-      body: _loading
-          ? const AppLoadingState()
-          : _loadError != null
-              ? AppErrorState(
-                  title: '加载历史失败',
-                  details: friendlyErrorMessage(_loadError!),
-                  onRetry: _reload,
-                )
-              : _list.isEmpty
-                  ? const AppEmptyState(
-                      title: '暂无历史记录',
-                      subtitle: '播放媒体后会自动出现在这里',
-                      icon: Icons.history_toggle_off,
-                    )
-                  : RefreshIndicator(
-                      onRefresh: _reload,
-                      child: AppViewport(
-                        child: ListView.separated(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 10),
-                          itemCount: _list.length,
-                          separatorBuilder: (_, __) => const Divider(height: 1),
-                          itemBuilder: (_, i) {
-                            final e = _list[i];
-                            final kind =
-                                (e['kind'] ?? 'media').toString().trim();
-                            final title = (e['title'] ?? '').toString().trim();
-                            final path = (e['path'] ?? '').toString().trim();
-                            final cover = (e['cover'] ?? '').toString().trim();
-                            final favId = (e['favId'] ?? '').toString().trim();
-                            final t =
-                                int.tryParse((e['t'] ?? '').toString()) ?? 0;
-                            final pos =
-                                int.tryParse((e['pos'] ?? '').toString());
-                            final posText = _fmtPos(pos);
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: Scaffold(
+        appBar: GlassAppBar(
+          title: const Text('历史记录'),
+          actions: [
+            IconButton(
+                onPressed: _reloading ? null : _reload,
+                icon: const Icon(Icons.refresh),
+                tooltip: '刷新'),
+          ],
+        ),
+        body: _loading
+            ? const AppLoadingState()
+            : _loadError != null
+                ? AppErrorState(
+                    title: '加载历史失败',
+                    details: friendlyErrorMessage(_loadError!),
+                    onRetry: _reload,
+                  )
+                : _list.isEmpty
+                    ? const AppEmptyState(
+                        title: '暂无历史记录',
+                        subtitle: '播放媒体后会自动出现在这里',
+                        icon: Icons.history_toggle_off,
+                      )
+                    : RefreshIndicator(
+                        onRefresh: _reload,
+                        child: AppViewport(
+                          child: ListView.separated(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                            itemCount: _list.length,
+                            separatorBuilder: (_, __) =>
+                                const Divider(height: 1),
+                            itemBuilder: (_, i) {
+                              final e = _list[i];
+                              final kind =
+                                  (e['kind'] ?? 'media').toString().trim();
+                              final title =
+                                  (e['title'] ?? '').toString().trim();
+                              final path = (e['path'] ?? '').toString().trim();
+                              final cover =
+                                  (e['cover'] ?? '').toString().trim();
+                              final favId =
+                                  (e['favId'] ?? '').toString().trim();
+                              final t =
+                                  int.tryParse((e['t'] ?? '').toString()) ?? 0;
+                              final pos =
+                                  int.tryParse((e['pos'] ?? '').toString());
+                              final posText = _fmtPos(pos);
 
-                            return Card(
-                              elevation: 0,
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(14),
-                                onTap: () {
-                                  if (path.isEmpty) return;
-                                  if (kind == 'fav') {
-                                    _openFavoriteFromHistory(favId);
-                                    return;
-                                  }
-                                  if (kind == 'folder') {
-                                    _openFolderFromHistory(e);
-                                    return;
-                                  }
+                              return Card(
+                                elevation: 0,
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(14),
+                                  onTap: () {
+                                    if (path.isEmpty) return;
+                                    if (kind == 'fav') {
+                                      _openFavoriteFromHistory(favId);
+                                      return;
+                                    }
+                                    if (kind == 'folder') {
+                                      _openFolderFromHistory(e);
+                                      return;
+                                    }
 
-                                  if (!_isWebDavPath(path) &&
-                                      !_isEmbyPath(path) &&
-                                      _isImg(path)) {
+                                    if (!_isWebDavPath(path) &&
+                                        !_isEmbyPath(path) &&
+                                        _isImg(path)) {
+                                      Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                              builder: (_) => ImageViewerPage(
+                                                  imagePaths: [path],
+                                                  initialIndex: 0)));
+                                      return;
+                                    }
+
                                     Navigator.push(
                                         context,
                                         MaterialPageRoute(
-                                            builder: (_) => ImageViewerPage(
-                                                imagePaths: [path],
+                                            builder: (_) => VideoPlayerPage(
+                                                videoPaths: [path],
                                                 initialIndex: 0)));
-                                    return;
-                                  }
-
-                                  Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) => VideoPlayerPage(
-                                              videoPaths: [path],
-                                              initialIndex: 0)));
-                                },
-                                child: Padding(
-                                  padding: const EdgeInsets.all(10),
-                                  child: Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      SizedBox(
-                                          width: 120,
-                                          height: 68,
-                                          child:
-                                              _historyCover(kind, path, cover)),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              title.isEmpty ? '未命名文件' : title,
-                                              maxLines: 2,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.w600),
-                                            ),
-                                            const SizedBox(height: 6),
-                                            Text(
-                                              [
-                                                if (t > 0) _fmtTime(t),
-                                                if (kind != 'fav' &&
-                                                    posText.isNotEmpty)
-                                                  '进度：$posText',
-                                                if (kind == 'fav') '收藏夹',
-                                                if (kind == 'folder') '目录',
-                                              ]
-                                                  .where((s) =>
-                                                      s.trim().isNotEmpty)
-                                                  .join(' · '),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                  fontSize: 12,
-                                                  color: Theme.of(context)
-                                                      .hintColor),
-                                            ),
-                                          ],
+                                  },
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(10),
+                                    child: Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        SizedBox(
+                                            width: 120,
+                                            height: 68,
+                                            child: _historyCover(
+                                                kind, path, cover)),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                title.isEmpty ? '未命名文件' : title,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                    fontSize: 14,
+                                                    fontWeight:
+                                                        FontWeight.w600),
+                                              ),
+                                              const SizedBox(height: 6),
+                                              Text(
+                                                [
+                                                  if (t > 0) _fmtTime(t),
+                                                  if (kind != 'fav' &&
+                                                      posText.isNotEmpty)
+                                                    '进度：$posText',
+                                                  if (kind == 'fav') '收藏夹',
+                                                  if (kind == 'folder') '目录',
+                                                ]
+                                                    .where((s) =>
+                                                        s.trim().isNotEmpty)
+                                                    .join(' · '),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: Theme.of(context)
+                                                        .hintColor),
+                                              ),
+                                            ],
+                                          ),
                                         ),
-                                      ),
-                                      IconButton(
-                                        tooltip: '删除',
-                                        icon: const Icon(Icons.close),
-                                        onPressed: () async {
-                                          await AppHistory.removeAt(i);
-                                          await _reload();
-                                        },
-                                      ),
-                                    ],
+                                        IconButton(
+                                          tooltip: '删除',
+                                          icon: const Icon(Icons.close),
+                                          onPressed: () async {
+                                            await AppHistory.removeAt(i);
+                                            await _reload();
+                                          },
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
                       ),
-                    ),
+      ),
     );
   }
 
@@ -4017,8 +4079,233 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
   final Map<String, Future<File?>> _wdVideoThumbJobs =
       <String, Future<File?>>{};
 
-  LayerSettings get _active =>
-      _stack.length == 1 ? widget.collection.layer1 : widget.collection.layer2;
+  bool _favoritePerDirectoryDisplaySettingsEnabled = false;
+  final LinkedHashMap<String, LayerSettings> _perDirectoryDisplaySettings =
+      LinkedHashMap<String, LayerSettings>();
+  static const int _maxPerDirectoryDisplaySettingsEntries = 500;
+
+  String _normLocalDirForDisplayKey(String dir) {
+    final raw = dir.trim();
+    if (raw.isEmpty) return '';
+    try {
+      var out = p.normalize(raw);
+      while (out.length > 1 &&
+          (out.endsWith('/') || out.endsWith('\\')) &&
+          !RegExp(r'^[a-zA-Z]:[\\/]$').hasMatch(out)) {
+        out = out.substring(0, out.length - 1);
+      }
+      if (Platform.isWindows) out = out.toLowerCase();
+      return out;
+    } catch (_) {
+      var out = raw;
+      if (Platform.isWindows) out = out.toLowerCase();
+      return out;
+    }
+  }
+
+  String _normWebDavDirForDisplayKey(String rel) {
+    var out = rel.trim().replaceAll('\\', '/');
+    out = out.replaceAll(RegExp(r'/+'), '/');
+    if (out.startsWith('/')) out = out.substring(1);
+    if (out == '.' || out == '/') out = '';
+    if (out.isNotEmpty && !out.endsWith('/')) out = '$out/';
+    return out;
+  }
+
+  String _normEmbyPathForDisplayKey(String path) {
+    final out = path.trim();
+    if (out.isEmpty) return 'favorites';
+    if (out.toLowerCase() == 'favorites') return 'favorites';
+    if (out.toLowerCase().startsWith('view:')) {
+      final id = out.substring('view:'.length).trim();
+      if (id.isEmpty) return 'favorites';
+      return 'view:$id';
+    }
+    return out;
+  }
+
+  String _displaySettingsKeyForCtx(_NavCtx ctx) {
+    switch (ctx.kind) {
+      case _CtxKind.root:
+        return '';
+      case _CtxKind.local:
+        final dir = _normLocalDirForDisplayKey(ctx.localDir ?? '');
+        if (dir.isEmpty) return '';
+        return 'local://$dir';
+      case _CtxKind.webdav:
+        final accId = (ctx.wdAccountId ?? '').trim();
+        if (accId.isEmpty) return '';
+        final rel = _normWebDavDirForDisplayKey(ctx.wdRel);
+        return 'webdav://$accId/$rel';
+      case _CtxKind.emby:
+        final accId = (ctx.embyAccountId ?? '').trim();
+        if (accId.isEmpty) return '';
+        final path = _normEmbyPathForDisplayKey(ctx.embyPath);
+        return 'emby://$accId/$path';
+    }
+  }
+
+  String _normalizePersistedDisplaySettingsKey(String rawKey) {
+    final key = rawKey.trim();
+    if (key.isEmpty) return '';
+
+    const localPrefix = 'local://';
+    const webDavPrefix = 'webdav://';
+    const embyPrefix = 'emby://';
+
+    if (key.startsWith(localPrefix)) {
+      final dir = _normLocalDirForDisplayKey(key.substring(localPrefix.length));
+      if (dir.isEmpty) return '';
+      return '$localPrefix$dir';
+    }
+
+    if (key.startsWith(webDavPrefix)) {
+      final rest = key.substring(webDavPrefix.length);
+      final slash = rest.indexOf('/');
+      final accId = (slash < 0 ? rest : rest.substring(0, slash)).trim();
+      if (accId.isEmpty) return '';
+      final rel = slash < 0
+          ? ''
+          : _normWebDavDirForDisplayKey(rest.substring(slash + 1));
+      return '$webDavPrefix$accId/$rel';
+    }
+
+    if (key.startsWith(embyPrefix)) {
+      final rest = key.substring(embyPrefix.length);
+      final slash = rest.indexOf('/');
+      final accId = (slash < 0 ? rest : rest.substring(0, slash)).trim();
+      if (accId.isEmpty) return '';
+      final path = slash < 0
+          ? 'favorites'
+          : _normEmbyPathForDisplayKey(rest.substring(slash + 1));
+      return '$embyPrefix$accId/$path';
+    }
+
+    return key;
+  }
+
+  void _touchPerDirectoryDisplaySettingsKey(String key) {
+    final normalized = _normalizePersistedDisplaySettingsKey(key);
+    if (normalized.isEmpty) return;
+    final hit = _perDirectoryDisplaySettings.remove(normalized);
+    if (hit != null) {
+      _perDirectoryDisplaySettings[normalized] = hit;
+    }
+  }
+
+  LayerSettings _ensurePerDirectoryLayerSettings(String key) {
+    final normalized = _normalizePersistedDisplaySettingsKey(key);
+    if (normalized.isEmpty) return widget.collection.layer2;
+    final hit = _perDirectoryDisplaySettings[normalized];
+    if (hit != null) {
+      _touchPerDirectoryDisplaySettingsKey(normalized);
+      return hit;
+    }
+    final seeded = widget.collection.layer2.copy();
+    _perDirectoryDisplaySettings[normalized] = seeded;
+    _touchPerDirectoryDisplaySettingsKey(normalized);
+    while (_perDirectoryDisplaySettings.length >
+        _maxPerDirectoryDisplaySettingsEntries) {
+      _perDirectoryDisplaySettings
+          .remove(_perDirectoryDisplaySettings.keys.first);
+    }
+    return seeded;
+  }
+
+  LayerSettings get _active {
+    if (_stack.length == 1) return widget.collection.layer1;
+    if (!_favoritePerDirectoryDisplaySettingsEnabled) {
+      return widget.collection.layer2;
+    }
+    final key = _displaySettingsKeyForCtx(_stack.last);
+    if (key.isEmpty) return widget.collection.layer2;
+    return _ensurePerDirectoryLayerSettings(key);
+  }
+
+  Map<String, dynamic> _buildPerDirectoryDisplaySettingsJson() {
+    final out = <String, dynamic>{};
+    for (final e in _perDirectoryDisplaySettings.entries) {
+      final key = _normalizePersistedDisplaySettingsKey(e.key);
+      if (key.isEmpty) continue;
+      out[key] = e.value.toJson();
+    }
+    return out;
+  }
+
+  Future<void> _persistPerDirectoryDisplaySettings() async {
+    if (!_favoritePerDirectoryDisplaySettingsEnabled) return;
+    try {
+      await AppSettings.setFavoritePerDirectoryDisplaySettingsState(
+        _buildPerDirectoryDisplaySettingsJson(),
+      );
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  Future<void> _loadPerDirectoryDisplaySettings() async {
+    bool enabled = false;
+    final loaded = LinkedHashMap<String, LayerSettings>();
+    try {
+      enabled =
+          await AppSettings.getFavoritePerDirectoryDisplaySettingsEnabled();
+      if (enabled) {
+        final raw =
+            await AppSettings.getFavoritePerDirectoryDisplaySettingsState();
+        for (final e in raw.entries) {
+          final key = _normalizePersistedDisplaySettingsKey(e.key);
+          if (key.isEmpty) continue;
+          loaded[key] = LayerSettings.fromJson(e.value);
+          if (loaded.length >= _maxPerDirectoryDisplaySettingsEntries) break;
+        }
+      }
+    } catch (_) {
+      enabled = false;
+      loaded.clear();
+    }
+    if (!mounted) return;
+    final disableFromEnabled =
+        _favoritePerDirectoryDisplaySettingsEnabled && !enabled;
+    // Turning OFF per-directory mode should fall back to one unified layer2.
+    // Use current directory settings so the on-screen result does not jump.
+    final fallbackUnified = disableFromEnabled ? _active.copy() : null;
+    setState(() {
+      if (fallbackUnified != null && _stack.length > 1) {
+        widget.collection.layer2 = fallbackUnified;
+      }
+      _favoritePerDirectoryDisplaySettingsEnabled = enabled;
+      _perDirectoryDisplaySettings
+        ..clear()
+        ..addAll(loaded);
+    });
+  }
+
+  Future<void> _reloadDynamicSettings() async {
+    bool tagEnabled = _tagEnabled;
+    try {
+      tagEnabled = await AppSettings.getTagEnabled();
+    } catch (_) {}
+    if (mounted && tagEnabled != _tagEnabled) {
+      setState(() => _tagEnabled = tagEnabled);
+    }
+    await _loadPerDirectoryDisplaySettings();
+  }
+
+  void _updateActiveLayerSettings(
+      void Function(LayerSettings settings) updater) {
+    setState(() {
+      final active = _active;
+      updater(active);
+      // In unified mode, folder display writes to collection.layer2.
+      // In per-directory mode, active already points to a directory entry map.
+      if (_stack.length > 1 && !_favoritePerDirectoryDisplaySettingsEnabled) {
+        widget.collection.layer2 = active.copy();
+      }
+    });
+    // ignore: unawaited_futures
+    _persistPerDirectoryDisplaySettings();
+  }
+
   String get _title {
     if (_stack.length == 1) return widget.collection.name;
     final cur = _stack.last;
@@ -4061,6 +4348,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       _stack.add(initNav);
     }
 
+    // ignore: unawaited_futures
+    _reloadDynamicSettings();
     _refresh();
 
     // Folder cover cache init (async)
@@ -4069,10 +4358,6 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     // TagStore：用于标签筛选（隐藏式筛选面板）
     // ignore: unawaited_futures
     TagStore.I.ensureLoaded().then((_) => mounted ? setState(() {}) : null);
-    // 标签功能开关：用于长按打 Tag / 标签筛选 / 标签管理入口
-    // 设计原因：用户不需要标签时，避免误触与多余 UI。
-    AppSettings.getTagEnabled()
-        .then((v) => mounted ? setState(() => _tagEnabled = v) : null);
     TagStore.I.addListener(_onTagStoreChanged);
   }
 
@@ -5378,7 +5663,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       iconOf: _vmIcon,
     );
     if (v == null) return;
-    setState(() => _active.viewMode = v);
+    _updateActiveLayerSettings((s) => s.viewMode = v);
   }
 
   Future<void> _pickSort() async {
@@ -5391,7 +5676,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       iconOf: _skIcon,
     );
     if (k == null) return;
-    setState(() => _active.sortKey = k);
+    _updateActiveLayerSettings((s) => s.sortKey = k);
 
     // ✅ 当用户切换到“按大小排序”且当前为 Emby 目录时，按需补全 size=0。
     // ignore: unawaited_futures
@@ -5743,291 +6028,305 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                         child: _buildByMode(list, imgs, vids),
                       );
 
-    return WillPopScope(
-      onWillPop: _onBack,
-      child: Scaffold(
-        body: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFFF7F6FF), Color(0xFFEFF4FF), Color(0xFFF6FBFF)],
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _kDarkStatusBarStyle,
+      child: WillPopScope(
+        onWillPop: _onBack,
+        child: Scaffold(
+          body: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFFF7F6FF),
+                  Color(0xFFEFF4FF),
+                  Color(0xFFF6FBFF)
+                ],
+              ),
             ),
-          ),
-          child: SafeArea(
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-                  child: Glass(
-                    radius: 16,
-                    blur: 16,
-                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
-                    child: Column(
-                      children: [
-                        Row(
-                          children: [
-                            IconButton(
-                              onPressed: _onBack,
-                              icon: const Icon(Icons.arrow_back),
-                              tooltip: '返回',
-                            ),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    _stackBreadcrumb(),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .onSurface
-                                          .withOpacity(0.65),
-                                    ),
-                                  ),
-                                  Text(
-                                    _title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w700),
-                                  ),
-                                ],
+            child: SafeArea(
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+                    child: Glass(
+                      radius: 16,
+                      blur: 16,
+                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              IconButton(
+                                onPressed: _onBack,
+                                icon: const Icon(Icons.arrow_back),
+                                tooltip: '返回',
                               ),
-                            ),
-                            IconButton(
-                              tooltip:
-                                  _searchExpanded || hasQuery ? '收起搜索' : '展开搜索',
-                              onPressed: () => setState(() {
-                                final showing = _searchExpanded || hasQuery;
-                                if (showing) {
-                                  _q = '';
-                                  _searchExpanded = false;
-                                  _clearScopeSearchState();
-                                } else {
-                                  _searchExpanded = true;
-                                }
-                              }),
-                              icon: Icon(
-                                _searchExpanded || hasQuery
-                                    ? Icons.close
-                                    : Icons.search,
-                              ),
-                            ),
-                            TopActionMenu<String>(
-                              tooltip: '更多',
-                              items: [
-                                const TopActionMenuItem(
-                                    value: 'search_scope',
-                                    icon: Icons.search_outlined,
-                                    label: '搜索范围'),
-                                const TopActionMenuItem(
-                                    value: 'history',
-                                    icon: Icons.history,
-                                    label: '历史记录'),
-                                const TopActionMenuItem(
-                                    value: 'settings',
-                                    icon: Icons.settings_outlined,
-                                    label: '设置'),
-                                const TopActionMenuItem(
-                                    value: 'refresh',
-                                    icon: Icons.refresh,
-                                    label: '刷新'),
-                                if (_stack.isNotEmpty &&
-                                    _stack.last.kind == _CtxKind.local)
-                                  const TopActionMenuItem(
-                                      value: 'add',
-                                      icon: Icons.add,
-                                      label: '添加文件'),
-                                const TopActionMenuItem(
-                                    value: 'tag_manager',
-                                    icon: Icons.sell_outlined,
-                                    label: '标签管理'),
-                                const TopActionMenuItem(
-                                    value: 'webdav',
-                                    icon: Icons.cloud_outlined,
-                                    label: 'WebDAV'),
-                                const TopActionMenuItem(
-                                    value: 'emby',
-                                    icon: Icons.video_library_outlined,
-                                    label: 'Emby'),
-                              ],
-                              onSelected: (v) async {
-                                switch (v) {
-                                  case 'search_scope':
-                                    await _showSearchScopePanel();
-                                    break;
-                                  case 'history':
-                                    await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) => const HistoryPage()),
-                                    );
-                                    break;
-                                  case 'settings':
-                                    await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                          builder: (_) => const SettingsPage()),
-                                    );
-                                    break;
-                                  case 'refresh':
-                                    await _refresh();
-                                    break;
-                                  case 'add':
-                                    await _addFilesHere();
-                                    break;
-                                  case 'tag_manager':
-                                    if (!mounted) return;
-                                    await showAdaptivePanel<void>(
-                                      context: context,
-                                      barrierLabel: 'tag_manager',
-                                      child: TagManagerPage(
-                                        onOpenItem: (item) =>
-                                            openTagTarget(context, item),
-                                        onLocateItem: (item) =>
-                                            locateTagTarget(context, item),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _stackBreadcrumb(),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onSurface
+                                            .withOpacity(0.65),
                                       ),
-                                    );
-                                    break;
-                                  case 'webdav':
-                                    if (!mounted) return;
-                                    await Navigator.push(
-                                        context, WebDavPage.routeNoAnim());
-                                    break;
-                                  case 'emby':
-                                    if (!mounted) return;
-                                    await Navigator.push(
-                                        context, EmbyPage.routeNoAnim());
-                                    break;
-                                }
-                              },
+                                    ),
+                                    Text(
+                                      _title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w700),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: _searchExpanded || hasQuery
+                                    ? '收起搜索'
+                                    : '展开搜索',
+                                onPressed: () => setState(() {
+                                  final showing = _searchExpanded || hasQuery;
+                                  if (showing) {
+                                    _q = '';
+                                    _searchExpanded = false;
+                                    _clearScopeSearchState();
+                                  } else {
+                                    _searchExpanded = true;
+                                  }
+                                }),
+                                icon: Icon(
+                                  _searchExpanded || hasQuery
+                                      ? Icons.close
+                                      : Icons.search,
+                                ),
+                              ),
+                              TopActionMenu<String>(
+                                tooltip: '更多',
+                                items: [
+                                  const TopActionMenuItem(
+                                      value: 'search_scope',
+                                      icon: Icons.search_outlined,
+                                      label: '搜索范围'),
+                                  const TopActionMenuItem(
+                                      value: 'history',
+                                      icon: Icons.history,
+                                      label: '历史记录'),
+                                  const TopActionMenuItem(
+                                      value: 'settings',
+                                      icon: Icons.settings_outlined,
+                                      label: '设置'),
+                                  const TopActionMenuItem(
+                                      value: 'refresh',
+                                      icon: Icons.refresh,
+                                      label: '刷新'),
+                                  if (_stack.isNotEmpty &&
+                                      _stack.last.kind == _CtxKind.local)
+                                    const TopActionMenuItem(
+                                        value: 'add',
+                                        icon: Icons.add,
+                                        label: '添加文件'),
+                                  const TopActionMenuItem(
+                                      value: 'tag_manager',
+                                      icon: Icons.sell_outlined,
+                                      label: '标签管理'),
+                                  const TopActionMenuItem(
+                                      value: 'webdav',
+                                      icon: Icons.cloud_outlined,
+                                      label: 'WebDAV'),
+                                  const TopActionMenuItem(
+                                      value: 'emby',
+                                      icon: Icons.video_library_outlined,
+                                      label: 'Emby'),
+                                ],
+                                onSelected: (v) async {
+                                  switch (v) {
+                                    case 'search_scope':
+                                      await _showSearchScopePanel();
+                                      break;
+                                    case 'history':
+                                      await Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                            builder: (_) =>
+                                                const HistoryPage()),
+                                      );
+                                      break;
+                                    case 'settings':
+                                      await Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                            builder: (_) =>
+                                                const SettingsPage()),
+                                      );
+                                      await _reloadDynamicSettings();
+                                      break;
+                                    case 'refresh':
+                                      await _refresh();
+                                      break;
+                                    case 'add':
+                                      await _addFilesHere();
+                                      break;
+                                    case 'tag_manager':
+                                      if (!mounted) return;
+                                      await showAdaptivePanel<void>(
+                                        context: context,
+                                        barrierLabel: 'tag_manager',
+                                        child: TagManagerPage(
+                                          onOpenItem: (item) =>
+                                              openTagTarget(context, item),
+                                          onLocateItem: (item) =>
+                                              locateTagTarget(context, item),
+                                        ),
+                                      );
+                                      break;
+                                    case 'webdav':
+                                      if (!mounted) return;
+                                      await Navigator.push(
+                                          context, WebDavPage.routeNoAnim());
+                                      break;
+                                    case 'emby':
+                                      if (!mounted) return;
+                                      await Navigator.push(
+                                          context, EmbyPage.routeNoAnim());
+                                      break;
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                          if (_searchExpanded || hasQuery) ...[
+                            const SizedBox(height: 8),
+                            TextField(
+                              onChanged: _onSearchQueryChanged,
+                              decoration: InputDecoration(
+                                hintText: _searchHintText(),
+                                prefixIcon: const Icon(Icons.search),
+                                suffixIcon: _q.trim().isEmpty
+                                    ? IconButton(
+                                        tooltip: '收起',
+                                        icon: const Icon(Icons.expand_less),
+                                        onPressed: () => setState(
+                                            () => _searchExpanded = false),
+                                      )
+                                    : IconButton(
+                                        tooltip: '清空',
+                                        icon: const Icon(Icons.close),
+                                        onPressed: () =>
+                                            _onSearchQueryChanged(''),
+                                      ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                isDense: true,
+                              ),
                             ),
                           ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  FilterBar(
+                    children: [
+                      if (_tagEnabled)
+                        ControlChip(
+                          icon: (_selectedTagId == null ||
+                                  _selectedTagId!.isEmpty)
+                              ? Icons.sell_outlined
+                              : Icons.sell,
+                          label: '标签',
+                          selected: _selectedTagId != null &&
+                              _selectedTagId!.isNotEmpty,
+                          onTap: _showTagFilterPanel,
                         ),
-                        if (_searchExpanded || hasQuery) ...[
-                          const SizedBox(height: 8),
-                          TextField(
-                            onChanged: _onSearchQueryChanged,
-                            decoration: InputDecoration(
-                              hintText: _searchHintText(),
-                              prefixIcon: const Icon(Icons.search),
-                              suffixIcon: _q.trim().isEmpty
-                                  ? IconButton(
-                                      tooltip: '收起',
-                                      icon: const Icon(Icons.expand_less),
-                                      onPressed: () => setState(
-                                          () => _searchExpanded = false),
-                                    )
-                                  : IconButton(
-                                      tooltip: '清空',
-                                      icon: const Icon(Icons.close),
-                                      onPressed: () =>
-                                          _onSearchQueryChanged(''),
-                                    ),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              isDense: true,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
-                FilterBar(
-                  children: [
-                    if (_tagEnabled)
                       ControlChip(
-                        icon:
-                            (_selectedTagId == null || _selectedTagId!.isEmpty)
-                                ? Icons.sell_outlined
-                                : Icons.sell,
-                        label: '标签',
-                        selected: _selectedTagId != null &&
-                            _selectedTagId!.isNotEmpty,
-                        onTap: _showTagFilterPanel,
+                        icon: _vmIcon(_active.viewMode),
+                        label: _vmLabel(_active.viewMode),
+                        selected: true,
+                        onTap: _pickView,
                       ),
-                    ControlChip(
-                      icon: _vmIcon(_active.viewMode),
-                      label: _vmLabel(_active.viewMode),
-                      selected: true,
-                      onTap: _pickView,
-                    ),
-                    ControlChip(
-                      icon: _skIcon(_active.sortKey),
-                      label: _skLabel(_active.sortKey),
-                      selected: true,
-                      onTap: _pickSort,
-                    ),
-                    ControlChip(
-                      icon: _active.asc
-                          ? Icons.arrow_upward
-                          : Icons.arrow_downward,
-                      label: _active.asc ? '升序' : '降序',
-                      selected: true,
-                      onTap: () => setState(() => _active.asc = !_active.asc),
-                    ),
-                  ],
-                ),
-                if (hasFilterState)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                    child: Glass(
-                      radius: 12,
-                      blur: 12,
-                      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              [
-                                if (hasQuery) '搜索: ${_q.trim()}',
-                                if (hasScopeInfo)
-                                  '范围: ${_searchScope == _FolderSearchScope.singleCollection ? _searchScopeChipLabel().replaceFirst('范围: ', '') : _searchScopeBaseLabel(_searchScope)}',
-                                if (hasTagFilter) '标签筛选',
-                                if (scopedLoading) '搜索中…',
-                              ].join('  ·  '),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () => setState(() {
-                              _q = '';
-                              _searchExpanded = false;
-                              _clearScopeSearchState();
-                              _selectedTagId = null;
-                            }),
-                            child: const Text('清空'),
-                          ),
-                        ],
+                      ControlChip(
+                        icon: _skIcon(_active.sortKey),
+                        label: _skLabel(_active.sortKey),
+                        selected: true,
+                        onTap: _pickSort,
                       ),
-                    ),
-                  ),
-                Expanded(child: body),
-                if (_selectionMode)
-                  SelectionBar(
-                    title: selectedCount > 0 ? '已选择 $selectedCount 项' : '选择模式',
-                    actions: [
-                      SelectionBarAction(
-                        icon: Icons.sell_outlined,
-                        label: '标记',
-                        onTap: () => _tagSelectedEntries(list),
-                      ),
-                      SelectionBarAction(
-                        icon: Icons.close,
-                        label: '取消',
-                        onTap: () => setState(_clearSelection),
+                      ControlChip(
+                        icon: _active.asc
+                            ? Icons.arrow_upward
+                            : Icons.arrow_downward,
+                        label: _active.asc ? '升序' : '降序',
+                        selected: true,
+                        onTap: () => _updateActiveLayerSettings(
+                          (s) => s.asc = !s.asc,
+                        ),
                       ),
                     ],
                   ),
-              ],
+                  if (hasFilterState)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                      child: Glass(
+                        radius: 12,
+                        blur: 12,
+                        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                [
+                                  if (hasQuery) '搜索: ${_q.trim()}',
+                                  if (hasScopeInfo)
+                                    '范围: ${_searchScope == _FolderSearchScope.singleCollection ? _searchScopeChipLabel().replaceFirst('范围: ', '') : _searchScopeBaseLabel(_searchScope)}',
+                                  if (hasTagFilter) '标签筛选',
+                                  if (scopedLoading) '搜索中…',
+                                ].join('  ·  '),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () => setState(() {
+                                _q = '';
+                                _searchExpanded = false;
+                                _clearScopeSearchState();
+                                _selectedTagId = null;
+                              }),
+                              child: const Text('清空'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  Expanded(child: body),
+                  if (_selectionMode)
+                    SelectionBar(
+                      title:
+                          selectedCount > 0 ? '已选择 $selectedCount 项' : '选择模式',
+                      actions: [
+                        SelectionBarAction(
+                          icon: Icons.sell_outlined,
+                          label: '标记',
+                          onTap: () => _tagSelectedEntries(list),
+                        ),
+                        SelectionBarAction(
+                          icon: Icons.close,
+                          label: '取消',
+                          onTap: () => setState(_clearSelection),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
             ),
           ),
         ),

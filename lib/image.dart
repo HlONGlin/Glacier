@@ -719,13 +719,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     final type = (event ?? '').toString().trim().toLowerCase();
     if (type == 'volume_up') {
       _lastVolumeHardwareKeyAt = now;
-      _jumpToIndex(_index + 1);
+      _jumpToIndex(_index - 1);
       _ensureKeyFocus();
       return;
     }
     if (type == 'volume_down') {
       _lastVolumeHardwareKeyAt = now;
-      _jumpToIndex(_index - 1);
+      _jumpToIndex(_index + 1);
       _ensureKeyFocus();
     }
   }
@@ -1149,13 +1149,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                     if (key == LogicalKeyboardKey.audioVolumeUp ||
                         label == 'volume up' ||
                         label == 'audio volume up') {
-                      _jumpToIndex(_index + 1);
+                      _jumpToIndex(_index - 1);
                       return KeyEventResult.handled;
                     }
                     if (key == LogicalKeyboardKey.audioVolumeDown ||
                         label == 'volume down' ||
                         label == 'audio volume down') {
-                      _jumpToIndex(_index - 1);
+                      _jumpToIndex(_index + 1);
                       return KeyEventResult.handled;
                     }
                     return KeyEventResult.ignored;

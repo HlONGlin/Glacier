@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 const double kMinTapTarget = 44;
 
@@ -556,6 +557,11 @@ class GlassAppBar extends StatelessWidget implements PreferredSizeWidget {
     final bg = (tint ?? Colors.white).withOpacity(opacity);
 
     return AppBar(
+      systemOverlayStyle: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        statusBarBrightness: Brightness.light,
+      ),
       title: title,
       actions: actions,
       leading: leading,

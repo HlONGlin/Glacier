@@ -53,11 +53,16 @@ class AppSettings {
   // 播放器“上下集”按钮开关（默认开启）。
   static const String _kVideoEpisodeNavButtonsEnabled =
       '${_kPrefix}video_episode_nav_buttons_enabled';
+  // 是否自动从历史进度续播（默认开启）。
+  static const String _kVideoResumeEnabled = '${_kPrefix}video_resume_enabled';
+  // 断点续播提示开关（默认开启）。
+  static const String _kVideoResumeHintEnabled =
+      '${_kPrefix}video_resume_hint_enabled';
 
   // --- 图片查看器 ---
   // 说明：是否允许使用音量键翻页（上一张/下一张）。
   // - 这是一个可选项：避免与系统音量调节冲突；
-  // - 开启后：音量+ 下一张，音量- 上一张。
+  // - 开启后：音量+ 上一张，音量- 下一张。
   static const String _kImageVolumeKeyPaging =
       '${_kPrefix}image_volume_key_paging';
   // 图片查看器退出后，列表是否自动定位到最后浏览的图片（默认开启）。
@@ -70,6 +75,8 @@ class AppSettings {
   static const String _kLastFavoriteId = '${_kPrefix}last_favorite_id';
   static const String _kFavoritePerDirectoryDisplaySettingsEnabled =
       '${_kPrefix}favorite_per_directory_display_settings_enabled';
+  static const String _kFavoritePerDirectoryDisplaySettingsState =
+      '${_kPrefix}favorite_per_directory_display_settings_state_v1';
 
   // --- 历史记录 ---
   static const String _kHistoryEnabled = '${_kPrefix}history_enabled';
@@ -191,6 +198,28 @@ class AppSettings {
     await sp.setBool(_kVideoEpisodeNavButtonsEnabled, v);
   }
 
+  /// 是否自动从历史进度续播（默认 true）。
+  static Future<bool> getVideoResumeEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kVideoResumeEnabled) ?? true;
+  }
+
+  static Future<void> setVideoResumeEnabled(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kVideoResumeEnabled, v);
+  }
+
+  /// 断点续播提示开关（默认 true）。
+  static Future<bool> getVideoResumeHintEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kVideoResumeHintEnabled) ?? true;
+  }
+
+  static Future<void> setVideoResumeHintEnabled(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kVideoResumeHintEnabled, v);
+  }
+
   /// 图片查看器：是否启用“音量键翻页”（默认关闭）。
   static Future<bool> getImageVolumeKeyPaging() async {
     final sp = await _sp();
@@ -250,6 +279,36 @@ class AppSettings {
       bool v) async {
     final sp = await _sp();
     await sp.setBool(_kFavoritePerDirectoryDisplaySettingsEnabled, v);
+  }
+
+  /// 收藏夹目录显示状态（按目录记忆的视图/排序/升降序）。
+  /// - key: 目录唯一标识（如 local://... / webdav://... / emby://...）
+  /// - value: LayerSettings 的 json（v/s/a）
+  static Future<Map<String, dynamic>>
+      getFavoritePerDirectoryDisplaySettingsState() async {
+    final sp = await _sp();
+    final raw = sp.getString(_kFavoritePerDirectoryDisplaySettingsState);
+    if (raw == null || raw.trim().isEmpty) return <String, dynamic>{};
+    try {
+      final j = jsonDecode(raw);
+      if (j is! Map) return <String, dynamic>{};
+      return j.cast<String, dynamic>();
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
+  static Future<void> setFavoritePerDirectoryDisplaySettingsState(
+      Map<String, dynamic> data) async {
+    final sp = await _sp();
+    if (data.isEmpty) {
+      await sp.remove(_kFavoritePerDirectoryDisplaySettingsState);
+      return;
+    }
+    await sp.setString(
+      _kFavoritePerDirectoryDisplaySettingsState,
+      jsonEncode(data),
+    );
   }
 
   /// 历史记录开关（默认开启）。

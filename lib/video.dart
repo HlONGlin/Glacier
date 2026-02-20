@@ -22,6 +22,18 @@ import 'package:native_device_orientation/native_device_orientation.dart';
 import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
 
+const SystemUiOverlayStyle _kLightStatusBarStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.light,
+  statusBarBrightness: Brightness.dark,
+);
+
+const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  statusBarIconBrightness: Brightness.dark,
+  statusBarBrightness: Brightness.light,
+);
+
 // ===== media_video.dart (auto-grouped) =====
 
 // --- from video.dart ---
@@ -616,6 +628,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       SystemChrome.setPreferredOrientations(DeviceOrientation.values);
       // ✅ 启动传感器驱动自动旋转：不依赖系统自动旋转开关。
     }
+    SystemChrome.setSystemUIOverlayStyle(_kLightStatusBarStyle);
     WebDavBackgroundGate.pauseHard();
 
     if (_sources.any((s) => _isWebDavSource(s))) {
@@ -1631,6 +1644,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     // 因此这里恢复为“允许所有方向”，把旋转权交给系统与用户。
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(_kDarkStatusBarStyle);
 
     _player.dispose();
     super.dispose();
@@ -4360,6 +4374,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   double _rate = 1.0;
   double _volume = 100.0;
   bool _autoNextAfterEnd = false;
+  bool _videoResumeEnabled = true;
   bool _longPressSpeedEnabled = true;
   double _longPressSpeedMultiplier = 2.0;
   int _doubleTapSeekSeconds = 10;
@@ -4386,6 +4401,10 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   Timer? _lockButtonHideTimer;
   Timer? _resumeHintForceHideTimer;
   int _resumeHintSerial = 0;
+  ScaffoldMessengerState? _resumeHintMessenger;
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>?
+      _resumeHintSnackBarController;
+  bool _exitCleanupDone = false;
   Offset? _lastDoubleTapPos;
   Duration _dragStartPos = Duration.zero;
   Duration _dragTargetPos = Duration.zero;
@@ -4425,6 +4444,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       _index = widget.initialIndex.clamp(0, _sources.length - 1);
     }
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    SystemChrome.setSystemUIOverlayStyle(_kLightStatusBarStyle);
     _startAutoRotateIfMobile();
     unawaited(_loadMobileSettings());
     unawaited(_openCurrent(autoPlay: true));
@@ -4449,13 +4469,16 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     _hideTimer?.cancel();
     _gestureHideTimer?.cancel();
     _lockButtonHideTimer?.cancel();
-    _dismissResumeHint();
+    _dismissResumeHint(clearBinding: true);
     _stopAutoRotateIfAny();
     final c = _controller;
     _controller = null;
+    c?.removeListener(_onControllerTick);
+    unawaited(c?.pause());
     unawaited(c?.dispose());
     unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(_kDarkStatusBarStyle);
     super.dispose();
   }
 
@@ -4466,6 +4489,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       final lpEnabled = await AppSettings.getLongPressSpeedEnabled();
       final lpMul = await AppSettings.getLongPressSpeedMultiplier();
       final autoNext = await AppSettings.getVideoAutoNextAfterEnd();
+      final resumeEnabled = await AppSettings.getVideoResumeEnabled();
       final miniProgress = await AppSettings.getVideoMiniProgressWhenHidden();
       final catalogEnabled = await AppSettings.getVideoCatalogEnabled();
       final episodeNavButtonsEnabled =
@@ -4478,6 +4502,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
         _longPressSpeedEnabled = lpEnabled;
         _longPressSpeedMultiplier = lpMul;
         _autoNextAfterEnd = autoNext;
+        _videoResumeEnabled = resumeEnabled;
         _showMiniProgressWhenHidden = miniProgress;
         _videoCatalogEnabled = catalogEnabled;
         _videoEpisodeNavButtonsEnabled = episodeNavButtonsEnabled;
@@ -4607,6 +4632,20 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     _nativeOriSub = null;
   }
 
+  Future<void> _beforeRouteExit({String reason = 'mobile pop'}) async {
+    if (_exitCleanupDone) return;
+    _exitCleanupDone = true;
+    _dismissResumeHint(clearBinding: true);
+    final c = _controller;
+    if (c != null) {
+      try {
+        await c.pause();
+      } catch (_) {}
+    }
+    await _flushHistoryProgress();
+    unawaited(_stopEmbyPlaybackCheckIns(reason: reason));
+  }
+
   Future<void> _applyPreferredOrientationByOri(
     NativeDeviceOrientation ori,
   ) async {
@@ -4632,18 +4671,29 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   Future<void> _showResumeHint(int resumedMs, String sourcePath) async {
+    if (resumedMs < 5000) return;
+    if (!_videoResumeEnabled) return;
+    var hintEnabled = true;
+    try {
+      hintEnabled = await AppSettings.getVideoResumeHintEnabled();
+    } catch (_) {}
+    if (!hintEnabled) return;
     if (!mounted) return;
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
-    if (resumedMs < 5000) return;
 
     _dismissResumeHint(bumpSerial: false);
     final serial = ++_resumeHintSerial;
     final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(
+    _resumeHintMessenger = messenger;
+    _resumeHintSnackBarController = messenger.showSnackBar(
       SnackBar(
-        duration: const Duration(seconds: 4),
-        content: Text('从 ${_fmt(Duration(milliseconds: resumedMs))} 继续播放'),
+        duration: const Duration(seconds: 3),
+        backgroundColor: Colors.black.withValues(alpha: 0.6),
+        content: Text(
+          '从 ${_fmt(Duration(milliseconds: resumedMs))} 继续播放',
+          style: const TextStyle(color: Colors.white),
+        ),
         action: SnackBarAction(
           label: '从头播放',
           onPressed: () {
@@ -4662,7 +4712,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
         ),
       ),
     );
-    _resumeHintForceHideTimer = Timer(const Duration(milliseconds: 4200), () {
+    _resumeHintForceHideTimer = Timer(const Duration(milliseconds: 3050), () {
       if (!mounted) return;
       if (serial != _resumeHintSerial) return;
       if (_currentPath.trim() != sourcePath.trim()) return;
@@ -4670,23 +4720,44 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     });
   }
 
-  void _dismissResumeHint({bool bumpSerial = true}) {
+  void _dismissResumeHint({bool bumpSerial = true, bool clearBinding = false}) {
     if (bumpSerial) _resumeHintSerial++;
     _resumeHintForceHideTimer?.cancel();
     _resumeHintForceHideTimer = null;
-    if (!mounted) return;
+
     try {
-      ScaffoldMessenger.maybeOf(context)?.hideCurrentSnackBar();
+      _resumeHintSnackBarController?.close();
     } catch (_) {}
+    _resumeHintSnackBarController = null;
+
+    try {
+      _resumeHintMessenger?.hideCurrentSnackBar();
+      _resumeHintMessenger?.removeCurrentSnackBar(
+        reason: SnackBarClosedReason.remove,
+      );
+    } catch (_) {}
+
+    if (mounted) {
+      try {
+        final messenger = ScaffoldMessenger.maybeOf(context);
+        messenger?.hideCurrentSnackBar();
+        messenger?.removeCurrentSnackBar(
+          reason: SnackBarClosedReason.remove,
+        );
+      } catch (_) {}
+    }
+
+    if (clearBinding) {
+      _resumeHintMessenger = null;
+    }
   }
 
   bool _isWebDavSource(String s) {
     try {
       final u = Uri.parse(s);
       return u.scheme.toLowerCase() == 'webdav' && u.host.isNotEmpty;
-    } catch (_) {
-      return false;
-    }
+    } catch (_) {}
+    return false;
   }
 
   bool _isEmbySource(String s) {
@@ -5899,7 +5970,10 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       await nextController.setPlaybackSpeed(_rate);
       await nextController.setVolume((_volume / 100).clamp(0, 1).toDouble());
 
-      final resumeMs = await _loadResumePositionMs(source);
+      int? resumeMs;
+      if (_videoResumeEnabled) {
+        resumeMs = await _loadResumePositionMs(source);
+      }
       if (!mounted || seq != _openSeq) {
         await nextController.dispose();
         return;
@@ -6097,420 +6171,433 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     final showEpisodeNavButtons =
         _videoEpisodeNavButtonsEnabled && _sources.length > 1;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: _toggleControls,
-        onDoubleTapDown: _onDoubleTapDown,
-        onDoubleTap: _onDoubleTap,
-        onHorizontalDragStart:
-            initialized && !_isScreenLocked ? _onHorizontalDragStart : null,
-        onHorizontalDragUpdate:
-            initialized && !_isScreenLocked ? _onHorizontalDragUpdate : null,
-        onHorizontalDragEnd:
-            initialized && !_isScreenLocked ? _onHorizontalDragEnd : null,
-        onVerticalDragStart:
-            initialized && !_isScreenLocked ? _onVerticalDragStart : null,
-        onVerticalDragUpdate:
-            initialized && !_isScreenLocked ? _onVerticalDragUpdate : null,
-        onVerticalDragEnd:
-            initialized && !_isScreenLocked ? _onVerticalDragEnd : null,
-        onLongPressStart:
-            initialized && !_isScreenLocked ? _onLongPressStart : null,
-        onLongPressEnd:
-            initialized && !_isScreenLocked ? _onLongPressEnd : null,
-        child: Stack(
-          children: [
-            Center(
-              child: (initialized && c != null)
-                  ? AspectRatio(
-                      aspectRatio:
-                          value!.aspectRatio > 0 ? value.aspectRatio : 16 / 9,
-                      child: VideoPlayer(c),
-                    )
-                  : const CircularProgressIndicator(color: Colors.white),
-            ),
-            if (_brightness < 0.999)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: ColoredBox(
-                    color: Colors.black.withValues(
-                      alpha: ((1.0 - _brightness).clamp(0.0, 1.0) * 0.75),
+    return PopScope<void>(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) return;
+        unawaited(_beforeRouteExit(reason: 'mobile system back'));
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _toggleControls,
+          onDoubleTapDown: _onDoubleTapDown,
+          onDoubleTap: _onDoubleTap,
+          onHorizontalDragStart:
+              initialized && !_isScreenLocked ? _onHorizontalDragStart : null,
+          onHorizontalDragUpdate:
+              initialized && !_isScreenLocked ? _onHorizontalDragUpdate : null,
+          onHorizontalDragEnd:
+              initialized && !_isScreenLocked ? _onHorizontalDragEnd : null,
+          onVerticalDragStart:
+              initialized && !_isScreenLocked ? _onVerticalDragStart : null,
+          onVerticalDragUpdate:
+              initialized && !_isScreenLocked ? _onVerticalDragUpdate : null,
+          onVerticalDragEnd:
+              initialized && !_isScreenLocked ? _onVerticalDragEnd : null,
+          onLongPressStart:
+              initialized && !_isScreenLocked ? _onLongPressStart : null,
+          onLongPressEnd:
+              initialized && !_isScreenLocked ? _onLongPressEnd : null,
+          child: Stack(
+            children: [
+              Center(
+                child: (initialized && c != null)
+                    ? AspectRatio(
+                        aspectRatio:
+                            value!.aspectRatio > 0 ? value.aspectRatio : 16 / 9,
+                        child: VideoPlayer(c),
+                      )
+                    : const CircularProgressIndicator(color: Colors.white),
+              ),
+              if (_brightness < 0.999)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: ColoredBox(
+                      color: Colors.black.withValues(
+                        alpha: ((1.0 - _brightness).clamp(0.0, 1.0) * 0.75),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            if (captionText.isNotEmpty)
-              Positioned(
-                left: 14,
-                right: 14,
-                bottom: (_controlsVisible && !_isScreenLocked)
-                    ? max(_subtitleBottomOffset, 136.0)
-                    : _subtitleBottomOffset,
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.55),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
+              if (captionText.isNotEmpty)
+                Positioned(
+                  left: 14,
+                  right: 14,
+                  bottom: (_controlsVisible && !_isScreenLocked)
+                      ? max(_subtitleBottomOffset, 136.0)
+                      : _subtitleBottomOffset,
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Text(
-                        captionText,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: _subtitleFontSize,
-                          height: 1.25,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        child: Text(
+                          captionText,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: _subtitleFontSize,
+                            height: 1.25,
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            if (!_controlsVisible &&
-                !_isScreenLocked &&
-                initialized &&
-                _showMiniProgressWhenHidden &&
-                duration > Duration.zero)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: IgnorePointer(
+              if (!_controlsVisible &&
+                  !_isScreenLocked &&
+                  initialized &&
+                  _showMiniProgressWhenHidden &&
+                  duration > Duration.zero)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: IgnorePointer(
+                    child: SafeArea(
+                      top: false,
+                      child: SizedBox(
+                        height: 2,
+                        child: LinearProgressIndicator(
+                          value: (currentMs / maxMs).clamp(0.0, 1.0),
+                          minHeight: 2,
+                          backgroundColor: Colors.white24,
+                          valueColor:
+                              const AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              if (_opening)
+                const Center(
+                  child: CircularProgressIndicator(color: Colors.white70),
+                ),
+              if (_error != null && _error!.trim().isNotEmpty)
+                Positioned.fill(
+                  child: ColoredBox(
+                    color: Colors.black54,
+                    child: Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _error!,
+                              style: const TextStyle(color: Colors.white),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 10),
+                            FilledButton(
+                              onPressed: () => _openCurrent(autoPlay: true),
+                              child: const Text('重试'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              if (_controlsVisible && !_isScreenLocked) ...[
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: SafeArea(
+                    bottom: false,
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(6, 4, 10, 6),
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [Color(0x88000000), Color(0x00000000)],
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          IconButton(
+                            onPressed: () async {
+                              final navigator = Navigator.of(context);
+                              await _beforeRouteExit(
+                                reason: 'mobile back button',
+                              );
+                              if (!mounted) return;
+                              final popped = await navigator.maybePop();
+                              if (!popped && mounted) {
+                                _exitCleanupDone = false;
+                              }
+                            },
+                            icon: const Icon(Icons.arrow_back,
+                                color: Colors.white),
+                          ),
+                          Expanded(
+                            child: Text(
+                              _title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: initialized ? _showSubtitleMenu : null,
+                            icon: const Icon(Icons.closed_caption,
+                                color: Colors.white),
+                          ),
+                          IconButton(
+                            onPressed: (_hasPlaylist && _videoCatalogEnabled)
+                                ? _showCatalogMenu
+                                : null,
+                            icon: const Icon(Icons.playlist_play,
+                                color: Colors.white),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
                   child: SafeArea(
                     top: false,
-                    child: SizedBox(
-                      height: 2,
-                      child: LinearProgressIndicator(
-                        value: (currentMs / maxMs).clamp(0.0, 1.0),
-                        minHeight: 2,
-                        backgroundColor: Colors.white24,
-                        valueColor:
-                            const AlwaysStoppedAnimation<Color>(Colors.white),
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
+                          colors: [Color(0x99000000), Color(0x00000000)],
+                        ),
                       ),
-                    ),
-                  ),
-                ),
-              ),
-            if (_opening)
-              const Center(
-                child: CircularProgressIndicator(color: Colors.white70),
-              ),
-            if (_error != null && _error!.trim().isNotEmpty)
-              Positioned.fill(
-                child: ColoredBox(
-                  color: Colors.black54,
-                  child: Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            _error!,
-                            style: const TextStyle(color: Colors.white),
-                            textAlign: TextAlign.center,
+                          Row(
+                            children: [
+                              Text(
+                                _fmt(Duration(milliseconds: currentMs.round())),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: SliderTheme(
+                                  data: SliderTheme.of(context).copyWith(
+                                    trackHeight: 2.6,
+                                    activeTrackColor: Colors.white,
+                                    inactiveTrackColor: Colors.white24,
+                                    secondaryActiveTrackColor: Colors.white38,
+                                    thumbColor: Colors.white,
+                                    overlayColor: Colors.white24,
+                                  ),
+                                  child: Slider(
+                                    value: currentMs,
+                                    secondaryTrackValue:
+                                        max(currentMs, bufferedMs)
+                                            .clamp(0.0, maxMs.toDouble()),
+                                    min: 0,
+                                    max: maxMs.toDouble(),
+                                    onChanged: initialized
+                                        ? (v) {
+                                            setState(() {
+                                              _draggingSeek = true;
+                                              _dragSeekMs = v;
+                                            });
+                                          }
+                                        : null,
+                                    onChangeEnd: initialized
+                                        ? (v) async {
+                                            _draggingSeek = false;
+                                            await c?.seekTo(
+                                              Duration(milliseconds: v.round()),
+                                            );
+                                            _scheduleAutoHide();
+                                            unawaited(_reportEmbyProgress(
+                                              eventName: 'TimeUpdate',
+                                              interactive: true,
+                                            ));
+                                          }
+                                        : null,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                _fmt(duration),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 10),
-                          FilledButton(
-                            onPressed: () => _openCurrent(autoPlay: true),
-                            child: const Text('重试'),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              const SizedBox(width: 42, height: 42),
+                              Expanded(
+                                child: Center(
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (showEpisodeNavButtons)
+                                        SizedBox(
+                                          width: 42,
+                                          height: 42,
+                                          child: IconButton(
+                                            onPressed: _canPrev ? _prev : null,
+                                            iconSize: 22,
+                                            color: Colors.white,
+                                            padding: EdgeInsets.zero,
+                                            icon:
+                                                const Icon(Icons.skip_previous),
+                                          ),
+                                        ),
+                                      SizedBox(
+                                        width: 42,
+                                        height: 42,
+                                        child: IconButton(
+                                          onPressed: initialized
+                                              ? _togglePlayPause
+                                              : null,
+                                          iconSize: 22,
+                                          color: Colors.white,
+                                          padding: EdgeInsets.zero,
+                                          icon: Icon(
+                                            playing
+                                                ? Icons.pause
+                                                : Icons.play_arrow,
+                                          ),
+                                        ),
+                                      ),
+                                      if (showEpisodeNavButtons)
+                                        SizedBox(
+                                          width: 42,
+                                          height: 42,
+                                          child: IconButton(
+                                            onPressed: _canNext ? _next : null,
+                                            iconSize: 22,
+                                            color: Colors.white,
+                                            padding: EdgeInsets.zero,
+                                            icon: const Icon(Icons.skip_next),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 42,
+                                height: 42,
+                                child: TextButton(
+                                  onPressed:
+                                      initialized ? _showSpeedMenu : null,
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: Colors.white70,
+                                    padding: EdgeInsets.zero,
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  child: Text(
+                                    '${_rate.toStringAsFixed((_rate % 1) == 0 ? 0 : 2)}x',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
                     ),
                   ),
                 ),
-              ),
-            if (_controlsVisible && !_isScreenLocked) ...[
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: SafeArea(
-                  bottom: false,
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(6, 4, 10, 6),
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [Color(0x88000000), Color(0x00000000)],
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        IconButton(
-                          onPressed: () async {
-                            final navigator = Navigator.of(context);
-                            _dismissResumeHint();
-                            await _flushHistoryProgress();
-                            if (!mounted) return;
-                            navigator.maybePop();
-                          },
-                          icon:
-                              const Icon(Icons.arrow_back, color: Colors.white),
-                        ),
-                        Expanded(
-                          child: Text(
-                            _title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: initialized ? _showSubtitleMenu : null,
-                          icon: const Icon(Icons.closed_caption,
-                              color: Colors.white),
-                        ),
-                        IconButton(
-                          onPressed: (_hasPlaylist && _videoCatalogEnabled)
-                              ? _showCatalogMenu
-                              : null,
-                          icon: const Icon(Icons.playlist_play,
-                              color: Colors.white),
-                        ),
-                      ],
+              ],
+              if (!_isScreenLocked && _controlsVisible)
+                Positioned(
+                  right: 10,
+                  top: 0,
+                  bottom: 0,
+                  child: SafeArea(
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: _buildFloatingLockButton(locked: false),
                     ),
                   ),
                 ),
-              ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: SafeArea(
-                  top: false,
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
-                        colors: [Color(0x99000000), Color(0x00000000)],
-                      ),
+              if (_isScreenLocked && _lockButtonVisible)
+                Positioned(
+                  right: 10,
+                  top: 0,
+                  bottom: 0,
+                  child: SafeArea(
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: _buildFloatingLockButton(locked: true),
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
+                  ),
+                ),
+              if (_gestureActive && (_gestureIcon != null))
+                Center(
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.65),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
+                            Icon(_gestureIcon, color: Colors.white, size: 30),
+                            const SizedBox(height: 8),
                             Text(
-                              _fmt(Duration(milliseconds: currentMs.round())),
+                              _gestureText,
+                              textAlign: TextAlign.center,
                               style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 12,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: SliderTheme(
-                                data: SliderTheme.of(context).copyWith(
-                                  trackHeight: 2.6,
-                                  activeTrackColor: Colors.white,
-                                  inactiveTrackColor: Colors.white24,
-                                  secondaryActiveTrackColor: Colors.white38,
-                                  thumbColor: Colors.white,
-                                  overlayColor: Colors.white24,
-                                ),
-                                child: Slider(
-                                  value: currentMs,
-                                  secondaryTrackValue:
-                                      max(currentMs, bufferedMs)
-                                          .clamp(0.0, maxMs.toDouble()),
-                                  min: 0,
-                                  max: maxMs.toDouble(),
-                                  onChanged: initialized
-                                      ? (v) {
-                                          setState(() {
-                                            _draggingSeek = true;
-                                            _dragSeekMs = v;
-                                          });
-                                        }
-                                      : null,
-                                  onChangeEnd: initialized
-                                      ? (v) async {
-                                          _draggingSeek = false;
-                                          await c?.seekTo(
-                                            Duration(milliseconds: v.round()),
-                                          );
-                                          _scheduleAutoHide();
-                                          unawaited(_reportEmbyProgress(
-                                            eventName: 'TimeUpdate',
-                                            interactive: true,
-                                          ));
-                                        }
-                                      : null,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              _fmt(duration),
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 12,
+                                color: Colors.white,
+                                fontSize: 14,
+                                height: 1.25,
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 2),
-                        Row(
-                          children: [
-                            const SizedBox(width: 42, height: 42),
-                            Expanded(
-                              child: Center(
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    if (showEpisodeNavButtons)
-                                      SizedBox(
-                                        width: 42,
-                                        height: 42,
-                                        child: IconButton(
-                                          onPressed: _canPrev ? _prev : null,
-                                          iconSize: 22,
-                                          color: Colors.white,
-                                          padding: EdgeInsets.zero,
-                                          icon: const Icon(Icons.skip_previous),
-                                        ),
-                                      ),
-                                    SizedBox(
-                                      width: 42,
-                                      height: 42,
-                                      child: IconButton(
-                                        onPressed: initialized
-                                            ? _togglePlayPause
-                                            : null,
-                                        iconSize: 22,
-                                        color: Colors.white,
-                                        padding: EdgeInsets.zero,
-                                        icon: Icon(
-                                          playing
-                                              ? Icons.pause
-                                              : Icons.play_arrow,
-                                        ),
-                                      ),
-                                    ),
-                                    if (showEpisodeNavButtons)
-                                      SizedBox(
-                                        width: 42,
-                                        height: 42,
-                                        child: IconButton(
-                                          onPressed: _canNext ? _next : null,
-                                          iconSize: 22,
-                                          color: Colors.white,
-                                          padding: EdgeInsets.zero,
-                                          icon: const Icon(Icons.skip_next),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            SizedBox(
-                              width: 42,
-                              height: 42,
-                              child: TextButton(
-                                onPressed: initialized ? _showSpeedMenu : null,
-                                style: TextButton.styleFrom(
-                                  foregroundColor: Colors.white70,
-                                  padding: EdgeInsets.zero,
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                ),
-                                child: Text(
-                                  '${_rate.toStringAsFixed((_rate % 1) == 0 ? 0 : 2)}x',
-                                  style: const TextStyle(fontSize: 12),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
-              ),
+              if (buffering && !_opening)
+                const Center(
+                  child: SizedBox(
+                    width: 26,
+                    height: 26,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.6,
+                      color: Colors.white70,
+                    ),
+                  ),
+                ),
             ],
-            if (!_isScreenLocked && _controlsVisible)
-              Positioned(
-                right: 10,
-                top: 0,
-                bottom: 0,
-                child: SafeArea(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: _buildFloatingLockButton(locked: false),
-                  ),
-                ),
-              ),
-            if (_isScreenLocked && _lockButtonVisible)
-              Positioned(
-                right: 10,
-                top: 0,
-                bottom: 0,
-                child: SafeArea(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: _buildFloatingLockButton(locked: true),
-                  ),
-                ),
-              ),
-            if (_gestureActive && (_gestureIcon != null))
-              Center(
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.65),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 12,
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(_gestureIcon, color: Colors.white, size: 30),
-                          const SizedBox(height: 8),
-                          Text(
-                            _gestureText,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              height: 1.25,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            if (buffering && !_opening)
-              const Center(
-                child: SizedBox(
-                  width: 26,
-                  height: 26,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.6,
-                    color: Colors.white70,
-                  ),
-                ),
-              ),
-          ],
+          ),
         ),
       ),
     );
