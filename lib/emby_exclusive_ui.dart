@@ -2296,43 +2296,50 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     return u;
   }
 
-  Future<String?> _resolveFolderCoverFallback(
-    _UiItem item, {
+  Future<String?> _resolveFolderCoverById(
+    String folderId, {
     int maxWidth = 560,
   }) async {
-    if (!item.isDir) return null;
-    final folderId = item.item.id.trim();
-    if (folderId.isEmpty) return null;
+    final id = folderId.trim();
+    if (id.isEmpty) return null;
 
-    final cached = (_folderCoverUrlCache[folderId] ?? '').trim();
+    final cached = (_folderCoverUrlCache[id] ?? '').trim();
     if (cached.isNotEmpty) return cached;
 
-    final inflight = _folderCoverInflight[folderId];
+    final inflight = _folderCoverInflight[id];
     if (inflight != null) return await inflight;
 
     final fut = (() async {
       try {
         final auto = await _client.pickAutoFolderCoverUrl(
-          folderId: folderId,
+          folderId: id,
           maxWidth: maxWidth,
           quality: 85,
           fallbackToVideo: true,
         );
         final url = (auto ?? '').trim();
         if (url.isNotEmpty) {
-          _folderCoverUrlCache[folderId] = url;
+          _folderCoverUrlCache[id] = url;
           return url;
         }
       } catch (_) {}
       return null;
     })();
 
-    _folderCoverInflight[folderId] = fut;
+    _folderCoverInflight[id] = fut;
     try {
       return await fut;
     } finally {
-      _folderCoverInflight.remove(folderId);
+      _folderCoverInflight.remove(id);
     }
+  }
+
+  Future<String?> _resolveFolderCoverFallback(
+    _UiItem item, {
+    int maxWidth = 560,
+  }) async {
+    if (!item.isDir) return null;
+    return _resolveFolderCoverById(item.item.id, maxWidth: maxWidth);
   }
 
   String _topTabLabel(_FolderTopTab tab) {
@@ -2790,6 +2797,38 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     return changed ? out : src;
   }
 
+  void _applyCoverBatch(
+    Map<String, String> coverById, {
+    bool movie = false,
+    bool folder = false,
+  }) {
+    if (coverById.isEmpty) return;
+    setState(() {
+      if (movie) _movieFolderCoverUrlCache.addAll(coverById);
+      if (folder) _folderCoverUrlCache.addAll(coverById);
+      _items = _applyHydratedCovers(_items, coverById);
+      _recursiveVideos = _applyHydratedCovers(_recursiveVideos, coverById);
+      _recursiveImages = _applyHydratedCovers(_recursiveImages, coverById);
+    });
+  }
+
+  List<String> _collectRegularFolderIds(
+    Iterable<_UiItem> source,
+    Set<String> seen,
+  ) {
+    final out = <String>[];
+    for (final item in source) {
+      if (!item.isDir) continue;
+      if (_isSeriesFolder(item) || _isMovieFolder(item)) continue;
+      final id = item.item.id.trim();
+      if (id.isEmpty) continue;
+      if (!seen.add(id)) continue;
+      if ((_folderCoverUrlCache[id] ?? '').trim().isNotEmpty) continue;
+      out.add(id);
+    }
+    return out;
+  }
+
   List<String> _collectMovieFolderIds(
     Iterable<_UiItem> source,
     Set<String> seen,
@@ -2820,14 +2859,28 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     final workerCount =
         targetIds.length < maxWorkers ? targetIds.length : maxWorkers;
 
+    Future<void> flushPending(Map<String, String> pending) async {
+      if (pending.isEmpty) return;
+      if (!mounted ||
+          token != _coverHydrationToken ||
+          runId != _moviePrewarmRunToken) {
+        return;
+      }
+      final batch = Map<String, String>.from(pending);
+      pending.clear();
+      _applyCoverBatch(batch, movie: true);
+    }
+
     Future<void> worker() async {
+      final pending = <String, String>{};
       while (true) {
         if (!mounted ||
             token != _coverHydrationToken ||
             runId != _moviePrewarmRunToken) {
+          await flushPending(pending);
           return;
         }
-        if (cursor >= targetIds.length) return;
+        if (cursor >= targetIds.length) break;
         final id = targetIds[cursor++];
         if ((_movieFolderCoverUrlCache[id] ?? '').trim().isNotEmpty) continue;
 
@@ -2839,19 +2892,82 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         if (!mounted ||
             token != _coverHydrationToken ||
             runId != _moviePrewarmRunToken) {
+          await flushPending(pending);
           return;
         }
-        setState(() {
-          _movieFolderCoverUrlCache[id] = url;
-          final one = <String, String>{id: url};
-          _items = _applyHydratedCovers(_items, one);
-          _recursiveVideos = _applyHydratedCovers(_recursiveVideos, one);
-        });
+        pending[id] = url;
+        if (pending.length >= 3) {
+          await flushPending(pending);
+        }
 
         if (gentle) {
           await Future<void>.delayed(const Duration(milliseconds: 50));
         }
       }
+      await flushPending(pending);
+    }
+
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+  }
+
+  Future<void> _prewarmRegularFolderCoverIds(
+    List<String> targetIds, {
+    required int token,
+    required int runId,
+    int maxWorkers = 2,
+    bool gentle = false,
+  }) async {
+    if (targetIds.isEmpty || !mounted || token != _coverHydrationToken) return;
+
+    var cursor = 0;
+    final workerCount =
+        targetIds.length < maxWorkers ? targetIds.length : maxWorkers;
+
+    Future<void> flushPending(Map<String, String> pending) async {
+      if (pending.isEmpty) return;
+      if (!mounted ||
+          token != _coverHydrationToken ||
+          runId != _moviePrewarmRunToken) {
+        return;
+      }
+      final batch = Map<String, String>.from(pending);
+      pending.clear();
+      _applyCoverBatch(batch, folder: true);
+    }
+
+    Future<void> worker() async {
+      final pending = <String, String>{};
+      while (true) {
+        if (!mounted ||
+            token != _coverHydrationToken ||
+            runId != _moviePrewarmRunToken) {
+          await flushPending(pending);
+          return;
+        }
+        if (cursor >= targetIds.length) break;
+        final id = targetIds[cursor++];
+        if ((_folderCoverUrlCache[id] ?? '').trim().isNotEmpty) continue;
+
+        final url =
+            (await _resolveFolderCoverById(id, maxWidth: 560) ?? '').trim();
+        if (url.isEmpty) continue;
+
+        if (!mounted ||
+            token != _coverHydrationToken ||
+            runId != _moviePrewarmRunToken) {
+          await flushPending(pending);
+          return;
+        }
+        pending[id] = url;
+        if (pending.length >= 3) {
+          await flushPending(pending);
+        }
+
+        if (gentle) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+      }
+      await flushPending(pending);
     }
 
     await Future.wait(List.generate(workerCount, (_) => worker()));
@@ -2983,6 +3099,37 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     );
   }
 
+  Future<void> _prewarmVisibleFolderCovers({required int token}) async {
+    if (!mounted || token != _coverHydrationToken) return;
+    final runId = _moviePrewarmRunToken;
+    final ordered = _displayItems();
+    final seen = <String>{};
+    final visiblePool = _collectRegularFolderIds(ordered.take(24), seen);
+    final visibleFirst = visiblePool.take(12).toList(growable: false);
+    final remaining = <String>[
+      ...visiblePool.skip(12),
+      ..._collectRegularFolderIds(ordered.skip(24), seen),
+    ];
+
+    await _prewarmRegularFolderCoverIds(
+      visibleFirst,
+      token: token,
+      runId: runId,
+      maxWorkers: 2,
+      gentle: false,
+    );
+    if (!mounted || token != _coverHydrationToken) return;
+    if (runId != _moviePrewarmRunToken) return;
+
+    await _prewarmRegularFolderCoverIds(
+      remaining,
+      token: token,
+      runId: runId,
+      maxWorkers: 1,
+      gentle: true,
+    );
+  }
+
   Future<void> _openMovieFolder(_UiItem item) async {
     final folderId = item.item.id.trim();
     if (folderId.isEmpty) return;
@@ -3056,6 +3203,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         unawaited(_persistDisplaySettingsForCurrentFolder());
       }
       unawaited(_prewarmVisibleMovieCovers(token: token));
+      unawaited(_prewarmVisibleFolderCovers(token: token));
       unawaited(() async {
         try {
           final recursive = await _collectRecursiveMedia(mapped);
@@ -3076,6 +3224,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
             unawaited(_persistDisplaySettingsForCurrentFolder());
           }
           unawaited(_prewarmVisibleMovieCovers(token: token));
+          unawaited(_prewarmVisibleFolderCovers(token: token));
         } catch (_) {}
       }());
     } catch (e) {
