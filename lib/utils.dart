@@ -77,6 +77,8 @@ class AppSettings {
       '${_kPrefix}favorite_per_directory_display_settings_enabled';
   static const String _kFavoritePerDirectoryDisplaySettingsState =
       '${_kPrefix}favorite_per_directory_display_settings_state_v1';
+  static const String _kEmbyExclusiveFavoritesUiEnabled =
+      '${_kPrefix}emby_exclusive_favorites_ui_enabled';
 
   // --- 历史记录 ---
   static const String _kHistoryEnabled = '${_kPrefix}history_enabled';
@@ -251,6 +253,16 @@ class AppSettings {
   static Future<void> setAutoEnterLastFavorite(bool v) async {
     final sp = await _sp();
     await sp.setBool(_kAutoEnterLastFavorite, v);
+  }
+
+  static Future<bool> getEmbyExclusiveFavoritesUiEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kEmbyExclusiveFavoritesUiEnabled) ?? false;
+  }
+
+  static Future<void> setEmbyExclusiveFavoritesUiEnabled(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kEmbyExclusiveFavoritesUiEnabled, v);
   }
 
   static Future<String?> getLastFavoriteId() async {

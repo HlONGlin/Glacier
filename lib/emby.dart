@@ -62,6 +62,7 @@ class EmbyAccount {
           : (j['name'] ?? '').toString(),
       serverUrl: (j['serverUrl'] ?? '').toString(),
       username: (j['username'] ?? '').toString(),
+      password: (j['password'] ?? '').toString(),
       userId: (j['userId'] ?? '').toString(),
       apiKey: (j['apiKey'] ?? '').toString(),
     );
@@ -154,6 +155,15 @@ class EmbyItem {
   final List<String> backdropTags;
   final bool isFolder;
   final String? mediaType;
+  final String? seriesId;
+  final String? seriesName;
+  final double? primaryImageAspectRatio;
+  final String? overview;
+  final int? productionYear;
+  final DateTime? endDate;
+  final double? communityRating;
+  final int? runTimeTicks;
+  final List<String> genres;
 
   /// 加入日期（Emby：通常对应 DateCreated，代表资源被加入媒体库的时间）。
   /// 设计原因：
@@ -182,6 +192,15 @@ class EmbyItem {
     this.backdropTags = const [],
     this.isFolder = false,
     this.mediaType,
+    this.seriesId,
+    this.seriesName,
+    this.primaryImageAspectRatio,
+    this.overview,
+    this.productionYear,
+    this.endDate,
+    this.communityRating,
+    this.runTimeTicks,
+    this.genres = const [],
     this.dateCreated,
     this.dateModified,
     this.size = 0,
@@ -215,6 +234,21 @@ class EmbyItem {
       }
     }
 
+    double? _parseDouble(String key) {
+      final v = j[key];
+      if (v is num) return v.toDouble();
+      if (v is String) return double.tryParse(v.trim());
+      return null;
+    }
+
+    int? _parseInt(String key) {
+      final v = j[key];
+      if (v is int) return v;
+      if (v is double) return v.toInt();
+      if (v is String) return int.tryParse(v.trim());
+      return null;
+    }
+
     int _parseSize() {
       final v = j['Size'];
       if (v is int) return v;
@@ -241,12 +275,30 @@ class EmbyItem {
     }
 
     final mediaTypeRaw = (j['MediaType'] ?? '').toString().trim();
+    final genresRaw = j['Genres'];
+    final genres = <String>[];
+    if (genresRaw is List) {
+      for (final g in genresRaw) {
+        final s = (g ?? '').toString().trim();
+        if (s.isNotEmpty) genres.add(s);
+      }
+    }
+
     return EmbyItem(
       id: (j['Id'] ?? '').toString(),
       name: (j['Name'] ?? '').toString(),
       type: (j['Type'] ?? '').toString(),
       mediaType: mediaTypeRaw.isEmpty ? null : mediaTypeRaw,
       isFolder: j['IsFolder'] == true,
+      seriesId: _tagOrNull(j['SeriesId']),
+      seriesName: _tagOrNull(j['SeriesName']),
+      primaryImageAspectRatio: _parseDouble('PrimaryImageAspectRatio'),
+      overview: _tagOrNull(j['Overview']),
+      productionYear: _parseInt('ProductionYear'),
+      endDate: _parseDate('EndDate'),
+      communityRating: _parseDouble('CommunityRating'),
+      runTimeTicks: _parseInt('RunTimeTicks'),
+      genres: genres,
       primaryTag: _tagOrNull(tags['Primary']),
       thumbTag: _tagOrNull(tags['Thumb']),
       backdropTags: backdropTags,
@@ -268,6 +320,11 @@ class EmbyLoginResult {
       required this.userId,
       required this.userName});
 }
+
+typedef EmbyUiOpener = Future<void> Function(
+  BuildContext context, {
+  Set<String>? scopedAccountIds,
+});
 
 /// Emby 字幕轨道信息（用于外部字幕/SRT 功能）。
 ///
@@ -340,6 +397,35 @@ class EmbyClient {
   /// - 该缓存仅存在于单个 client 实例内；页面/播放器重新创建 client 仍会重新校验。
   /// - 若校验失败，会清空缓存，允许后续重试。
   Future<void>? _validateFuture;
+  static const Duration _kValidateReuseWindow = Duration(minutes: 8);
+  static final Map<String, DateTime> _validateOkAt = <String, DateTime>{};
+  static final Map<String, Future<void>> _validateInflight =
+      <String, Future<void>>{};
+
+  static final Map<String, HttpClient> _httpPool = <String, HttpClient>{};
+
+  static String _httpPoolKey(Uri uri) {
+    final port = uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80);
+    return '${uri.scheme}://${uri.host}:$port';
+  }
+
+  static HttpClient _httpFor(Uri uri) {
+    final key = _httpPoolKey(uri);
+    return _httpPool.putIfAbsent(key, () {
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 10);
+      client.idleTimeout = const Duration(seconds: 45);
+      client.maxConnectionsPerHost = 12;
+      return client;
+    });
+  }
+
+  String _validateCacheKey() {
+    final u = account.baseUri;
+    final port = u.hasPort ? u.port : (u.scheme == 'https' ? 443 : 80);
+    final path = u.path.trim().isEmpty ? '/' : u.path.trim();
+    return '${u.scheme}://${u.host}:$port$path|${account.userId}|${account.apiKey}';
+  }
 
   /// Emby 字幕轨道信息（用于外部字幕/SRT 功能）。
   ///
@@ -352,6 +438,10 @@ class EmbyClient {
   ///
   /// 注意：不同 Emby 版本字段可能略有差异，因此解析要尽量宽容。
   static const String _kStreamTypeSubtitle = 'Subtitle';
+  static const String _kListFieldsFull =
+      'ImageTags,BackdropImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,MediaSources,SeriesId,SeriesName,Overview,ProductionYear,EndDate,CommunityRating,RunTimeTicks,Genres';
+  static const String _kListFieldsFallback =
+      'ImageTags,BackdropImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,SeriesId,SeriesName,Overview,ProductionYear,EndDate,CommunityRating,RunTimeTicks,Genres';
 
   /// 获取 Emby 播放协商信息（PlaySessionId / MediaSourceId 等）。
   ///
@@ -752,8 +842,7 @@ class EmbyClient {
   }) async {
     if (redirectCount > 5) throw Exception('重定向次数过多');
 
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 15);
+    final client = _httpFor(uri);
 
     final req = await client.openUrl(method, uri);
     req.followRedirects = false;
@@ -881,10 +970,8 @@ class EmbyClient {
     }
 
     // ✅ DateModified：用于“日期排序”兜底；部分库类型不会返回 DateCreated。
-    const full =
-        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,MediaSources';
-    const fallback =
-        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified';
+    const full = _kListFieldsFull;
+    const fallback = _kListFieldsFallback;
 
     try {
       return await _fetch(full);
@@ -893,8 +980,83 @@ class EmbyClient {
     }
   }
 
+  Future<List<EmbyItem>> listResumeItems({int limit = 30}) async {
+    await validateToken();
+    final cappedLimit = limit.clamp(1, 200).toInt();
+
+    Future<List<EmbyItem>> _fetchFromResume(String fields) async {
+      final uri = _u('/Users/${account.userId}/Items/Resume', <String, String>{
+        'Fields': fields,
+        'Limit': '$cappedLimit',
+      });
+      final data = await _getJson(uri);
+      final items =
+          (data['Items'] is List) ? (data['Items'] as List) : <dynamic>[];
+      return items
+          .whereType<Map>()
+          .map((m) => EmbyItem.fromJson(m.cast<String, dynamic>()))
+          .toList(growable: false);
+    }
+
+    Future<List<EmbyItem>> _fetchFromItems(String fields) async {
+      final uri = _u('/Users/${account.userId}/Items', <String, String>{
+        'Recursive': 'true',
+        'Filters': 'IsResumable',
+        'IncludeItemTypes': 'Movie,Episode,Video,MusicVideo',
+        'SortBy': 'DatePlayed',
+        'SortOrder': 'Descending',
+        'Limit': '$cappedLimit',
+        'Fields': fields,
+      });
+      final data = await _getJson(uri);
+      final items =
+          (data['Items'] is List) ? (data['Items'] as List) : <dynamic>[];
+      return items
+          .whereType<Map>()
+          .map((m) => EmbyItem.fromJson(m.cast<String, dynamic>()))
+          .toList(growable: false);
+    }
+
+    const full = _kListFieldsFull;
+    const fallback = _kListFieldsFallback;
+
+    // 兼容：部分服务端 /Items/Resume 可能返回成功但列表为空。
+    // 这里按“先 Resume，空则回退 Items”顺序补一次查询，避免首页“继续观看”空白。
+    List<EmbyItem> out = const <EmbyItem>[];
+    try {
+      out = await _fetchFromResume(full);
+    } catch (_) {}
+    if (out.isNotEmpty) return out;
+    try {
+      out = await _fetchFromResume(fallback);
+    } catch (_) {}
+    if (out.isNotEmpty) return out;
+    try {
+      out = await _fetchFromItems(full);
+    } catch (_) {}
+    if (out.isNotEmpty) return out;
+    try {
+      out = await _fetchFromItems(fallback);
+    } catch (_) {}
+    return out;
+  }
+
   Future<void> validateToken() async {
     if (_validateFuture != null) {
+      return _validateFuture!;
+    }
+
+    final cacheKey = _validateCacheKey();
+    final cachedAt = _validateOkAt[cacheKey];
+    if (cachedAt != null &&
+        DateTime.now().difference(cachedAt) <= _kValidateReuseWindow) {
+      _validateFuture = Future<void>.value();
+      return _validateFuture!;
+    }
+
+    final shared = _validateInflight[cacheKey];
+    if (shared != null) {
+      _validateFuture = shared;
       return _validateFuture!;
     }
 
@@ -907,15 +1069,63 @@ class EmbyClient {
       }
       final uri = _u('/Users/${account.userId}');
       await _getJson(uri);
+      _validateOkAt[cacheKey] = DateTime.now();
     }();
+    _validateInflight[cacheKey] = _validateFuture!;
 
     try {
       await _validateFuture!;
     } catch (_) {
       // 校验失败：允许后续重新触发校验
+      _validateOkAt.remove(cacheKey);
       _validateFuture = null;
       rethrow;
+    } finally {
+      _validateInflight.remove(cacheKey);
     }
+  }
+
+  Future<EmbyItem?> getItemById(String itemId) async {
+    await validateToken();
+    final id = itemId.trim();
+    if (id.isEmpty) return null;
+    final uri = _u('/Users/${account.userId}/Items/$id', <String, String>{
+      'Fields': _kListFieldsFull,
+    });
+    final data = await _getJson(uri);
+    if (data.isEmpty || (data['Id'] ?? '').toString().trim().isEmpty) {
+      return null;
+    }
+    return EmbyItem.fromJson(data);
+  }
+
+  Future<List<EmbyItem>> listItemsByIds(List<String> itemIds) async {
+    await validateToken();
+    final ids = itemIds
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    if (ids.isEmpty) return const <EmbyItem>[];
+
+    final uri = _u('/Users/${account.userId}/Items', <String, String>{
+      'Ids': ids.join(','),
+      'Fields': _kListFieldsFull,
+      'Recursive': 'false',
+    });
+    final data = await _getJson(uri);
+    final items =
+        (data['Items'] is List) ? (data['Items'] as List) : <dynamic>[];
+    final parsed = items
+        .whereType<Map>()
+        .map((m) => EmbyItem.fromJson(m.cast<String, dynamic>()))
+        .toList(growable: false);
+    if (parsed.isEmpty) return parsed;
+    final byId = <String, EmbyItem>{for (final it in parsed) it.id: it};
+    return ids
+        .map((id) => byId[id])
+        .whereType<EmbyItem>()
+        .toList(growable: false);
   }
 
   Future<List<EmbyItem>> listViews() async {
@@ -932,18 +1142,102 @@ class EmbyClient {
         .toList();
   }
 
-  Future<List<EmbyItem>> listChildren({required String parentId}) async {
+  Future<List<EmbyItem>> listLatestItems({
+    String? parentId,
+    int limit = 30,
+    String? includeItemTypes,
+  }) async {
+    await validateToken();
+    final pid = (parentId ?? '').trim();
+    final token = account.apiKey.trim();
+
+    Future<List<EmbyItem>> _fetch(String fields, String? types) async {
+      final qp = <String, String>{
+        'Fields': fields,
+        'Limit': '${limit.clamp(1, 240)}',
+      };
+      if (pid.isNotEmpty) qp['ParentId'] = pid;
+      final include = (types ?? '').trim();
+      if (include.isNotEmpty) qp['IncludeItemTypes'] = include;
+
+      final uri = _u('/Users/${account.userId}/Items/Latest', qp);
+      final headers = <String, String>{};
+      if (token.isNotEmpty) headers['X-Emby-Token'] = token;
+
+      final resp = await _sendRequest('GET', uri, headers: headers);
+      final body = await utf8.decodeStream(resp);
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        throw Exception('Emby Latest request failed: HTTP ${resp.statusCode}');
+      }
+
+      final data = jsonDecode(body);
+      final list = data is List
+          ? data
+          : (data is Map && data['Items'] is List)
+              ? (data['Items'] as List)
+              : <dynamic>[];
+
+      return list
+          .whereType<Map>()
+          .map((m) => EmbyItem.fromJson(m.cast<String, dynamic>()))
+          .toList(growable: false);
+    }
+
+    const full = _kListFieldsFull;
+    const fallback = _kListFieldsFallback;
+
+    final candidates = <String?>[];
+    final explicit = (includeItemTypes ?? '').trim();
+    if (explicit.isNotEmpty) candidates.add(explicit);
+    candidates.addAll(const <String?>[
+      'Movie,Episode,Video,MusicVideo,Photo,Series,Season',
+      'Movie,Episode,Video,MusicVideo,Photo',
+      null,
+    ]);
+
+    final tried = <String>{};
+    Object? lastErr;
+    for (final t in candidates) {
+      final key = (t ?? '__none__').trim();
+      if (!tried.add(key)) continue;
+      try {
+        return await _fetch(full, t);
+      } catch (e) {
+        lastErr = e;
+      }
+      try {
+        return await _fetch(fallback, t);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (lastErr != null) throw lastErr;
+    return const <EmbyItem>[];
+  }
+
+  Future<List<EmbyItem>> listChildren({
+    required String parentId,
+    bool recursive = false,
+    String sortBy = 'SortName',
+    String sortOrder = 'Ascending',
+    String? includeItemTypes,
+    int? limit,
+  }) async {
     await validateToken();
 
     // 同 listFavorites：优先请求 MediaSources 以获取 Size（用于大小排序/显示），失败则回退。
     Future<List<EmbyItem>> _fetch(String fields) async {
-      final uri = _u('/Users/${account.userId}/Items', <String, String>{
+      final qp = <String, String>{
         'ParentId': parentId,
-        'Recursive': 'false',
+        'Recursive': recursive ? 'true' : 'false',
         'Fields': fields,
-        'SortBy': 'SortName',
-        'SortOrder': 'Ascending',
-      });
+        'SortBy': sortBy,
+        'SortOrder': sortOrder,
+      };
+      final include = (includeItemTypes ?? '').trim();
+      if (include.isNotEmpty) qp['IncludeItemTypes'] = include;
+      if (limit != null && limit > 0) qp['Limit'] = '${limit.clamp(1, 2000)}';
+      final uri = _u('/Users/${account.userId}/Items', qp);
       final data = await _getJson(uri);
       final items =
           (data['Items'] is List) ? (data['Items'] as List) : <dynamic>[];
@@ -954,10 +1248,8 @@ class EmbyClient {
     }
 
     // ✅ DateModified：用于“日期排序”兜底；部分库类型不会返回 DateCreated。
-    const full =
-        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,MediaSources';
-    const fallback =
-        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified';
+    const full = _kListFieldsFull;
+    const fallback = _kListFieldsFallback;
 
     try {
       return await _fetch(full);
@@ -1011,10 +1303,8 @@ class EmbyClient {
           .toList(growable: false);
     }
 
-    const full =
-        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,MediaSources';
-    const fallback =
-        'ImageTags,PrimaryImageAspectRatio,DateCreated,DateModified';
+    const full = _kListFieldsFull;
+    const fallback = _kListFieldsFallback;
 
     // 兼容不同 Emby 版本：
     // - 第一档：目录+常见媒体类型（结果更聚焦）；
@@ -1060,6 +1350,59 @@ class EmbyClient {
     bool fallbackToVideo = true,
   }) async {
     await validateToken();
+
+    bool _looksLikeMovie(EmbyItem item) {
+      final t = item.type.trim().toLowerCase();
+      final m = (item.mediaType ?? '').trim().toLowerCase();
+      if (t == 'movie' || t == 'musicvideo') return true;
+      if (m == 'video' && (t.contains('movie') || t.contains('video'))) {
+        return true;
+      }
+      return t.contains('movie');
+    }
+
+    int _playableCmp(EmbyItem a, EmbyItem b) {
+      final am = _looksLikeMovie(a) ? 1 : 0;
+      final bm = _looksLikeMovie(b) ? 1 : 0;
+      if (am != bm) return bm.compareTo(am);
+
+      final sizeCmp = b.size.compareTo(a.size);
+      if (sizeCmp != 0) return sizeCmp;
+
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    }
+
+    Future<EmbyItem?> _pickPrimaryPlayable() async {
+      Future<List<EmbyItem>> _fetch(bool recursive, int limit) {
+        return listChildren(
+          parentId: folderId,
+          recursive: recursive,
+          includeItemTypes: 'Movie,Episode,Video,MusicVideo',
+          sortBy: 'SortName',
+          sortOrder: 'Ascending',
+          limit: limit,
+        );
+      }
+
+      var items = <EmbyItem>[];
+      try {
+        items = await _fetch(false, 120);
+      } catch (_) {}
+
+      if (items.isEmpty) {
+        try {
+          items = await _fetch(true, 260);
+        } catch (_) {}
+      }
+
+      final playable = items
+          .where((it) => it.id.trim().isNotEmpty)
+          .toList(growable: false);
+      if (playable.isEmpty) return null;
+
+      final ordered = playable.toList(growable: false)..sort(_playableCmp);
+      return ordered.first;
+    }
 
     // 0) 先尝试目录自身是否真的有可用图片（很多“自动生成封面”的目录本身没有 Primary，直接取会 404）
     // 但也存在目录本身有 ImageTags 的情况，此时直接用目录图片最快。
@@ -1132,6 +1475,16 @@ class EmbyClient {
           includeItemTypes: 'Movie,Episode,Video,MusicVideo', limit: 300);
       if (video != null)
         return bestCoverUrl(video, maxWidth: maxWidth, quality: quality);
+
+      // 3) 原生 UI 风格兜底：
+      //    即使条目没有 image tag，也尝试挑一个主视频条目，交给 bestCoverUrl 生成封面 URL。
+      //    这可以覆盖“目录自动封面可用，但列表字段里没有 tag”的场景。
+      final primary = await _pickPrimaryPlayable();
+      if (primary != null) {
+        final url =
+            bestCoverUrl(primary, maxWidth: maxWidth, quality: quality).trim();
+        if (url.isNotEmpty) return url;
+      }
     }
 
     return null;
@@ -1346,8 +1699,10 @@ class EmbyClient {
 /// =========================
 
 class EmbyPage extends StatefulWidget {
-  const EmbyPage({super.key});
-  static Route routeNoAnim() => _noAnimRoute(const EmbyPage());
+  final EmbyUiOpener? openExclusiveUi;
+  const EmbyPage({super.key, this.openExclusiveUi});
+  static Route routeNoAnim({EmbyUiOpener? openExclusiveUi}) =>
+      _noAnimRoute(EmbyPage(openExclusiveUi: openExclusiveUi));
   @override
   State<EmbyPage> createState() => _EmbyPageState();
 }
@@ -1399,6 +1754,7 @@ class _EmbyPageState extends State<EmbyPage> {
     final pwC = TextEditingController(text: existing?.password ?? '');
 
     bool loggingIn = false;
+    bool revealPassword = false;
     String? loginErr;
 
     String tmpUserId = existing?.userId ?? '';
@@ -1460,24 +1816,39 @@ class _EmbyPageState extends State<EmbyPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   TextField(
-                      controller: nameC,
-                      decoration: const InputDecoration(labelText: '名称')),
+                    controller: nameC,
+                    decoration: const InputDecoration(labelText: '名称'),
+                  ),
                   const SizedBox(height: 8),
                   TextField(
                     controller: urlC,
                     decoration: const InputDecoration(
-                        labelText:
-                            'Server URL (如 http://host:8096 或 http://host:8096/emby)'),
+                      labelText:
+                          'Server URL (如 http://host:8096 或 http://host:8096/emby)',
+                    ),
                   ),
                   const SizedBox(height: 8),
                   TextField(
-                      controller: userNameC,
-                      decoration: const InputDecoration(labelText: '用户名')),
+                    controller: userNameC,
+                    decoration: const InputDecoration(labelText: '用户名'),
+                  ),
                   const SizedBox(height: 8),
                   TextField(
                     controller: pwC,
-                    decoration: const InputDecoration(labelText: '密码'),
-                    obscureText: true,
+                    decoration: InputDecoration(
+                      labelText: '密码',
+                      suffixIcon: IconButton(
+                        tooltip: revealPassword ? '隐藏密码' : '显示密码',
+                        onPressed: () =>
+                            setState(() => revealPassword = !revealPassword),
+                        icon: Icon(
+                          revealPassword
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                        ),
+                      ),
+                    ),
+                    obscureText: !revealPassword,
                   ),
                   const SizedBox(height: 10),
                   Row(
@@ -1525,12 +1896,13 @@ class _EmbyPageState extends State<EmbyPage> {
     var url = urlC.text.trim();
     while (url.endsWith('/')) url = url.substring(0, url.length - 1);
     final username = userNameC.text.trim();
+    final password = pwC.text;
 
     String userId = tmpUserId.trim();
     String token = tmpToken.trim();
 
     if (userId.isEmpty || token.isEmpty) {
-      final pw = pwC.text;
+      final pw = password;
       if (url.isEmpty || username.isEmpty || pw.isEmpty) {
         if (!mounted) return;
         showAppToast(context, '请先填写完整并登录', error: true);
@@ -1591,6 +1963,7 @@ class _EmbyPageState extends State<EmbyPage> {
         existing!.name = name;
         existing.serverUrl = url;
         existing.username = username;
+        existing.password = password;
         existing.userId = userId;
         existing.apiKey = token;
       } else {
@@ -1600,6 +1973,7 @@ class _EmbyPageState extends State<EmbyPage> {
             name: name,
             serverUrl: url,
             username: username,
+            password: password,
             userId: userId,
             apiKey: token,
           ),
@@ -1633,78 +2007,93 @@ class _EmbyPageState extends State<EmbyPage> {
     await _save();
   }
 
+  Future<void> _openExclusiveUi({String? scopedAccountId}) async {
+    final open = widget.openExclusiveUi;
+    if (open == null) {
+      if (!mounted) return;
+      showAppToast(context, '当前入口未配置 Emby UI 跳转', error: true);
+      return;
+    }
+    final accountId = (scopedAccountId ?? '').trim();
+    final scoped = accountId.isEmpty ? null : <String>{accountId};
+    await open(context, scopedAccountIds: scoped);
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _kDarkStatusBarStyle,
       child: Scaffold(
         appBar: GlassAppBar(
-        title: const Text('Emby 账号'),
-        actions: [
-          IconButton(
-              onPressed: () => _addOrEdit(),
-              tooltip: '添加',
-              icon: const Icon(Icons.add)),
-          IconButton(
-              onPressed: _reloading ? null : _reload,
-              tooltip: '刷新',
-              icon: const Icon(Icons.refresh)),
-        ],
-      ),
-      body: _loading
-          ? const AppLoadingState()
-          : _loadError != null
-              ? AppErrorState(
-                  title: '加载 Emby 配置失败',
-                  details: friendlyErrorMessage(_loadError!),
-                  onRetry: _reload,
-                )
-              : (_list.isEmpty
-                  ? const AppEmptyState(
-                      title: '还没有 Emby 配置',
-                      subtitle: '点击右上角添加账号',
-                      icon: Icons.video_library_outlined,
-                    )
-                  : RefreshIndicator(
-                      onRefresh: _reload,
-                      child: AppViewport(
-                        child: ListView.separated(
-                          padding: const EdgeInsets.all(12),
-                          itemCount: _list.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 10),
-                          itemBuilder: (_, i) {
-                            final a = _list[i];
-                            return Card(
-                              elevation: 2,
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(16)),
-                              child: ListTile(
-                                title: Text(a.name),
-                                subtitle: Text(
-                                  '${a.serverUrl}\n用户: ${a.username}',
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
+          title: const Text('Emby 账号'),
+          actions: [
+            IconButton(
+                onPressed: () => _addOrEdit(),
+                tooltip: '添加',
+                icon: const Icon(Icons.add)),
+            IconButton(
+                onPressed: _reloading ? null : _reload,
+                tooltip: '刷新',
+                icon: const Icon(Icons.refresh)),
+          ],
+        ),
+        body: _loading
+            ? const AppLoadingState()
+            : _loadError != null
+                ? AppErrorState(
+                    title: '加载 Emby 配置失败',
+                    details: friendlyErrorMessage(_loadError!),
+                    onRetry: _reload,
+                  )
+                : (_list.isEmpty
+                    ? const AppEmptyState(
+                        title: '还没有 Emby 配置',
+                        subtitle: '点击右上角添加账号',
+                        icon: Icons.video_library_outlined,
+                      )
+                    : RefreshIndicator(
+                        onRefresh: _reload,
+                        child: AppViewport(
+                          child: ListView.separated(
+                            padding: const EdgeInsets.all(12),
+                            itemCount: _list.length,
+                            separatorBuilder: (_, __) =>
+                                const SizedBox(height: 10),
+                            itemBuilder: (_, i) {
+                              final a = _list[i];
+                              return Card(
+                                elevation: 2,
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16)),
+                                child: ListTile(
+                                  title: Text(a.name),
+                                  subtitle: Text(
+                                    '${a.serverUrl}\n用户: ${a.username}',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  isThreeLine: true,
+                                  onTap: () => _openExclusiveUi(
+                                    scopedAccountId: a.id,
+                                  ),
+                                  trailing: PopupMenuButton<String>(
+                                    onSelected: (v) {
+                                      if (v == 'edit') _addOrEdit(existing: a);
+                                      if (v == 'del') _remove(a);
+                                    },
+                                    itemBuilder: (_) => const [
+                                      PopupMenuItem(
+                                          value: 'edit', child: Text('编辑')),
+                                      PopupMenuItem(
+                                          value: 'del', child: Text('删除')),
+                                    ],
+                                  ),
                                 ),
-                                isThreeLine: true,
-                                trailing: PopupMenuButton<String>(
-                                  onSelected: (v) {
-                                    if (v == 'edit') _addOrEdit(existing: a);
-                                    if (v == 'del') _remove(a);
-                                  },
-                                  itemBuilder: (_) => const [
-                                    PopupMenuItem(
-                                        value: 'edit', child: Text('编辑')),
-                                    PopupMenuItem(
-                                        value: 'del', child: Text('删除')),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
-                      ),
-                    )),
+                      )),
       ),
     );
   }
@@ -1724,54 +2113,55 @@ class EmbyPickSourcePage extends StatelessWidget {
       child: FutureBuilder<List<EmbyAccount>>(
         future: EmbyStore.load(),
         builder: (_, snap) {
-        final accs = snap.data ?? [];
-        if (snap.connectionState != ConnectionState.done) {
-          return const Scaffold(body: AppLoadingState());
-        }
-        if (accs.isEmpty) {
+          final accs = snap.data ?? [];
+          if (snap.connectionState != ConnectionState.done) {
+            return const Scaffold(body: AppLoadingState());
+          }
+          if (accs.isEmpty) {
+            return Scaffold(
+              appBar: GlassAppBar(title: const Text('选择 Emby')),
+              body: const AppEmptyState(
+                title: '还没有 Emby 配置',
+                subtitle: '请先返回添加账号',
+                icon: Icons.video_library_outlined,
+              ),
+            );
+          }
           return Scaffold(
             appBar: GlassAppBar(title: const Text('选择 Emby')),
-            body: const AppEmptyState(
-              title: '还没有 Emby 配置',
-              subtitle: '请先返回添加账号',
-              icon: Icons.video_library_outlined,
-            ),
-          );
-        }
-        return Scaffold(
-          appBar: GlassAppBar(title: const Text('选择 Emby')),
-          body: AppViewport(
-            child: ListView.separated(
-              padding: const EdgeInsets.all(12),
-              itemCount: accs.length + 1,
-              separatorBuilder: (_, __) => const SizedBox(height: 10),
-              itemBuilder: (_, i) {
-                if (i == 0) {
+            body: AppViewport(
+              child: ListView.separated(
+                padding: const EdgeInsets.all(12),
+                itemCount: accs.length + 1,
+                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                itemBuilder: (_, i) {
+                  if (i == 0) {
+                    return Card(
+                      child: ListTile(
+                        leading:
+                            const Icon(Icons.collections_bookmark_outlined),
+                        title: const Text('所有收藏集（合并）'),
+                        subtitle: const Text('合并所有已登录账号的收藏'),
+                        onTap: () =>
+                            Navigator.pop(context, 'emby://all/favorites'),
+                      ),
+                    );
+                  }
+                  final a = accs[i - 1];
                   return Card(
                     child: ListTile(
-                      leading: const Icon(Icons.collections_bookmark_outlined),
-                      title: const Text('所有收藏集（合并）'),
-                      subtitle: const Text('合并所有已登录账号的收藏'),
+                      leading: const Icon(Icons.video_library_outlined),
+                      title: Text(a.name),
+                      subtitle: Text(a.serverUrl,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
                       onTap: () =>
-                          Navigator.pop(context, 'emby://all/favorites'),
+                          Navigator.pop(context, 'emby://${a.id}/favorites'),
                     ),
                   );
-                }
-                final a = accs[i - 1];
-                return Card(
-                  child: ListTile(
-                    leading: const Icon(Icons.video_library_outlined),
-                    title: Text(a.name),
-                    subtitle: Text(a.serverUrl,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                    onTap: () =>
-                        Navigator.pop(context, 'emby://${a.id}/favorites'),
-                  ),
-                );
-              },
+                },
+              ),
             ),
-          ),
-        );
+          );
         },
       ),
     );
