@@ -698,7 +698,7 @@ class _TagEmbyRef {
 _TagEmbyRef? _parseTagEmbyRef(TagTargetMeta meta) {
   var accountId = (meta.embyAccountId ?? '').trim();
   String? itemId = (meta.embyItemId ?? '').trim();
-  if ((itemId ?? '').isEmpty) itemId = null;
+  if (itemId.isEmpty) itemId = null;
   String? viewId;
 
   final key = meta.key.trim();
@@ -7804,9 +7804,9 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           title: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis),
           subtitle: Text(e.origin ?? '',
               maxLines: 3, overflow: TextOverflow.ellipsis),
-          onTap: () async {
+          onTap: () {
             // open edit dialog by popping back to list
-            await ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                 content: Text('请回到收藏夹列表 → 右键/长按收藏夹 → 编辑（管理来源）')));
           },
         ),

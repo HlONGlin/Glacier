@@ -2599,8 +2599,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     try {
       await job();
     } finally {
-      if (!mounted) return;
-      if (!popped && nav.canPop()) {
+      if (mounted && !popped && nav.canPop()) {
         popped = true;
         nav.pop();
       }
@@ -2821,28 +2820,27 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
       if (expanded == null || expanded.sources.length <= 1) {
         _sourcesExpandedOnce = true;
-        return;
+      } else {
+        final oldPos = _player.state.position;
+        final wasPlaying = _player.state.playing;
+
+        setState(() {
+          _sources = expanded!.sources;
+          _index = expanded.index.clamp(0, _sources.length - 1);
+        });
+
+        // ✅ 关键：扩容后必须重建播放器 playlist，否则目录里点选会 jump 失败。
+        final medias = await _buildMedias();
+        await _player.open(Playlist(medias, index: _index), play: wasPlaying);
+        _player.setRate(_rate);
+        _player.setVolume(_volume);
+        if (oldPos > Duration.zero) {
+          await _player.seek(oldPos);
+        }
+        _autoLoadSrtIfAny();
+        _armHistoryRecordForCurrent();
+        _sourcesExpandedOnce = true;
       }
-
-      final oldPos = _player.state.position;
-      final wasPlaying = _player.state.playing;
-
-      setState(() {
-        _sources = expanded!.sources;
-        _index = expanded.index.clamp(0, _sources.length - 1);
-      });
-
-      // ✅ 关键：扩容后必须重建播放器 playlist，否则目录里点选会 jump 失败。
-      final medias = await _buildMedias();
-      await _player.open(Playlist(medias, index: _index), play: wasPlaying);
-      _player.setRate(_rate);
-      _player.setVolume(_volume);
-      if (oldPos > Duration.zero) {
-        await _player.seek(oldPos);
-      }
-      _autoLoadSrtIfAny();
-      _armHistoryRecordForCurrent();
-      _sourcesExpandedOnce = true;
     } catch (e) {
       _sourcesExpandedOnce = true;
       if (!mounted) return;

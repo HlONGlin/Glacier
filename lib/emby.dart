@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'emby_native_logic.dart';
 import 'ui_kit.dart';
 
 const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
@@ -155,6 +156,7 @@ class EmbyItem {
   final List<String> backdropTags;
   final bool isFolder;
   final String? mediaType;
+  final String? collectionType;
   final String? seriesId;
   final String? seriesName;
   final double? primaryImageAspectRatio;
@@ -177,6 +179,7 @@ class EmbyItem {
   /// - 部分服务端/库类型不会返回 DateCreated（或语义不稳定）；
   /// - 在“按日期排序”时，如果 DateCreated 缺失，使用 DateModified 能显著提升可用性。
   final DateTime? dateModified;
+  final DateTime? datePlayed;
 
   /// 文件大小（字节）。
   /// - Emby 的大小通常存在于 MediaSources[0].Size（需要 Fields=MediaSources）；
@@ -192,6 +195,7 @@ class EmbyItem {
     this.backdropTags = const [],
     this.isFolder = false,
     this.mediaType,
+    this.collectionType,
     this.seriesId,
     this.seriesName,
     this.primaryImageAspectRatio,
@@ -203,6 +207,7 @@ class EmbyItem {
     this.genres = const [],
     this.dateCreated,
     this.dateModified,
+    this.datePlayed,
     this.size = 0,
   });
 
@@ -224,14 +229,24 @@ class EmbyItem {
       return s.isEmpty ? null : s;
     }
 
-    DateTime? _parseDate(String key) {
-      final raw = (j[key] ?? '').toString().trim();
+    DateTime? _parseRawDate(dynamic value) {
+      final raw = (value ?? '').toString().trim();
       if (raw.isEmpty) return null;
       try {
         return DateTime.parse(raw);
       } catch (_) {
         return null;
       }
+    }
+
+    DateTime? _parseDate(String key) => _parseRawDate(j[key]);
+
+    DateTime? _parseUserDataDate() {
+      final userData = j['UserData'];
+      if (userData is! Map) return null;
+      return _parseRawDate(userData['LastPlayedDate']) ??
+          _parseRawDate(userData['DatePlayed']) ??
+          _parseRawDate(userData['DateLastPlayed']);
     }
 
     double? _parseDouble(String key) {
@@ -275,6 +290,7 @@ class EmbyItem {
     }
 
     final mediaTypeRaw = (j['MediaType'] ?? '').toString().trim();
+    final collectionTypeRaw = (j['CollectionType'] ?? '').toString().trim();
     final genresRaw = j['Genres'];
     final genres = <String>[];
     if (genresRaw is List) {
@@ -289,6 +305,7 @@ class EmbyItem {
       name: (j['Name'] ?? '').toString(),
       type: (j['Type'] ?? '').toString(),
       mediaType: mediaTypeRaw.isEmpty ? null : mediaTypeRaw,
+      collectionType: collectionTypeRaw.isEmpty ? null : collectionTypeRaw,
       isFolder: j['IsFolder'] == true,
       seriesId: _tagOrNull(j['SeriesId']),
       seriesName: _tagOrNull(j['SeriesName']),
@@ -306,6 +323,10 @@ class EmbyItem {
       dateCreated: _parseDate('DateCreated') ?? _parseDate('DateAdded'),
       // DateModified 在很多库类型上更稳定（例如部分剧集/扫描器实现）。
       dateModified: _parseDate('DateModified'),
+      datePlayed: _parseDate('DatePlayed') ??
+          _parseDate('DateLastPlayed') ??
+          _parseDate('LastPlayedDate') ??
+          _parseUserDataDate(),
       size: _parseSize(),
     );
   }
@@ -439,9 +460,11 @@ class EmbyClient {
   /// 注意：不同 Emby 版本字段可能略有差异，因此解析要尽量宽容。
   static const String _kStreamTypeSubtitle = 'Subtitle';
   static const String _kListFieldsFull =
-      'ImageTags,BackdropImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,MediaSources,SeriesId,SeriesName,Overview,ProductionYear,EndDate,CommunityRating,RunTimeTicks,Genres';
+      'ImageTags,BackdropImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,MediaSources,CollectionType,SeriesId,SeriesName,Overview,ProductionYear,EndDate,CommunityRating,RunTimeTicks,Genres,UserData';
   static const String _kListFieldsFallback =
-      'ImageTags,BackdropImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,SeriesId,SeriesName,Overview,ProductionYear,EndDate,CommunityRating,RunTimeTicks,Genres';
+      'ImageTags,BackdropImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,CollectionType,SeriesId,SeriesName,Overview,ProductionYear,EndDate,CommunityRating,RunTimeTicks,Genres,UserData';
+  static const String _kListFieldsLite =
+      'ImageTags,BackdropImageTags,PrimaryImageAspectRatio,DateCreated,DateModified,CollectionType,SeriesId,SeriesName,RunTimeTicks,UserData';
 
   /// 获取 Emby 播放协商信息（PlaySessionId / MediaSourceId 等）。
   ///
@@ -1222,6 +1245,7 @@ class EmbyClient {
     String sortOrder = 'Ascending',
     String? includeItemTypes,
     int? limit,
+    bool lightweight = false,
   }) async {
     await validateToken();
 
@@ -1248,13 +1272,14 @@ class EmbyClient {
     }
 
     // ✅ DateModified：用于“日期排序”兜底；部分库类型不会返回 DateCreated。
-    const full = _kListFieldsFull;
-    const fallback = _kListFieldsFallback;
+    if (lightweight) {
+      return await _fetch(_kListFieldsLite);
+    }
 
     try {
-      return await _fetch(full);
+      return await _fetch(_kListFieldsFull);
     } catch (_) {
-      return await _fetch(fallback);
+      return await _fetch(_kListFieldsFallback);
     }
   }
 
@@ -1352,13 +1377,10 @@ class EmbyClient {
     await validateToken();
 
     bool _looksLikeMovie(EmbyItem item) {
-      final t = item.type.trim().toLowerCase();
-      final m = (item.mediaType ?? '').trim().toLowerCase();
-      if (t == 'movie' || t == 'musicvideo') return true;
-      if (m == 'video' && (t.contains('movie') || t.contains('video'))) {
-        return true;
-      }
-      return t.contains('movie');
+      if (embyNativeItemIsMovie(item)) return true;
+      if (embyNativeItemIsEpisode(item)) return false;
+      if (!embyNativeItemIsVideo(item)) return false;
+      return embyNativeCollectionIsMovies(item.collectionType);
     }
 
     int _playableCmp(EmbyItem a, EmbyItem b) {
@@ -1395,9 +1417,8 @@ class EmbyClient {
         } catch (_) {}
       }
 
-      final playable = items
-          .where((it) => it.id.trim().isNotEmpty)
-          .toList(growable: false);
+      final playable =
+          items.where((it) => it.id.trim().isNotEmpty).toList(growable: false);
       if (playable.isEmpty) return null;
 
       final ordered = playable.toList(growable: false)..sort(_playableCmp);

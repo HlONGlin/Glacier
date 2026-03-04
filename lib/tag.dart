@@ -7,7 +7,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 import 'ui_kit.dart';
-import 'video.dart';
 import 'webdav.dart';
 import 'image.dart';
 import 'package:file_picker/file_picker.dart'; // 用于选择目录/导入文件
@@ -1054,7 +1053,7 @@ extension TagStorePhysicalX on TagStore {
     if (t != null) {
       t.localPath = path;
       await _persist();
-      notifyListeners();
+      markChanged();
     }
   }
 
@@ -1123,7 +1122,7 @@ extension TagStorePhysicalX on TagStore {
 
       if (changed) {
         await _persist();
-        notifyListeners();
+        markChanged();
       }
     } catch (e) {
       debugPrint('Sync tag dir failed: $e');
@@ -1221,6 +1220,11 @@ class TagStore extends ChangeNotifier {
   final Map<String, Tag> _tagsById = <String, Tag>{};
   final Map<String, Set<String>> _targetToTagIds = <String, Set<String>>{};
   final Map<String, TagTargetMeta> _targetsByKey = <String, TagTargetMeta>{};
+
+  // Public wrapper so helpers/extensions don't call protected member directly.
+  void markChanged() {
+    notifyListeners();
+  }
 
   Future<void> ensureLoaded() async {
     if (_loaded) return;
