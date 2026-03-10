@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:video_player/video_player.dart';
@@ -16,11 +15,11 @@ import 'utils.dart';
 import 'image.dart';
 import 'inspector.dart';
 import 'emby.dart';
-import 'dart:collection';
+import 'source_accounts.dart';
+import 'source_refs.dart';
 import 'dart:math';
 import 'package:native_device_orientation/native_device_orientation.dart';
 import 'package:collection/collection.dart';
-import 'package:crypto/crypto.dart';
 
 const SystemUiOverlayStyle _kLightStatusBarStyle = SystemUiOverlayStyle(
   statusBarColor: Colors.transparent,
@@ -41,14 +40,14 @@ const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
 /// ===============================
 /// Video Module (Desktop-first) — PotPlayer-like (v3) [Merged]
 ///
-/// ✅ 主体以“大版本”为主（带 Anime4K Profile 链式方案）
+/// ✅ 主体以“大版本”为主
 /// ✅ 合入“WebDAV 播放源”解析（webdav://accountId/xxx -> http(s)://user:pass@...）
 ///
 /// ✅ 主要功能
 /// - 控制栏自动隐藏 + 鼠标指针自动隐藏（更快：~1.6~1.8s）
 /// - 拖动进度条：只显示预览，不实时 seek；松手才 seek（更像 PotPlayer）
 /// - 目录：弹出式浮层（更“pop”），不影响播放；支持快捷键 L / Ctrl+L
-/// - 右键菜单：全屏/倍速/打开目录/快捷键说明/Anime4K
+/// - 右键菜单：全屏/倍速/打开目录/快捷键说明
 /// - 右上方“热区”：鼠标停留自动弹出目录
 ///
 /// ✅ 快捷键（桌面）
@@ -59,8 +58,6 @@ const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
 /// L / Ctrl+L：打开目录
 /// Esc：退出全屏 或 关闭目录/菜单
 /// ===============================
-
-String? _anime4kShaderDirOnDisk;
 
 /// 播放器内“目录/同文件夹播放列表”按需扩容结果。
 ///
@@ -278,8 +275,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   bool _insPlaying = false;
   double _insRate = 1.0;
 
-  // Anime4K
-  String? _anime4kSelection;
   final Map<String, String> _shaderDiskCache = <String, String>{};
 
   // 目录弹窗
@@ -348,42 +343,17 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
   // WebDAV Helpers (保持不变)
   Future<Map<String, Map<String, String>>> _loadWebDavAccountCache() async {
-    final out = <String, Map<String, String>>{};
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('webdav_accounts_v1');
-      if (raw == null || raw.trim().isEmpty) return out;
-      final List list = jsonDecode(raw) as List;
-      for (final e in list) {
-        if (e is Map) {
-          final id = (e['id'] ?? '').toString();
-          final baseUrl = (e['baseUrl'] ?? '').toString();
-          final username = (e['username'] ?? '').toString();
-          final password = (e['password'] ?? '').toString();
-          if (id.isNotEmpty && baseUrl.isNotEmpty) {
-            out[id] = {
-              'baseUrl': baseUrl,
-              'username': username,
-              'password': password,
-            };
-          }
-        }
-      }
+      return await loadWebDavAccountAuthMapShared();
     } catch (e) {
       debugPrint('Error loading webdav accounts: $e');
+      return <String, Map<String, String>>{};
     }
-    return out;
   }
 
   Future<Map<String, EmbyAccount>> _loadEmbyAccountMap() async {
     try {
-      final list = await EmbyStore.load();
-      final m = <String, EmbyAccount>{};
-      for (final a in list) {
-        if (a.id.trim().isEmpty) continue;
-        m[a.id] = a;
-      }
-      return m;
+      return await loadEmbyAccountsMapShared();
     } catch (e) {
       debugPrint('Error loading emby accounts: $e');
       return <String, EmbyAccount>{};
@@ -547,35 +517,13 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
       try {
         final u = Uri.parse(source);
-        accountId = u.host;
         sizeHint = int.tryParse(u.queryParameters['size'] ?? '');
         contentTypeHint = u.queryParameters['ct'];
-        final segs = u.pathSegments.where((s) => s.isNotEmpty).toList();
-        relEncoded = segs.map(Uri.encodeComponent).join('/');
-      } catch (_) {
-        const prefix = 'webdav://';
-        if (!source.startsWith(prefix)) return null;
-        final raw = source.substring(prefix.length);
-        final slash = raw.indexOf('/');
-        if (slash == -1) return null;
-        accountId = raw.substring(0, slash);
-        var relRaw = raw.substring(slash + 1);
-        relRaw = relRaw.split('?').first.split('#').first;
-        final segs = relRaw.split('/').where((s) => s.isNotEmpty).map((seg) {
-          var decoded = seg;
-          try {
-            decoded = safeDecodeUriComponent(seg);
-          } catch (_) {
-            try {
-              decoded = safeDecodeUriComponent(seg.replaceAll('%', '%25'));
-            } catch (_) {
-              decoded = seg;
-            }
-          }
-          return Uri.encodeComponent(decoded);
-        }).toList();
-        relEncoded = segs.join('/');
-      }
+      } catch (_) {}
+      final ref = parseWebDavSource(source);
+      if (ref == null) return null;
+      accountId = ref.accountId;
+      relEncoded = encodePathPreserveSlash(ref.relPath);
 
       final acc = accounts[accountId];
       if (acc == null) return null;
@@ -588,16 +536,12 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       final resolvedUrl = Uri.parse(base).resolve(relEncoded).toString();
       final token = base64Encode(utf8.encode('$username:$password'));
 
-      final remoteUri = Uri.parse(resolvedUrl);
-      final directUrl =
-          remoteUri.replace(userInfo: '$username:$password').toString();
-
-      if (Platform.isAndroid) {
-        return Media(directUrl);
-      }
-
-      // ✅ 仅安卓手机使用：统一走直连（带 userInfo 的 basic auth），避免依赖桌面端本地代理。
-      return Media(directUrl);
+      return Media(
+        resolvedUrl,
+        httpHeaders: <String, String>{
+          HttpHeaders.authorizationHeader: 'Basic $token',
+        },
+      );
     } catch (e) {
       debugPrint(
           'Create WebDav Media Error: ${redactSensitiveText(e.toString())}');
@@ -964,12 +908,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
       if (mounted) setState(() => _srtCandidates = srts);
     } catch (_) {}
-
-    // ✅ Emby：退出时上报 Stopped。
-    // 设计原因：
-    // - 让服务端及时结束会话（尤其是转码场景），避免后台转码进程长时间占用资源；
-    // - 同时确保进度/观看状态能落盘。
-    unawaited(_stopEmbyPlaybackCheckIns(reason: 'dispose'));
   }
 
   Future<void> _applySrt(String? path) async {
@@ -2934,36 +2872,9 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   }
 
   _WebDavRef? _parseWebDavSourceForListing(String source) {
-    // 尝试用 Uri.parse；若存在裸 %，先修复。
-    Uri? u;
-    try {
-      u = Uri.parse(source);
-    } catch (_) {
-      try {
-        u = Uri.parse(source.replaceAll('%', '%25'));
-      } catch (_) {
-        return null;
-      }
-    }
-    if (u.scheme != 'webdav') return null;
-    final accountId = u.host;
-    final segs = <String>[];
-    for (final s in u.pathSegments.where((s) => s.isNotEmpty)) {
-      // pathSegments 在多数情况下已 decode；这里再做一次安全 decode。
-      var decoded = s;
-      try {
-        decoded = safeDecodeUriComponent(s);
-      } catch (_) {
-        try {
-          decoded = safeDecodeUriComponent(s.replaceAll('%', '%25'));
-        } catch (_) {
-          decoded = s;
-        }
-      }
-      segs.add(decoded);
-    }
-    final rel = segs.join('/');
-    return _WebDavRef(accountId: accountId, relPath: rel);
+    final parsed = parseWebDavSource(source);
+    if (parsed == null) return null;
+    return _WebDavRef(accountId: parsed.accountId, relPath: parsed.relPath);
   }
 
   Future<List<_WebDavListItem>> _webDavPropfindList({
@@ -3111,20 +3022,82 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     }
   }
 
-  // Anime4K 方法
-  bool get _canUseAnime4K =>
-      !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
-  Future<void> _showAnime4KMenu(
-      {required double parentLeft,
-      required double parentTop,
-      required double parentWidth}) async {/*...*/}
   Future<void> _showRateSubMenu(
       {required double parentLeft,
       required double parentTop,
-      required double parentWidth}) async {/*...*/}
+      required double parentWidth}) async {
+    const rates = <double>[0.5, 1.0, 1.25, 1.5, 2.0];
+    final result = await showMenu<double>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        parentLeft,
+        parentTop,
+        max(0, MediaQuery.of(context).size.width - parentLeft - parentWidth),
+        0,
+      ),
+      items: [
+        for (final rate in rates)
+          PopupMenuItem<double>(
+            value: rate,
+            child: Row(
+              children: [
+                Icon(
+                  _rate == rate
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                  size: 18,
+                ),
+                const SizedBox(width: 10),
+                Text('${rate}x'),
+              ],
+            ),
+          ),
+      ],
+    );
+    if (result != null) {
+      setState(() => _rate = result);
+      try {
+        await _player.setRate(result);
+      } catch (e) {
+        _toast('设置倍速失败：$e');
+      }
+      unawaited(_reportEmbyProgress(
+          eventName: 'PlaybackRateChange', interactive: true));
+      _pokeUI();
+    }
+  }
+
   Future<void> _showContextMenu(Offset globalPos) async {
     _pokeUI();
-    // 上下文菜单逻辑...
+    final value = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        globalPos.dx,
+        globalPos.dy,
+        max(0, MediaQuery.of(context).size.width - globalPos.dx),
+        max(0, MediaQuery.of(context).size.height - globalPos.dy),
+      ),
+      items: const [
+        PopupMenuItem<String>(value: 'play_pause', child: Text('播放 / 暂停')),
+        PopupMenuItem<String>(value: 'fullscreen', child: Text('全屏 / 退出全屏')),
+        PopupMenuItem<String>(value: 'rate', child: Text('倍速')),
+      ],
+    );
+    switch (value) {
+      case 'play_pause':
+        await _togglePlayPause();
+        break;
+      case 'fullscreen':
+        _toggleFullscreen();
+        break;
+      case 'rate':
+        await _showRateSubMenu(
+          parentLeft: globalPos.dx,
+          parentTop: globalPos.dy,
+          parentWidth: 180,
+        );
+        break;
+    }
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -4390,6 +4363,9 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   NativeDeviceOrientation? _lastOriCandidate;
   int _oriStableCount = 0;
   DateTime _lastOriApplyAt = DateTime.fromMillisecondsSinceEpoch(0);
+  final MethodChannel _mobileOriChannel =
+      const MethodChannel('glacier/orientation');
+  bool _allowRoutePopOnce = false;
 
   bool _gestureActive = false;
   String _gestureType = '';
@@ -4399,14 +4375,14 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   Timer? _lockButtonHideTimer;
   Timer? _resumeHintForceHideTimer;
   int _resumeHintSerial = 0;
-  ScaffoldMessengerState? _resumeHintMessenger;
-  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>?
-      _resumeHintSnackBarController;
+  bool _resumeHintVisible = false;
+  String _resumeHintText = '';
   bool _exitCleanupDone = false;
   Offset? _lastDoubleTapPos;
   Duration _dragStartPos = Duration.zero;
   Duration _dragTargetPos = Duration.zero;
   double? _rateBeforeLongPress;
+  String _openingLabel = '正在准备视频';
 
   static const int _historyMinPlayMs = 800;
   int _historyLastCommitAt = 0;
@@ -4443,6 +4419,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     }
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     SystemChrome.setSystemUIOverlayStyle(_kLightStatusBarStyle);
+    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
     _startAutoRotateIfMobile();
     unawaited(_loadMobileSettings());
     unawaited(_openCurrent(autoPlay: true));
@@ -4456,6 +4433,11 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       unawaited(_controller?.pause());
       unawaited(_reportEmbyProgress(eventName: 'Pause'));
       unawaited(_flushHistoryProgress());
+      return;
+    }
+    if (state == AppLifecycleState.resumed && !_isScreenLocked) {
+      _startAutoRotateIfMobile();
+      unawaited(_syncOrientationFromSensor(force: true));
     }
   }
 
@@ -4469,11 +4451,14 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     _lockButtonHideTimer?.cancel();
     _dismissResumeHint(clearBinding: true);
     _stopAutoRotateIfAny();
+    _autoRotateEnabled = false;
+    _appliedNativeOri = NativeDeviceOrientation.unknown;
     final c = _controller;
     _controller = null;
     c?.removeListener(_onControllerTick);
     unawaited(c?.pause());
     unawaited(c?.dispose());
+    unawaited(_mobileOriChannel.invokeMethod('unlock').catchError((_) {}));
     unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(_kDarkStatusBarStyle);
@@ -4602,6 +4587,8 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   void _startAutoRotateIfMobile() {
     if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
     _nativeOriSub?.cancel();
+    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
+    unawaited(_syncOrientationFromSensor(force: true));
     _nativeOriSub = NativeDeviceOrientationCommunicator()
         .onOrientationChanged(useSensor: true)
         .listen((ori) {
@@ -4614,15 +4601,31 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
         _lastOriCandidate = ori;
         _oriStableCount = 1;
       }
-      if (_oriStableCount < 2) return;
+      if (_oriStableCount < 1) return;
 
       final now = DateTime.now();
-      if (now.difference(_lastOriApplyAt).inMilliseconds < 450) return;
+      if (now.difference(_lastOriApplyAt).inMilliseconds < 180) return;
       if (_appliedNativeOri == ori) return;
       _appliedNativeOri = ori;
       _lastOriApplyAt = now;
       unawaited(_applyPreferredOrientationByOri(ori));
     });
+  }
+
+  Future<void> _syncOrientationFromSensor({bool force = false}) async {
+    if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
+    if (!_autoRotateEnabled || _isScreenLocked) return;
+    try {
+      final ori = await NativeDeviceOrientationCommunicator()
+          .orientation(useSensor: true);
+      if (ori == NativeDeviceOrientation.unknown) return;
+      _lastOriCandidate = ori;
+      _oriStableCount = 2;
+      if (!force && _appliedNativeOri == ori) return;
+      _appliedNativeOri = ori;
+      _lastOriApplyAt = DateTime.now();
+      await _applyPreferredOrientationByOri(ori);
+    } catch (_) {}
   }
 
   void _stopAutoRotateIfAny() {
@@ -4634,6 +4637,15 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     if (_exitCleanupDone) return;
     _exitCleanupDone = true;
     _dismissResumeHint(clearBinding: true);
+    _stopAutoRotateIfAny();
+    _autoRotateEnabled = false;
+    _appliedNativeOri = NativeDeviceOrientation.unknown;
+    try {
+      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    } catch (_) {}
+    try {
+      await _mobileOriChannel.invokeMethod('unlock');
+    } catch (_) {}
     final c = _controller;
     if (c != null) {
       try {
@@ -4651,14 +4663,28 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       switch (ori) {
         case NativeDeviceOrientation.landscapeLeft:
         case NativeDeviceOrientation.landscapeRight:
+          try {
+            await _mobileOriChannel.invokeMethod('lockLandscape');
+          } catch (_) {}
           await SystemChrome.setPreferredOrientations(const [
             DeviceOrientation.landscapeLeft,
             DeviceOrientation.landscapeRight,
           ]);
           break;
         case NativeDeviceOrientation.portraitDown:
+          try {
+            await _mobileOriChannel.invokeMethod('lockPortraitUpsideDown');
+          } catch (_) {}
+          await SystemChrome.setPreferredOrientations(const [
+            DeviceOrientation.portraitUp,
+            DeviceOrientation.portraitDown,
+          ]);
+          break;
         case NativeDeviceOrientation.portraitUp:
         default:
+          try {
+            await _mobileOriChannel.invokeMethod('lockPortrait');
+          } catch (_) {}
           await SystemChrome.setPreferredOrientations(const [
             DeviceOrientation.portraitUp,
             DeviceOrientation.portraitDown,
@@ -4682,34 +4708,10 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
 
     _dismissResumeHint(bumpSerial: false);
     final serial = ++_resumeHintSerial;
-    final messenger = ScaffoldMessenger.of(context);
-    _resumeHintMessenger = messenger;
-    _resumeHintSnackBarController = messenger.showSnackBar(
-      SnackBar(
-        duration: const Duration(seconds: 3),
-        backgroundColor: Colors.black.withValues(alpha: 0.6),
-        content: Text(
-          '从 ${_fmt(Duration(milliseconds: resumedMs))} 继续播放',
-          style: const TextStyle(color: Colors.white),
-        ),
-        action: SnackBarAction(
-          label: '从头播放',
-          onPressed: () {
-            final cur = _controller;
-            if (cur == null || !cur.value.isInitialized) return;
-            if (_currentPath.trim() != sourcePath.trim()) return;
-            _dismissResumeHint();
-            unawaited(cur.seekTo(Duration.zero));
-            unawaited(
-              _reportEmbyProgress(eventName: 'TimeUpdate', interactive: true),
-            );
-            unawaited(
-                AppHistory.updateProgress(path: sourcePath, positionMs: 0));
-            _showGestureOverlay('从头播放', Icons.replay);
-          },
-        ),
-      ),
-    );
+    setState(() {
+      _resumeHintVisible = true;
+      _resumeHintText = '从 ${_fmt(Duration(milliseconds: resumedMs))} 继续播放';
+    });
     _resumeHintForceHideTimer = Timer(const Duration(milliseconds: 3050), () {
       if (!mounted) return;
       if (serial != _resumeHintSerial) return;
@@ -4723,30 +4725,11 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     _resumeHintForceHideTimer?.cancel();
     _resumeHintForceHideTimer = null;
 
-    try {
-      _resumeHintSnackBarController?.close();
-    } catch (_) {}
-    _resumeHintSnackBarController = null;
-
-    try {
-      _resumeHintMessenger?.hideCurrentSnackBar();
-      _resumeHintMessenger?.removeCurrentSnackBar(
-        reason: SnackBarClosedReason.remove,
-      );
-    } catch (_) {}
-
     if (mounted) {
-      try {
-        final messenger = ScaffoldMessenger.maybeOf(context);
-        messenger?.hideCurrentSnackBar();
-        messenger?.removeCurrentSnackBar(
-          reason: SnackBarClosedReason.remove,
-        );
-      } catch (_) {}
-    }
-
-    if (clearBinding) {
-      _resumeHintMessenger = null;
+      setState(() {
+        _resumeHintVisible = false;
+        _resumeHintText = '';
+      });
     }
   }
 
@@ -4768,41 +4751,19 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   Future<Map<String, Map<String, String>>> _loadWebDavAccountCache() async {
-    final out = <String, Map<String, String>>{};
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('webdav_accounts_v1');
-      if (raw == null || raw.trim().isEmpty) return out;
-      final list = jsonDecode(raw);
-      if (list is! List) return out;
-      for (final e in list) {
-        if (e is! Map) continue;
-        final id = (e['id'] ?? '').toString().trim();
-        final baseUrl = (e['baseUrl'] ?? '').toString().trim();
-        final username = (e['username'] ?? '').toString();
-        final password = (e['password'] ?? '').toString();
-        if (id.isEmpty || baseUrl.isEmpty) continue;
-        out[id] = <String, String>{
-          'baseUrl': baseUrl,
-          'username': username,
-          'password': password,
-        };
-      }
-    } catch (_) {}
-    return out;
+      return await loadWebDavAccountAuthMapShared();
+    } catch (_) {
+      return <String, Map<String, String>>{};
+    }
   }
 
   Future<Map<String, EmbyAccount>> _loadEmbyAccountMap() async {
-    final out = <String, EmbyAccount>{};
     try {
-      final list = await EmbyStore.load();
-      for (final a in list) {
-        final id = a.id.trim();
-        if (id.isEmpty) continue;
-        out[id] = a;
-      }
-    } catch (_) {}
-    return out;
+      return await loadEmbyAccountsMapShared();
+    } catch (_) {
+      return <String, EmbyAccount>{};
+    }
   }
 
   Future<Map<String, EmbyAccount>> _ensureEmbyAccounts() async {
@@ -4844,18 +4805,9 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   _EmbyRef? _parseEmbyRef(String source) {
-    try {
-      final u = Uri.parse(source);
-      if (u.scheme.toLowerCase() != 'emby') return null;
-      final accountId = u.host.trim();
-      final raw = u.path.startsWith('/') ? u.path.substring(1) : u.path;
-      final m = RegExp(r'^item:([^/?#]+)').firstMatch(raw);
-      final itemId = (m?.group(1) ?? '').trim();
-      if (accountId.isEmpty || itemId.isEmpty) return null;
-      return _EmbyRef(accountId: accountId, itemId: itemId);
-    } catch (_) {
-      return null;
-    }
+    final parsed = parseEmbySourceRef(source);
+    if (parsed == null) return null;
+    return _EmbyRef(accountId: parsed.accountId, itemId: parsed.itemId);
   }
 
   Future<_MobileResolvedSource> _resolveEmbySource(String source) async {
@@ -4902,33 +4854,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   Future<_MobileResolvedSource> _resolveWebDavSource(String source) async {
-    String accountId = '';
-    String relEncoded = '';
-    try {
-      final u = Uri.parse(source);
-      accountId = u.host.trim();
-      final segs = u.pathSegments.where((s) => s.isNotEmpty).toList();
-      relEncoded = segs.map(Uri.encodeComponent).join('/');
-    } catch (_) {
-      const prefix = 'webdav://';
-      if (!source.startsWith(prefix)) {
-        throw Exception('无效的 WebDAV 源：$source');
-      }
-      final raw = source.substring(prefix.length);
-      final slash = raw.indexOf('/');
-      if (slash == -1) throw Exception('无效的 WebDAV 源：$source');
-      accountId = raw.substring(0, slash).trim();
-      var relRaw = raw.substring(slash + 1);
-      relRaw = relRaw.split('?').first.split('#').first;
-      final segs = relRaw.split('/').where((s) => s.isNotEmpty).map((seg) {
-        var decoded = seg;
-        try {
-          decoded = safeDecodeUriComponent(seg);
-        } catch (_) {}
-        return Uri.encodeComponent(decoded);
-      }).toList();
-      relEncoded = segs.join('/');
+    final ref = parseWebDavSource(source);
+    if (ref == null) {
+      throw Exception('无效的 WebDAV 源：$source');
     }
+    final accountId = ref.accountId;
+    final relEncoded = encodePathPreserveSlash(ref.relPath);
 
     _webDavAccounts ??= await _loadWebDavAccountCache();
     final acc = _webDavAccounts![accountId];
@@ -4966,19 +4897,9 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   _EmbyStreamInfo? _parseEmbyStreamInfo(String url) {
-    try {
-      final u = Uri.parse(url);
-      final segs = u.pathSegments;
-      final i = segs.indexWhere((s) => s.toLowerCase() == 'videos');
-      if (i < 0 || i + 2 >= segs.length) return null;
-      final itemId = segs[i + 1].trim();
-      final tail = segs[i + 2].toLowerCase();
-      if (!tail.startsWith('stream')) return null;
-      if (itemId.isEmpty) return null;
-      return _EmbyStreamInfo(itemId: itemId);
-    } catch (_) {
-      return null;
-    }
+    final parsed = parseEmbyStreamInfo(url);
+    if (parsed == null) return null;
+    return _EmbyStreamInfo(itemId: parsed.itemId);
   }
 
   Future<EmbyAccount?> _resolveEmbyAccountForStream(String url) async {
@@ -5842,17 +5763,25 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       final isLandscape =
           MediaQuery.of(context).orientation == Orientation.landscape;
       unawaited(
-        SystemChrome.setPreferredOrientations(
-          isLandscape
-              ? const [
-                  DeviceOrientation.landscapeLeft,
-                  DeviceOrientation.landscapeRight,
-                ]
-              : const [
-                  DeviceOrientation.portraitUp,
-                  DeviceOrientation.portraitDown,
-                ],
-        ),
+        () async {
+          if (isLandscape) {
+            try {
+              await _mobileOriChannel.invokeMethod('lockLandscape');
+            } catch (_) {}
+            await SystemChrome.setPreferredOrientations(const [
+              DeviceOrientation.landscapeLeft,
+              DeviceOrientation.landscapeRight,
+            ]);
+          } else {
+            try {
+              await _mobileOriChannel.invokeMethod('lockPortrait');
+            } catch (_) {}
+            await SystemChrome.setPreferredOrientations(const [
+              DeviceOrientation.portraitUp,
+              DeviceOrientation.portraitDown,
+            ]);
+          }
+        }(),
       );
       _scheduleLockButtonAutoHide();
       _showGestureOverlay('方向已锁定', Icons.screen_lock_rotation);
@@ -5865,10 +5794,16 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     _oriStableCount = 0;
     _lastOriApplyAt = DateTime.fromMillisecondsSinceEpoch(0);
     _appliedNativeOri = NativeDeviceOrientation.unknown;
-    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
+    unawaited(() async {
+      try {
+        await _mobileOriChannel.invokeMethod('unlock');
+      } catch (_) {}
+      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    }());
     Future<void>.delayed(const Duration(milliseconds: 220), () async {
       if (!mounted || _isScreenLocked) return;
       _startAutoRotateIfMobile();
+      await _syncOrientationFromSensor(force: true);
     });
     _showGestureOverlay('方向已解锁', Icons.screen_rotation);
     _scheduleAutoHide();
@@ -5943,6 +5878,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       _opening = true;
       _error = null;
       _title = _displayName(_currentPath);
+      _openingLabel = _controller == null ? '正在准备视频' : '正在切换视频';
       _draggingSeek = false;
       _dragSeekMs = 0;
     });
@@ -6005,6 +5941,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       if (autoPlay) {
         await _controller?.play();
       }
+      unawaited(_syncOrientationFromSensor(force: true));
       _scheduleAutoHide();
       unawaited(_startEmbyPlaybackCheckInsIfNeeded(reason: 'mobile open'));
       unawaited(_prepareSubtitleForCurrent());
@@ -6037,10 +5974,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       await c.pause();
       setState(() => _controlsVisible = true);
       _hideTimer?.cancel();
+      _showGestureOverlay('暂停', Icons.pause_rounded);
       unawaited(_reportEmbyProgress(eventName: 'Pause'));
     } else {
       await c.play();
       _scheduleAutoHide();
+      _showGestureOverlay('播放', Icons.play_arrow_rounded);
       unawaited(_reportEmbyProgress(eventName: 'Unpause'));
     }
   }
@@ -6107,7 +6046,10 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   Future<void> _jumpTo(int newIndex) async {
     if (newIndex < 0 || newIndex >= _sources.length) return;
     await _flushHistoryProgress();
-    setState(() => _index = newIndex);
+    setState(() {
+      _index = newIndex;
+      _openingLabel = '正在切换到 ${_displayName(_currentPath)}';
+    });
     await _openCurrent(autoPlay: true);
   }
 
@@ -6170,10 +6112,15 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
         _videoEpisodeNavButtonsEnabled && _sources.length > 1;
 
     return PopScope<void>(
-      canPop: true,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) return;
-        unawaited(_beforeRouteExit(reason: 'mobile system back'));
+      canPop: _allowRoutePopOnce,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (_allowRoutePopOnce) return;
+        final navigator = Navigator.of(context);
+        await _beforeRouteExit(reason: 'mobile system back');
+        if (!mounted) return;
+        setState(() => _allowRoutePopOnce = true);
+        navigator.pop();
       },
       child: Scaffold(
         backgroundColor: Colors.black,
@@ -6207,7 +6154,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                             value!.aspectRatio > 0 ? value.aspectRatio : 16 / 9,
                         child: VideoPlayer(c),
                       )
-                    : const CircularProgressIndicator(color: Colors.white),
+                    : const SizedBox.shrink(),
               ),
               if (_brightness < 0.999)
                 Positioned.fill(
@@ -6276,8 +6223,44 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                   ),
                 ),
               if (_opening)
-                const Center(
-                  child: CircularProgressIndicator(color: Colors.white70),
+                Center(
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.58),
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 22,
+                          vertical: 18,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 28,
+                              height: 28,
+                              child: CircularProgressIndicator(
+                                color: Colors.white70,
+                                strokeWidth: 2.8,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              _openingLabel,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               if (_error != null && _error!.trim().isNotEmpty)
                 Positioned.fill(
@@ -6417,6 +6400,11 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                                               _draggingSeek = true;
                                               _dragSeekMs = v;
                                             });
+                                            _beginGestureOverlay(
+                                              _fmt(Duration(
+                                                  milliseconds: v.round())),
+                                              Icons.drag_handle_rounded,
+                                            );
                                           }
                                         : null,
                                     onChangeEnd: initialized
@@ -6430,6 +6418,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                                               eventName: 'TimeUpdate',
                                               interactive: true,
                                             ));
+                                            _endGestureOverlay();
                                           }
                                         : null,
                                   ),
@@ -6578,6 +6567,75 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                               ),
                             ),
                           ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              if (_resumeHintVisible && _resumeHintText.trim().isNotEmpty)
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: (_controlsVisible && !_isScreenLocked) ? 112 : 28,
+                  child: SafeArea(
+                    top: false,
+                    child: IgnorePointer(
+                      ignoring: false,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.68),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.history_rounded,
+                                  color: Colors.white, size: 18),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _resumeHintText,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: () {
+                                  final cur = _controller;
+                                  if (cur == null || !cur.value.isInitialized) {
+                                    return;
+                                  }
+                                  final sourcePath = _currentPath;
+                                  _dismissResumeHint();
+                                  unawaited(cur.seekTo(Duration.zero));
+                                  unawaited(_reportEmbyProgress(
+                                    eventName: 'TimeUpdate',
+                                    interactive: true,
+                                  ));
+                                  unawaited(AppHistory.updateProgress(
+                                    path: sourcePath,
+                                    positionMs: 0,
+                                  ));
+                                  _showGestureOverlay('从头播放', Icons.replay);
+                                },
+                                style: TextButton.styleFrom(
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  minimumSize: Size.zero,
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: const Text('从头播放'),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),

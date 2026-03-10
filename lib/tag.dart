@@ -9,8 +9,9 @@ import 'package:flutter/material.dart';
 import 'ui_kit.dart';
 import 'webdav.dart';
 import 'image.dart';
+import 'source_accounts.dart';
+import 'source_refs.dart';
 import 'package:file_picker/file_picker.dart'; // 用于选择目录/导入文件
-import 'pages.dart'; // 用于跳转 FolderDetailPage 和使用 FavoriteCollection
 // Android 版本不支持桌面端拖拽文件（desktop_drop / XFile）。
 // ===== core_utils.dart (auto-grouped) =====
 
@@ -194,8 +195,8 @@ class TagThumbCache {
   // 缓存目录/账号信息，避免在 hover/拖动时频繁走平台通道导致 Windows 主线程消息队列压力过大
   static Future<Directory>? _cacheDirFuture;
   static Future<Directory>? _sourceCacheDirFuture;
-  static Future<SharedPreferences>? _prefsFuture;
-  static Future<List<Map<String, dynamic>>>? _webdavAccountsFuture;
+  static final Map<String, Future<Map<String, dynamic>?>>
+      _webdavAccountFutures = {};
 
   static Future<Directory> _cacheDir() => _cacheDirFuture ??= (() async {
         final base = await getApplicationSupportDirectory();
@@ -210,38 +211,14 @@ class TagThumbCache {
   static bool _isHttpSource(String s) =>
       s.startsWith('http://') || s.startsWith('https://');
 
-  static bool _isWebDavSource(String s) {
-    try {
-      final u = Uri.parse(s);
-      return u.scheme.toLowerCase() == 'webdav' && u.host.isNotEmpty;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static Future<List<Map<String, dynamic>>> _loadWebDavAccounts() async {
-    try {
-      final prefs = await (_prefsFuture ??= SharedPreferences.getInstance());
-      final raw = prefs.getString('webdav_accounts_v1');
-      if (raw == null || raw.trim().isEmpty) return const [];
-      final decoded = jsonDecode(raw);
-      if (decoded is! List) return const [];
-      return decoded
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList(growable: false);
-    } catch (_) {
-      return const [];
-    }
-  }
+  static bool _isWebDavSource(String s) => isWebDavSource(s);
 
   static Future<Map<String, dynamic>?> _loadWebDavAccount(
       String accountId) async {
-    final list = await (_webdavAccountsFuture ??= _loadWebDavAccounts());
-    for (final e in list) {
-      if ((e['id'] ?? '').toString() == accountId) return e;
-    }
-    return null;
+    return await _webdavAccountFutures.putIfAbsent(
+      accountId,
+      () => loadWebDavAccountJsonShared(accountId),
+    );
   }
 
   static String _basicAuthHeader(String username, String password) {
@@ -1214,12 +1191,86 @@ class TagStore extends ChangeNotifier {
   static const _kTags = 'tag_module.tags';
   static const _kAssignments = 'tag_module.assignments';
   static const _kTargets = 'tag_module.targets';
+  static const _kStoreFileName = 'tag_module_store_v2.json';
 
   bool _loaded = false;
 
   final Map<String, Tag> _tagsById = <String, Tag>{};
   final Map<String, Set<String>> _targetToTagIds = <String, Set<String>>{};
   final Map<String, TagTargetMeta> _targetsByKey = <String, TagTargetMeta>{};
+
+  Future<File> _storeFile() async {
+    final base = await getApplicationSupportDirectory();
+    final dir = Directory(p.join(base.path, 'tag_store'));
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return File(p.join(dir.path, _kStoreFileName));
+  }
+
+  Future<File> _storeTmpFile() async {
+    final store = await _storeFile();
+    return File('${store.path}.tmp');
+  }
+
+  Future<Map<String, dynamic>?> _readPayloadFromFile(File file) async {
+    try {
+      if (!await file.exists()) return null;
+      final raw = await file.readAsString();
+      if (raw.trim().isEmpty) return null;
+      final payload = jsonDecode(raw);
+      if (payload is Map) return payload.cast<String, dynamic>();
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _recoverStoreIfNeeded(File store, File tmp) async {
+    final tmpPayload = await _readPayloadFromFile(tmp);
+    if (tmpPayload == null) return;
+
+    final storePayload = await _readPayloadFromFile(store);
+    if (storePayload == null) {
+      await store.writeAsString(jsonEncode(tmpPayload), flush: true);
+    }
+
+    try {
+      if (await tmp.exists()) {
+        await tmp.delete();
+      }
+    } catch (_) {}
+  }
+
+  void _hydrateFromPayload(Map<String, dynamic> payload) {
+    final rawTags = payload['tags'];
+    if (rawTags is List) {
+      for (final e in rawTags) {
+        if (e is Map) {
+          final t = Tag.fromJson(e.cast<String, dynamic>());
+          if (t.id.isNotEmpty) _tagsById[t.id] = t;
+        }
+      }
+    }
+
+    final rawAss = payload['assignments'];
+    if (rawAss is Map) {
+      for (final kv in rawAss.entries) {
+        final v = kv.value;
+        if (v is List) {
+          _targetToTagIds[kv.key.toString()] =
+              v.map((e) => e.toString()).toSet();
+        }
+      }
+    }
+
+    final rawTargets = payload['targets'];
+    if (rawTargets is Map) {
+      for (final kv in rawTargets.entries) {
+        final v = kv.value;
+        if (v is Map) {
+          _targetsByKey[kv.key.toString()] =
+              TagTargetMeta.fromJson(v.cast<String, dynamic>());
+        }
+      }
+    }
+  }
 
   // Public wrapper so helpers/extensions don't call protected member directly.
   void markChanged() {
@@ -1228,58 +1279,55 @@ class TagStore extends ChangeNotifier {
 
   Future<void> ensureLoaded() async {
     if (_loaded) return;
-    final sp = await SharedPreferences.getInstance();
-
-    // tags
-    final rawTags = sp.getString(_kTags);
-    if (rawTags != null && rawTags.trim().isNotEmpty) {
-      try {
-        final list = (jsonDecode(rawTags) as List).cast<dynamic>();
-        for (final e in list) {
-          if (e is Map) {
-            final t = Tag.fromJson(e.cast<String, dynamic>());
-            if (t.id.isNotEmpty) _tagsById[t.id] = t;
-          }
-        }
-      } catch (_) {}
+    final store = await _storeFile();
+    final tmp = await _storeTmpFile();
+    await _recoverStoreIfNeeded(store, tmp);
+    var loadedFromFile = false;
+    final filePayload = await _readPayloadFromFile(store);
+    if (filePayload != null) {
+      _hydrateFromPayload(filePayload);
+      loadedFromFile = true;
     }
 
-    // assignments
-    final rawAss = sp.getString(_kAssignments);
-    if (rawAss != null && rawAss.trim().isNotEmpty) {
-      try {
-        final m = (jsonDecode(rawAss) as Map).cast<String, dynamic>();
-        for (final kv in m.entries) {
-          final k = kv.key;
-          final v = kv.value;
-          if (v is List) {
-            _targetToTagIds[k] = v.map((e) => e.toString()).toSet();
-          }
-        }
-      } catch (_) {}
-    }
+    if (!loadedFromFile) {
+      final sp = await SharedPreferences.getInstance();
+      final payload = <String, dynamic>{
+        'tags': const <dynamic>[],
+        'assignments': const <String, dynamic>{},
+        'targets': const <String, dynamic>{},
+      };
 
-    // target meta
-    final rawTargets = sp.getString(_kTargets);
-    if (rawTargets != null && rawTargets.trim().isNotEmpty) {
-      try {
-        final m = (jsonDecode(rawTargets) as Map).cast<String, dynamic>();
-        for (final kv in m.entries) {
-          final v = kv.value;
-          if (v is Map) {
-            _targetsByKey[kv.key] =
-                TagTargetMeta.fromJson(v.cast<String, dynamic>());
-          }
-        }
-      } catch (_) {}
+      final rawTags = sp.getString(_kTags);
+      if (rawTags != null && rawTags.trim().isNotEmpty) {
+        try {
+          payload['tags'] = (jsonDecode(rawTags) as List).cast<dynamic>();
+        } catch (_) {}
+      }
+
+      final rawAss = sp.getString(_kAssignments);
+      if (rawAss != null && rawAss.trim().isNotEmpty) {
+        try {
+          payload['assignments'] =
+              (jsonDecode(rawAss) as Map).cast<String, dynamic>();
+        } catch (_) {}
+      }
+
+      final rawTargets = sp.getString(_kTargets);
+      if (rawTargets != null && rawTargets.trim().isNotEmpty) {
+        try {
+          payload['targets'] =
+              (jsonDecode(rawTargets) as Map).cast<String, dynamic>();
+        } catch (_) {}
+      }
+
+      _hydrateFromPayload(payload);
+      await _persist();
     }
 
     _loaded = true;
   }
 
   Future<void> _persist() async {
-    final sp = await SharedPreferences.getInstance();
-
     final tags = _tagsById.values.map((e) => e.toJson()).toList();
     final assigns = <String, dynamic>{
       for (final e in _targetToTagIds.entries) e.key: e.value.toList(),
@@ -1287,10 +1335,43 @@ class TagStore extends ChangeNotifier {
     final targets = <String, dynamic>{
       for (final e in _targetsByKey.entries) e.key: e.value.toJson(),
     };
+    final store = await _storeFile();
+    final tmp = await _storeTmpFile();
+    final payload = <String, dynamic>{
+      'tags': tags,
+      'assignments': assigns,
+      'targets': targets,
+    };
+    await tmp.writeAsString(jsonEncode(payload), flush: true);
 
-    await sp.setString(_kTags, jsonEncode(tags));
-    await sp.setString(_kAssignments, jsonEncode(assigns));
-    await sp.setString(_kTargets, jsonEncode(targets));
+    await store.writeAsString(jsonEncode(payload), flush: true);
+
+    try {
+      if (await tmp.exists()) {
+        await tmp.delete();
+      }
+    } catch (_) {}
+  }
+
+  @visibleForTesting
+  Future<void> debugRecoverStoreForTest() async {
+    final store = await _storeFile();
+    final tmp = await _storeTmpFile();
+    await _recoverStoreIfNeeded(store, tmp);
+  }
+
+  @visibleForTesting
+  Future<File> debugStoreFileForTest() => _storeFile();
+
+  @visibleForTesting
+  Future<File> debugStoreTmpFileForTest() => _storeTmpFile();
+
+  @visibleForTesting
+  void debugResetForTest() {
+    _loaded = false;
+    _tagsById.clear();
+    _targetToTagIds.clear();
+    _targetsByKey.clear();
   }
 
   List<Tag> get allTags {
@@ -1422,6 +1503,7 @@ class TagUI {
     String title = '标记Tag',
   }) async {
     await TagStore.I.ensureLoaded();
+    if (!context.mounted) return null;
     final store = TagStore.I;
 
     final selected = store.tagsOf(target.key);
@@ -1732,17 +1814,21 @@ class _TagChipsBarState extends State<TagChipsBar> {
 /// callback used when user taps an item under a tag
 typedef TagItemOpenCallback = Future<void> Function(TagTargetMeta item);
 typedef TagItemLocateCallback = Future<void> Function(TagTargetMeta item);
+typedef TagDirectoryOpenCallback = Future<void> Function(
+    BuildContext context, Tag tag);
 
 /// Tag 管理入口按钮
 class TagManagerButton extends StatelessWidget {
   final TagItemOpenCallback onOpenItem;
   final TagItemLocateCallback? onLocateItem;
+  final TagDirectoryOpenCallback? onOpenTagDirectory;
   final String tooltip;
 
   const TagManagerButton({
     super.key,
     required this.onOpenItem,
     this.onLocateItem,
+    this.onOpenTagDirectory,
     this.tooltip = 'Tag 管理',
   });
 
@@ -1758,6 +1844,7 @@ class TagManagerButton extends StatelessWidget {
             builder: (_) => TagManagerPage(
               onOpenItem: onOpenItem,
               onLocateItem: onLocateItem,
+              onOpenTagDirectory: onOpenTagDirectory,
             ),
           ),
         );
@@ -1770,11 +1857,13 @@ class TagManagerButton extends StatelessWidget {
 class TagManagerPage extends StatefulWidget {
   final TagItemOpenCallback onOpenItem;
   final TagItemLocateCallback? onLocateItem;
+  final TagDirectoryOpenCallback? onOpenTagDirectory;
 
   const TagManagerPage({
     super.key,
     required this.onOpenItem,
     this.onLocateItem,
+    this.onOpenTagDirectory,
   });
 
   @override
@@ -2015,6 +2104,7 @@ class _TagManagerPageState extends State<TagManagerPage>
             searchExpanded: _tagsSearchExpanded,
             onSearchExpandedChanged: (v) =>
                 setState(() => _tagsSearchExpanded = v),
+            onOpenTagDirectory: widget.onOpenTagDirectory,
           ),
         ],
       ),
@@ -2179,6 +2269,7 @@ class _FilesTabViewState extends State<_FilesTabView> {
   Future<void> _editTagsForTarget(
       BuildContext context, TagTargetMeta meta) async {
     await TagStore.I.ensureLoaded();
+    if (!context.mounted) return;
     final allTags = widget.tags;
     if (allTags.isEmpty) return;
 
@@ -2879,6 +2970,7 @@ class _TagsView extends StatelessWidget {
   final ValueChanged<String> onQueryChanged;
   final bool searchExpanded;
   final ValueChanged<bool> onSearchExpandedChanged;
+  final TagDirectoryOpenCallback? onOpenTagDirectory;
 
   const _TagsView({
     required this.tags,
@@ -2888,6 +2980,7 @@ class _TagsView extends StatelessWidget {
     required this.onQueryChanged,
     required this.searchExpanded,
     required this.onSearchExpandedChanged,
+    this.onOpenTagDirectory,
   });
 
   @override
@@ -3038,23 +3131,10 @@ class _TagsView extends StatelessWidget {
                         }
 
                         // 5. 打开目录浏览 (复用现有的文件夹详情页)
-                        if (v == 'open_path' && t.localPath != null) {
-                          // 构造一个临时的收藏夹对象来复用 FolderDetailPage
-                          final collection = FavoriteCollection(
-                            id: 'tag_dir_${t.id}',
-                            name: '标签目录：${t.name}',
-                            sources: [t.localPath!], // 直接使用绑定的物理路径作为来源
-                            layer1: LayerSettings(
-                                viewMode: ViewMode.gallery), // 默认画廊视图
-                            layer2: LayerSettings(viewMode: ViewMode.list),
-                          );
-
-                          Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    FolderDetailPage(collection: collection),
-                              ));
+                        if (v == 'open_path' &&
+                            t.localPath != null &&
+                            onOpenTagDirectory != null) {
+                          await onOpenTagDirectory!(context, t);
                         }
                       },
                       itemBuilder: (_) => [
@@ -3065,8 +3145,9 @@ class _TagsView extends StatelessWidget {
                         if (t.localPath != null) ...[
                           const PopupMenuItem(
                               value: 'import_files', child: Text('导入文件到此目录')),
-                          const PopupMenuItem(
-                              value: 'open_path', child: Text('浏览物理目录内容')),
+                          if (onOpenTagDirectory != null)
+                            const PopupMenuItem(
+                                value: 'open_path', child: Text('浏览物理目录内容')),
                         ],
                         const PopupMenuItem(value: 'delete', child: Text('删除')),
                       ],

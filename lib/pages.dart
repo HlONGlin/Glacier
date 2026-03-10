@@ -18,6 +18,7 @@ import 'thumbnail_inspector.dart';
 // 👇👇👇 重点修改这两行 👇👇👇
 import 'utils.dart'; // 必须直接引入，去掉 "as utils"
 import 'tag.dart';
+import 'source_refs.dart';
 // 👆👆👆 重点修改这两行 👆👆👆
 // ===== app_pages.dart (auto-grouped) =====
 
@@ -796,58 +797,19 @@ extension CharExt on String {
       this.length == 1 && this.codeUnitAt(0) >= 48 && this.codeUnitAt(0) <= 57;
 }
 
-String _decodeMaybeTwice(String s) {
-  var out = s;
-  for (int i = 0; i < 2; i++) {
-    try {
-      final d = Uri.decodeFull(out);
-      if (d == out) break;
-      out = d;
-    } catch (_) {
-      break;
-    }
-  }
-  return out;
-}
-
 _WebDavRef? _parseWebDavSource(String s) {
-  try {
-    final safe =
-        s.replaceAllMapped(RegExp(r'%(?![0-9A-Fa-f]{2})'), (_) => '%25');
-    final u = Uri.parse(safe);
-    if (u.scheme.toLowerCase() != 'webdav' || u.host.isEmpty) return null;
-
-    var rel = u.path;
-    try {
-      rel = Uri.decodeFull(rel);
-    } catch (_) {
-      // 如果 path 里有裸 %，decodeFull 会炸，直接用原始 path
-      rel = u.path;
-    }
-
-    if (rel.startsWith('/')) rel = rel.substring(1);
-
-    final isDir = s.trim().endsWith('/');
-    return _WebDavRef(
-        accountId: u.host, relPath: rel, isDir: rel.isEmpty ? true : isDir);
-  } catch (_) {
-    return null;
-  }
-}
-
-String _encodePathPreserveSlash(String rp) {
-  rp = rp.trim();
-  if (rp.startsWith('/')) rp = rp.substring(1);
-  if (rp.isEmpty) return '';
-
-  // 逐段 encode，保留 '/'
-  final parts = rp.split('/').map(Uri.encodeComponent).toList();
-  return parts.join('/');
+  final parsed = parseWebDavSource(s);
+  if (parsed == null) return null;
+  return _WebDavRef(
+    accountId: parsed.accountId,
+    relPath: parsed.relPath,
+    isDir: parsed.isDir,
+  );
 }
 
 String _buildWebDavSource(String accountId, String relPath,
     {required bool isDir}) {
-  final encoded = _encodePathPreserveSlash(relPath);
+  final encoded = encodePathPreserveSlash(relPath);
   final base = 'webdav://$accountId/${encoded.isEmpty ? '' : encoded}';
   if (isDir) return base.endsWith('/') ? base : '$base/';
   return base.endsWith('/') ? base.substring(0, base.length - 1) : base;

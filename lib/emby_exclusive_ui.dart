@@ -4212,6 +4212,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         _libraryKind = libraryKind;
         _topTab = nextTopTab;
         _loading = false;
+        _applyEntryTopTabPriority = false;
       });
       if (previousTopTab != nextTopTab) {
         unawaited(_persistDisplaySettingsForCurrentFolder());
@@ -4244,8 +4245,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
             directItems: mapped,
             videos: recursiveVideos,
             images: recursiveImages,
-            preferPriority:
-                _applyEntryTopTabPriority && !_topTabTouchedSinceReload,
+            preferPriority: false,
           );
           setState(() {
             _recursiveVideos = recursiveVideos;

@@ -7,7 +7,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'source_accounts.dart';
 import 'video.dart';
+import 'source_refs.dart';
 import 'utils.dart';
 
 // ===== media_image.dart =====
@@ -176,6 +178,7 @@ class MediaTile extends StatelessWidget {
             try {
               await onBeforeOpenImage?.call();
             } catch (_) {}
+            if (!context.mounted) return;
             Navigator.push(
               context,
               MaterialPageRoute(
@@ -332,37 +335,23 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     Navigator.of(context).pop<String>(key);
   }
 
-  bool _isWebDavSource(String s) {
-    try {
-      final u = Uri.parse(s);
-      return u.scheme.toLowerCase() == 'webdav' && u.host.isNotEmpty;
-    } catch (_) {
-      return false;
-    }
-  }
+  bool _isWebDavSource(String s) => isWebDavSource(s);
 
   Future<Map<String, dynamic>?> _loadWebDavAccountJson(String accountId) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('webdav_accounts_v1');
-      if (raw == null || raw.trim().isEmpty) return null;
-      final List list = jsonDecode(raw) as List;
-      for (final e in list) {
-        if (e is Map && (e['id'] ?? '').toString() == accountId) {
-          return Map<String, dynamic>.from(e as Map);
-        }
-      }
-    } catch (_) {}
-    return null;
+      return await loadWebDavAccountJsonShared(accountId);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<({String url, Map<String, String> headers})?> _resolveWebDav(
       String source) async {
     try {
-      final u = Uri.parse(source);
-      final accountId = u.host;
-      final rel =
-          Uri.decodeFull(u.path.startsWith('/') ? u.path.substring(1) : u.path);
+      final ref = parseWebDavSource(source);
+      if (ref == null) return null;
+      final accountId = ref.accountId;
+      final rel = encodePathPreserveSlash(ref.relPath);
       final j = await _loadWebDavAccountJson(accountId);
       if (j == null) return null;
 
