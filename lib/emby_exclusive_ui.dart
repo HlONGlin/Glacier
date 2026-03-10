@@ -334,6 +334,25 @@ class _Section {
       {required this.account, required this.view, required this.items});
 }
 
+class _FolderPageSeed {
+  final List<_UiItem> directItems;
+  final List<_UiItem> recursiveVideos;
+  final List<_UiItem> recursiveImages;
+  final EmbyLibraryKindSignal kindHint;
+
+  const _FolderPageSeed({
+    this.directItems = const <_UiItem>[],
+    this.recursiveVideos = const <_UiItem>[],
+    this.recursiveImages = const <_UiItem>[],
+    this.kindHint = EmbyLibraryKindSignal.unknown,
+  });
+
+  bool get hasAnyData =>
+      directItems.isNotEmpty ||
+      recursiveVideos.isNotEmpty ||
+      recursiveImages.isNotEmpty;
+}
+
 class _EmbyExclusiveFavoritesPageState
     extends State<EmbyExclusiveFavoritesPage> {
   static const Duration _kHomeRequestTimeout = Duration(seconds: 6);
@@ -358,6 +377,7 @@ class _EmbyExclusiveFavoritesPageState
       const <String, EmbyReadCoordinator>{};
   List<_UiItem> _libraries = const <_UiItem>[];
   List<_UiItem> _resume = const <_UiItem>[];
+  List<_UiItem> _nextUp = const <_UiItem>[];
   List<_UiItem> _favorites = const <_UiItem>[];
   List<_Section> _sections = const <_Section>[];
   List<_UiItem> _searchResults = const <_UiItem>[];
@@ -529,6 +549,52 @@ class _EmbyExclusiveFavoritesPageState
     return embyNativeTypeIsSeries(item.type);
   }
 
+  Future<List<_UiItem>> _deriveHomeNextUp(
+    EmbyAccount account,
+    EmbyClient client,
+    List<_UiItem> resumeItems,
+  ) async {
+    final episodeSeeds = resumeItems
+        .where((x) {
+          final sid = (x.item.seriesId ?? '').trim();
+          return sid.isNotEmpty && _isEpisodeItem(x.item);
+        })
+        .take(8)
+        .toList(growable: false);
+    if (episodeSeeds.isEmpty) return const <_UiItem>[];
+
+    final out = <_UiItem>[];
+    final seenSeries = <String>{};
+    final seenEpisodeIds = <String>{};
+
+    for (final seed in episodeSeeds) {
+      final seriesId = (seed.item.seriesId ?? '').trim();
+      if (seriesId.isEmpty || !seenSeries.add(seriesId)) continue;
+      try {
+        final episodes = await client
+            .listChildren(
+              parentId: seriesId,
+              recursive: true,
+              includeItemTypes: 'Episode',
+              sortBy: 'SortName',
+              sortOrder: 'Ascending',
+              limit: 400,
+            )
+            .timeout(_kHomeRequestTimeout);
+        if (episodes.isEmpty) continue;
+        final currentId = seed.item.id.trim();
+        final currentIndex =
+            episodes.indexWhere((e) => e.id.trim() == currentId);
+        if (currentIndex < 0 || currentIndex >= episodes.length - 1) continue;
+        final next = episodes[currentIndex + 1];
+        final nextId = next.id.trim();
+        if (nextId.isEmpty || !seenEpisodeIds.add(nextId)) continue;
+        out.add(_toUiItem(account, client, next, maxWidth: 640));
+      } catch (_) {}
+    }
+    return out;
+  }
+
   Future<List<EmbyItem>> _latestSectionChildren(
     EmbyClient c,
     String viewId,
@@ -617,7 +683,12 @@ class _EmbyExclusiveFavoritesPageState
     final children = await _latestSectionChildren(c, viewId);
     if (children.isEmpty) return null;
 
-    final latest = _collapseLatestEpisodesToSeries(children);
+    final collectionType = (v.collectionType ?? '').trim().toLowerCase();
+    final keepEpisodeLatest =
+        collectionType == 'tvshows' || collectionType == 'series';
+    final latest = keepEpisodeLatest
+        ? children
+        : _collapseLatestEpisodesToSeries(children);
     final seriesIds = latest
         .where(_isSeriesType)
         .where((e) =>
@@ -796,9 +867,6 @@ class _EmbyExclusiveFavoritesPageState
         reader,
         forceRefresh: force,
       );
-      final sections =
-          await _loadLatestSections(account, client, accountData.views);
-
       final uniqLib = _unique(accountData.lib)
         ..sort((a, b) => _naturalTitleCompare(a.title, b.title));
       final uniqResume = _unique(accountData.resume)
@@ -806,11 +874,17 @@ class _EmbyExclusiveFavoritesPageState
             .compareTo(a.item.dateModified ?? DateTime(1970)));
       final uniqFav = _unique(accountData.favorites)
         ..sort((a, b) => _naturalTitleCompare(a.title, b.title));
+      final sectionsFuture =
+          _loadLatestSections(account, client, accountData.views);
+      final nextUpFuture = _deriveHomeNextUp(account, client, uniqResume);
+      final sections = await sectionsFuture;
+      final nextUp = await nextUpFuture;
 
       if (!mounted || token != _reloadToken) return;
       setState(() {
         _libraries = _replaceItemsForAccount(_libraries, id, uniqLib);
         _resume = _replaceItemsForAccount(_resume, id, uniqResume);
+        _nextUp = _replaceItemsForAccount(_nextUp, id, nextUp);
         _favorites = _replaceItemsForAccount(_favorites, id, uniqFav);
         _sections = _replaceSectionsForAccount(_sections, id, sections);
         _loadedAccountIds.add(id);
@@ -891,6 +965,7 @@ class _EmbyExclusiveFavoritesPageState
         _readers = readers;
         _libraries = const <_UiItem>[];
         _resume = const <_UiItem>[];
+        _nextUp = const <_UiItem>[];
         _favorites = const <_UiItem>[];
         _searchResults = const <_UiItem>[];
         _searchError = null;
@@ -1041,7 +1116,15 @@ class _EmbyExclusiveFavoritesPageState
     required EmbyAccount account,
     required String folderId,
     required String title,
+    _FolderPageSeed? seed,
+    bool favoritesMode = false,
   }) async {
+    final preparedSeed = seed ??
+        await _prepareFolderSeed(
+          account: account,
+          folderId: folderId,
+          favoritesMode: favoritesMode,
+        );
     if (!mounted) return;
     await Navigator.push(
       context,
@@ -1050,6 +1133,8 @@ class _EmbyExclusiveFavoritesPageState
           account: account,
           title: title.trim().isEmpty ? '\u5a92\u4f53\u5e93' : title.trim(),
           folderId: folderId,
+          favoritesMode: favoritesMode,
+          initialSeed: preparedSeed,
           paletteMode: _paletteMode,
         ),
       ),
@@ -1057,6 +1142,11 @@ class _EmbyExclusiveFavoritesPageState
   }
 
   Future<void> _openFavoritesUi({required EmbyAccount account}) async {
+    final seed = _FolderPageSeed(
+      directItems: _favorites
+          .where((x) => x.account.id == account.id)
+          .toList(growable: false),
+    );
     if (!mounted) return;
     await Navigator.push(
       context,
@@ -1066,10 +1156,52 @@ class _EmbyExclusiveFavoritesPageState
           title: '${_accountName(account.id)} \u6536\u85cf',
           folderId: '',
           favoritesMode: true,
+          initialSeed: seed,
           paletteMode: _paletteMode,
         ),
       ),
     );
+  }
+
+  Future<_FolderPageSeed?> _prepareFolderSeed({
+    required EmbyAccount account,
+    required String folderId,
+    bool favoritesMode = false,
+  }) async {
+    final reader = _readers[account.id];
+    final client = _clients[account.id];
+    if (reader == null || client == null) return null;
+    try {
+      final plan = await reader.readFolder(
+        folderId: folderId.trim(),
+        favoritesMode: favoritesMode,
+      );
+      final snap = plan.immediate;
+      final directItems = snap.directItems
+          .map((e) => _toUiItem(account, client, e, maxWidth: 520))
+          .toList(growable: false);
+      final directIndex = <String, _UiItem>{
+        for (final item in directItems)
+          if (item.item.id.trim().isNotEmpty) item.item.id.trim(): item,
+      };
+      List<_UiItem> mapWithSeed(Iterable<EmbyItem> src) {
+        final out = <_UiItem>[];
+        for (final item in src) {
+          final cached = directIndex[item.id.trim()];
+          out.add(cached ?? _toUiItem(account, client, item, maxWidth: 520));
+        }
+        return out;
+      }
+
+      return _FolderPageSeed(
+        directItems: directItems,
+        recursiveVideos: mapWithSeed(snap.directMedia.videos),
+        recursiveImages: mapWithSeed(snap.directMedia.images),
+        kindHint: snap.libraryKind,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   bool _isSeriesDir(_UiItem item) {
@@ -1430,7 +1562,14 @@ class _EmbyExclusiveFavoritesPageState
                 height: coverHeight,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
-                  child: _cover(item),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _cover(item),
+                      _itemBadgeOverlay(item),
+                      _progressOverlay(item.item),
+                    ],
+                  ),
                 ),
               )
             else
@@ -1438,7 +1577,14 @@ class _EmbyExclusiveFavoritesPageState
                 aspectRatio: aspect,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
-                  child: _cover(item),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _cover(item),
+                      _itemBadgeOverlay(item),
+                      _progressOverlay(item.item),
+                    ],
+                  ),
                 ),
               ),
             const SizedBox(height: 6),
@@ -1457,9 +1603,16 @@ class _EmbyExclusiveFavoritesPageState
       return SizedBox(
         height: 170,
         child: Center(
-          child: Text(
-            '\u6682\u65e0\u5185\u5bb9',
-            style: TextStyle(color: _palette.sub),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.inbox_outlined, color: _palette.sub),
+              const SizedBox(height: 6),
+              Text(
+                '\u6682\u65e0\u5185\u5bb9',
+                style: TextStyle(color: _palette.sub),
+              ),
+            ],
           ),
         ),
       );
@@ -1557,12 +1710,12 @@ class _EmbyExclusiveFavoritesPageState
         _homeTabItem(
           tab: _EmbyHomeTab.home,
           icon: Icons.home_outlined,
-          label: '\u89c6\u9891',
+          label: '首页',
         ),
         _homeTabItem(
           tab: _EmbyHomeTab.favorites,
           icon: Icons.favorite_border_rounded,
-          label: '\u6536\u85cf\u5939',
+          label: '收藏',
         ),
         _homeTabItem(
           tab: _EmbyHomeTab.search,
@@ -1573,82 +1726,544 @@ class _EmbyExclusiveFavoritesPageState
     );
   }
 
-  Widget _homeStatChip({
-    required IconData icon,
-    required String label,
-    required int value,
+  String _homeTypeLabel(_UiItem it) {
+    if (it.isImage) return '\u56fe\u7247';
+    if (it.isDir) {
+      if (embyNativeTypeIsSeries(it.item.type)) return '\u5267\u96c6';
+      return '\u6587\u4ef6\u5939';
+    }
+    if (_embyTypeIsMovie(it.item.type)) return '\u7535\u5f71';
+    if (_embyTypeIsEpisode(it.item.type)) return '\u5267\u96c6';
+    return '\u89c6\u9891';
+  }
+
+  String _durationLabel(int? runTimeTicks) {
+    final ticks = runTimeTicks ?? 0;
+    if (ticks <= 0) return '';
+    const ticksPerMinute = 600000000;
+    final totalMinutes = ticks ~/ ticksPerMinute;
+    if (totalMinutes <= 0) return '';
+    final hours = totalMinutes ~/ 60;
+    final minutes = totalMinutes % 60;
+    if (hours <= 0) return '${totalMinutes}m';
+    if (minutes <= 0) return '${hours}h';
+    return '${hours}h ${minutes}m';
+  }
+
+  bool _isResumableItem(EmbyItem item) {
+    final played = item.playedPercentage ?? 0;
+    if (item.playbackPositionTicks > 0 && played < 95) return true;
+    return item.playbackPositionTicks > 0 && !item.isPlayed;
+  }
+
+  double _progressRatio(EmbyItem item) {
+    final played = item.playedPercentage;
+    if (played != null && played.isFinite && played > 0) {
+      return (played / 100).clamp(0.0, 1.0);
+    }
+    final ticks = item.playbackPositionTicks;
+    final runtime = item.runTimeTicks ?? 0;
+    if (ticks > 0 && runtime > 0) {
+      return (ticks / runtime).clamp(0.0, 1.0);
+    }
+    return 0;
+  }
+
+  Widget _progressOverlay(EmbyItem item) {
+    final ratio = _progressRatio(item);
+    if (ratio <= 0) return const SizedBox.shrink();
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Container(
+        height: 4,
+        color: Colors.black.withValues(alpha: 0.34),
+        child: FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: ratio,
+          child: Container(color: _palette.progress),
+        ),
+      ),
+    );
+  }
+
+  Widget _itemBadgeOverlay(_UiItem item) {
+    final unplayed = item.item.unplayedItemCount;
+    final resumable = _isResumableItem(item.item);
+    final label = unplayed > 0
+        ? '未看 $unplayed'
+        : resumable
+            ? '继续播放'
+            : '';
+    if (label.isEmpty) return const SizedBox.shrink();
+    return Positioned(
+      left: 8,
+      top: 8,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _homeMetaLine(_UiItem it) {
+    final item = it.item;
+    final parts = <String>[];
+    final year = item.productionYear;
+    if (year != null && year > 0) parts.add('$year');
+    final rating = item.communityRating;
+    if (rating != null && rating > 0) {
+      parts.add('\u8bc4\u5206 ${rating.toStringAsFixed(1)}');
+    }
+    final duration = _durationLabel(item.runTimeTicks);
+    if (duration.isNotEmpty) parts.add(duration);
+    final last = item.datePlayed ?? item.dateModified;
+    if (last != null) {
+      final y = last.year.toString().padLeft(4, '0');
+      final m = last.month.toString().padLeft(2, '0');
+      final d = last.day.toString().padLeft(2, '0');
+      parts.add('$y-$m-$d');
+    }
+    return parts.join('  \u00b7  ');
+  }
+
+  String _homeHeroImageUrl(_UiItem it) {
+    final c = _clients[it.account.id];
+    if (c == null) return it.coverUrl.trim();
+    final id = it.item.id.trim();
+    if (id.isEmpty) return it.coverUrl.trim();
+
+    if (it.item.backdropTags.isNotEmpty) {
+      final tag = it.item.backdropTags.first;
+      if (tag.trim().isNotEmpty) {
+        return c.coverUrl(
+          id,
+          type: 'Backdrop',
+          index: 0,
+          maxWidth: 1400,
+          quality: 88,
+          tag: tag,
+        );
+      }
+    }
+
+    final cover = it.coverUrl.trim();
+    if (cover.isNotEmpty) return cover;
+    return c.bestCoverUrl(it.item, maxWidth: 760).trim();
+  }
+
+  Widget _homeSectionBlock({
+    required String title,
+    required Widget child,
+    VoidCallback? onMore,
+    String moreLabel = '\u66f4\u591a',
   }) {
     final p = _palette;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
       decoration: BoxDecoration(
-        color: p.chipBg.withValues(alpha: 0.88),
-        borderRadius: BorderRadius.circular(999),
+        color: p.panel,
+        borderRadius: BorderRadius.circular(16),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 14, color: p.text),
-          const SizedBox(width: 6),
-          Text(
-            '$label $value',
-            style: TextStyle(
-              color: p.text,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: p.text,
+                    fontSize: 19,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              if (onMore != null)
+                TextButton(
+                  onPressed: onMore,
+                  child: Text(moreLabel, style: TextStyle(color: p.sub)),
+                ),
+            ],
           ),
+          const SizedBox(height: 8),
+          child,
         ],
       ),
     );
   }
 
-  Widget _homeSummaryBar({
-    required int libraries,
-    required int resume,
-    required int favorites,
-    required int sections,
-  }) {
+  Future<void> _openItemDetails(_UiItem it) async {
+    if (_isSeriesDir(it)) {
+      await _openSeriesUi(it);
+      return;
+    }
+    if (_isMovieItem(it)) {
+      await _openMovieUi(it);
+      return;
+    }
+    await _openItem(it);
+  }
+
+  Widget _homeHero(_UiItem it, {required List<_UiItem> pool}) {
     final p = _palette;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            p.panel.withValues(alpha: 0.95),
-            p.chipBg.withValues(alpha: 0.78),
+    final img = _homeHeroImageUrl(it).trim();
+    final token = it.account.apiKey.trim();
+    final headers =
+        token.isEmpty ? null : <String, String>{'X-Emby-Token': token};
+    final typeLabel = _homeTypeLabel(it);
+    final meta = _homeMetaLine(it);
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: SizedBox(
+        height: 236,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (img.isNotEmpty)
+              Image.network(
+                img,
+                headers: headers,
+                fit: BoxFit.cover,
+                cacheWidth: 1400,
+                filterQuality: FilterQuality.low,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) =>
+                    ColoredBox(color: p.coverPlaceholderBg),
+              )
+            else
+              ColoredBox(color: p.coverPlaceholderBg),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.12),
+                    Colors.black.withValues(alpha: 0.78),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.40),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.18),
+                        width: 1,
+                      ),
+                    ),
+                    child: Text(
+                      '\u7ee7\u7eed\u89c2\u770b  \u00b7  $typeLabel',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    it.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      height: 1.08,
+                      shadows: [Shadow(blurRadius: 18, color: Colors.black54)],
+                    ),
+                  ),
+                  if (meta.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      meta,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.88),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: () => _openItem(it, pool: pool),
+                          icon: const Icon(Icons.play_arrow_rounded),
+                          label: Text(
+                            _isResumableItem(it.item) ? '继续播放' : '播放',
+                          ),
+                          style: FilledButton.styleFrom(
+                            backgroundColor:
+                                p.chipSelectedBg.withValues(alpha: 0.92),
+                            foregroundColor: p.text,
+                            padding: const EdgeInsets.symmetric(vertical: 11),
+                            textStyle: const TextStyle(
+                              fontSize: 16.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      SizedBox(
+                        width: 96,
+                        child: FilledButton.icon(
+                          onPressed: () => _openItemDetails(it),
+                          icon:
+                              const Icon(Icons.info_outline_rounded, size: 20),
+                          label: const Text('\u8be6\u60c5'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor:
+                                Colors.black.withValues(alpha: 0.32),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 11),
+                            textStyle: const TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Positioned.fill(
+              bottom: 78,
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => _openItemDetails(it),
+                ),
+              ),
+            ),
           ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(14),
       ),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          _homeStatChip(
-            icon: Icons.video_library_outlined,
-            label: '\u5a92\u4f53\u5e93',
-            value: libraries,
-          ),
-          _homeStatChip(
-            icon: Icons.play_circle_outline_rounded,
-            label: '\u7ee7\u7eed',
-            value: resume,
-          ),
-          _homeStatChip(
-            icon: Icons.favorite_border_rounded,
-            label: '\u6536\u85cf',
-            value: favorites,
-          ),
-          _homeStatChip(
-            icon: Icons.grid_view_rounded,
-            label: '\u5206\u533a',
-            value: sections,
-          ),
-        ],
+    );
+  }
+
+  String _homeFeatureImageUrl(_UiItem it) {
+    final client = _clients[it.account.id];
+    if (client == null) return it.coverUrl.trim();
+    final id = it.item.id.trim();
+    if (id.isEmpty) return it.coverUrl.trim();
+    final thumbTag = (it.item.thumbTag ?? '').trim();
+    if (thumbTag.isNotEmpty) {
+      return client.coverUrl(
+        id,
+        type: 'Thumb',
+        maxWidth: 720,
+        quality: 85,
+        tag: thumbTag,
+      );
+    }
+    if (it.item.backdropTags.isNotEmpty) {
+      return client.coverUrl(
+        id,
+        type: 'Backdrop',
+        index: 0,
+        maxWidth: 960,
+        quality: 85,
+        tag: it.item.backdropTags.first,
+      );
+    }
+    return _homeHeroImageUrl(it);
+  }
+
+  String _homeFeaturePrimaryTitle(_UiItem it) {
+    final seriesName = (it.item.seriesName ?? '').trim();
+    if (seriesName.isNotEmpty && _isEpisodeItem(it.item)) return seriesName;
+    return it.title;
+  }
+
+  String _episodeCode(EmbyItem item) {
+    final season = item.parentIndexNumber;
+    final episode = item.indexNumber;
+    if ((season ?? 0) > 0 && (episode ?? 0) > 0) {
+      return 'S${season.toString().padLeft(2, '0')}E${episode.toString().padLeft(2, '0')}';
+    }
+    if ((episode ?? 0) > 0) return '第 $episode 集';
+    return '';
+  }
+
+  String _homeFeatureSecondaryTitle(_UiItem it) {
+    if (_isEpisodeItem(it.item)) {
+      final code = _episodeCode(it.item);
+      final episodeTitle = it.title.trim();
+      if (episodeTitle.isNotEmpty && code.isNotEmpty) {
+        return '$code · $episodeTitle';
+      }
+      if (episodeTitle.isNotEmpty) return episodeTitle;
+      if (code.isNotEmpty) {
+        return code;
+      }
+    }
+    return _homeMetaLine(it);
+  }
+
+  Widget _homeFeatureRail(List<_UiItem> items, {String? badge}) {
+    if (items.isEmpty) {
+      return SizedBox(
+        height: 132,
+        child: Center(
+          child: Text('暂无内容', style: TextStyle(color: _palette.sub)),
+        ),
+      );
+    }
+    return SizedBox(
+      height: 178,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        itemCount: items.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 12),
+        itemBuilder: (_, i) {
+          final item = items[i];
+          final img = _homeFeatureImageUrl(item).trim();
+          final token = item.account.apiKey.trim();
+          final headers =
+              token.isEmpty ? null : <String, String>{'X-Emby-Token': token};
+          final primary = _homeFeaturePrimaryTitle(item);
+          final secondary = _homeFeatureSecondaryTitle(item);
+          return InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => _openItem(item, pool: items),
+            child: SizedBox(
+              width: 228,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: AspectRatio(
+                      aspectRatio: 16 / 9,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          if (img.isNotEmpty)
+                            Image.network(
+                              img,
+                              headers: headers,
+                              fit: BoxFit.cover,
+                              cacheWidth: 720,
+                              filterQuality: FilterQuality.low,
+                              gaplessPlayback: true,
+                              errorBuilder: (_, __, ___) => ColoredBox(
+                                color: _palette.coverPlaceholderBg,
+                                child: Center(
+                                  child: Icon(Icons.broken_image_outlined,
+                                      color: _palette.sub),
+                                ),
+                              ),
+                            )
+                          else
+                            ColoredBox(
+                              color: _palette.coverPlaceholderBg,
+                              child: Center(
+                                child: Icon(Icons.movie_outlined,
+                                    color: _palette.sub),
+                              ),
+                            ),
+                          DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Colors.black.withValues(alpha: 0.08),
+                                  Colors.black.withValues(alpha: 0.54),
+                                ],
+                              ),
+                            ),
+                          ),
+                          if ((badge ?? '').trim().isNotEmpty)
+                            Positioned(
+                              left: 10,
+                              top: 10,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.42),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  badge!,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          _itemBadgeOverlay(item),
+                          _progressOverlay(item.item),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    primary,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: _palette.text,
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    secondary,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: _palette.sub,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                      height: 1.15,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -1763,6 +2378,7 @@ class _EmbyExclusiveFavoritesPageState
 
       final scopedLibraries = _scopeItems(_libraries);
       final scopedResume = _scopeItems(_resume);
+      final scopedNextUp = _scopeItems(_nextUp);
       final scopedFavorites = _scopeItems(_favorites);
       final scopedSections = _scopeSections(_sections);
 
@@ -1882,15 +2498,6 @@ class _EmbyExclusiveFavoritesPageState
               ],
             ),
             const SizedBox(height: 12),
-            if (_homeTab != _EmbyHomeTab.search) ...[
-              _homeSummaryBar(
-                libraries: scopedLibraries.length,
-                resume: scopedResume.length,
-                favorites: scopedFavorites.length,
-                sections: scopedSections.length,
-              ),
-              const SizedBox(height: 12),
-            ],
             if (_homeTab == _EmbyHomeTab.search) ...[
               TextField(
                 style: TextStyle(color: _palette.text),
@@ -1914,28 +2521,37 @@ class _EmbyExclusiveFavoritesPageState
               _buildSearchSection(),
             ],
             if (_homeTab == _EmbyHomeTab.home) ...[
-              Text(
-                '\u5a92\u4f53\u5e93',
-                style: TextStyle(
-                  color: _palette.text,
-                  fontSize: 19,
-                  fontWeight: FontWeight.w700,
+              if (scopedResume.isNotEmpty) ...[
+                _homeHero(scopedResume.first, pool: scopedResume),
+                const SizedBox(height: 12),
+              ],
+              if (scopedNextUp.isNotEmpty) ...[
+                _homeSectionBlock(
+                  title: '下一步观看',
+                  child: _homeFeatureRail(scopedNextUp, badge: 'Next Up'),
                 ),
+                const SizedBox(height: 12),
+              ],
+              _homeSectionBlock(
+                title: '\u7ee7\u7eed\u89c2\u770b',
+                child: scopedResume.length > 1
+                    ? _homeFeatureRail(
+                        scopedResume.skip(1).take(20).toList(growable: false),
+                        badge: 'Resume',
+                      )
+                    : SizedBox(
+                        height: 120,
+                        child: Center(
+                          child: Text(
+                            scopedResume.isEmpty
+                                ? '\u6682\u65e0\u7ee7\u7eed\u89c2\u770b'
+                                : '\u6682\u65e0\u66f4\u591a\u7ee7\u7eed\u5185\u5bb9',
+                            style: TextStyle(color: _palette.sub),
+                          ),
+                        ),
+                      ),
               ),
-              const SizedBox(height: 8),
-              _shelf(scopedLibraries),
-              const SizedBox(height: 10),
-              Text(
-                '\u7ee7\u7eed\u89c2\u770b',
-                style: TextStyle(
-                  color: _palette.text,
-                  fontSize: 19,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
-              _shelf(scopedResume),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               if (_sectionsLoading && scopedSections.isEmpty)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 10),
@@ -1958,39 +2574,26 @@ class _EmbyExclusiveFavoritesPageState
                   ),
                 ),
               for (final row in scopedSections) ...[
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        row.view.name.trim().isEmpty
-                            ? '\u5a92\u4f53'
-                            : row.view.name.trim(),
-                        style: TextStyle(
-                          color: _palette.text,
-                          fontSize: 19,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () => _openFolderUi(
-                        account: row.account,
-                        folderId: row.view.id,
-                        title: row.view.name.trim().isEmpty
-                            ? '\u5a92\u4f53'
-                            : row.view.name.trim(),
-                      ),
-                      child: Text(
-                        '\u66f4\u591a',
-                        style: TextStyle(color: _palette.sub),
-                      ),
-                    ),
-                  ],
+                _homeSectionBlock(
+                  title: row.view.name.trim().isEmpty
+                      ? '\u5a92\u4f53'
+                      : row.view.name.trim(),
+                  onMore: () => _openFolderUi(
+                    account: row.account,
+                    folderId: row.view.id,
+                    title: row.view.name.trim().isEmpty
+                        ? '\u5a92\u4f53'
+                        : row.view.name.trim(),
+                  ),
+                  child: _shelf(row.items),
                 ),
-                const SizedBox(height: 8),
-                _shelf(row.items),
-                const SizedBox(height: 10),
+                const SizedBox(height: 12),
               ],
+              _homeSectionBlock(
+                title: '媒体库',
+                child: _shelf(scopedLibraries),
+              ),
+              const SizedBox(height: 12),
               if (_sectionsLoading && scopedSections.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 2, bottom: 8),
@@ -2021,33 +2624,15 @@ class _EmbyExclusiveFavoritesPageState
                   ),
                 ),
               for (final e in groupedFav.entries) ...[
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        _accountName(e.key),
-                        style: TextStyle(
-                          color: _palette.text,
-                          fontSize: 19,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        final acc = _accountById(e.key);
-                        if (acc != null) _openFavoritesUi(account: acc);
-                      },
-                      child: Text(
-                        '\u66f4\u591a',
-                        style: TextStyle(color: _palette.sub),
-                      ),
-                    ),
-                  ],
+                _homeSectionBlock(
+                  title: _accountName(e.key),
+                  onMore: () {
+                    final acc = _accountById(e.key);
+                    if (acc != null) _openFavoritesUi(account: acc);
+                  },
+                  child: _shelf(e.value.take(20).toList(growable: false)),
                 ),
-                const SizedBox(height: 8),
-                _shelf(e.value.take(20).toList(growable: false)),
-                const SizedBox(height: 10),
+                const SizedBox(height: 12),
               ],
               if (_favoritesLoading && groupedFav.isNotEmpty)
                 Padding(
@@ -2105,6 +2690,7 @@ class _EmbyExclusiveFolderPage extends StatefulWidget {
   final String title;
   final String folderId;
   final bool favoritesMode;
+  final _FolderPageSeed? initialSeed;
   final _EmbyPaletteMode paletteMode;
 
   const _EmbyExclusiveFolderPage({
@@ -2112,6 +2698,7 @@ class _EmbyExclusiveFolderPage extends StatefulWidget {
     required this.title,
     required this.folderId,
     this.favoritesMode = false,
+    this.initialSeed,
     required this.paletteMode,
   });
 
@@ -2169,6 +2756,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   @override
   void initState() {
     super.initState();
+    _applyInitialSeed();
     unawaited(_bootstrap());
   }
 
@@ -2179,6 +2767,91 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   }
 
   _EmbyPalette get _palette => _paletteForMode(widget.paletteMode);
+
+  bool _isResumableItem(EmbyItem item) {
+    final played = item.playedPercentage ?? 0;
+    if (item.playbackPositionTicks > 0 && played < 95) return true;
+    return item.playbackPositionTicks > 0 && !item.isPlayed;
+  }
+
+  double _progressRatio(EmbyItem item) {
+    final played = item.playedPercentage;
+    if (played != null && played.isFinite && played > 0) {
+      return (played / 100).clamp(0.0, 1.0);
+    }
+    final ticks = item.playbackPositionTicks;
+    final runtime = item.runTimeTicks ?? 0;
+    if (ticks > 0 && runtime > 0) {
+      return (ticks / runtime).clamp(0.0, 1.0);
+    }
+    return 0;
+  }
+
+  Widget _progressOverlay(EmbyItem item) {
+    final ratio = _progressRatio(item);
+    if (ratio <= 0) return const SizedBox.shrink();
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Container(
+        height: 4,
+        color: Colors.black.withValues(alpha: 0.34),
+        child: FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: ratio,
+          child: Container(color: _palette.progress),
+        ),
+      ),
+    );
+  }
+
+  Widget _itemBadgeOverlay(_UiItem item) {
+    final unplayed = item.item.unplayedItemCount;
+    final resumable = _isResumableItem(item.item);
+    final label = unplayed > 0
+        ? '未看 $unplayed'
+        : resumable
+            ? '继续播放'
+            : '';
+    if (label.isEmpty) return const SizedBox.shrink();
+    return Positioned(
+      left: 8,
+      top: 8,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _applyInitialSeed() {
+    final seed = widget.initialSeed;
+    if (seed == null || !seed.hasAnyData) return;
+    _items = seed.directItems;
+    _recursiveVideos = seed.recursiveVideos;
+    _recursiveImages = seed.recursiveImages;
+    _libraryKind = _libraryKindFromSignal(seed.kindHint);
+    _topTab = _chooseTopTab(
+      current: _topTab,
+      directItems: _items,
+      videos: _recursiveVideos,
+      images: _recursiveImages,
+      preferPriority: true,
+    );
+    _loading = false;
+  }
 
   Future<void> _bootstrap() async {
     await _reload();
@@ -2421,11 +3094,15 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   String _topTabLabel(_FolderTopTab tab) {
     switch (tab) {
       case _FolderTopTab.videos:
-        return '\u89c6\u9891';
+        if (_libraryKind == _LibraryKind.series) return '单集';
+        if (_libraryKind == _LibraryKind.movies) return '视频文件';
+        return '视频';
       case _FolderTopTab.images:
-        return '\u56fe\u7247';
+        return '图片';
       case _FolderTopTab.folders:
-        return '\u5206\u7c7b';
+        if (_libraryKind == _LibraryKind.series) return '剧集';
+        if (_libraryKind == _LibraryKind.movies) return '内容';
+        return '分类';
     }
   }
 
@@ -2477,15 +3154,92 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     );
   }
 
+  bool get _prefersStructuredContentTab =>
+      _libraryKind == _LibraryKind.series ||
+      _libraryKind == _LibraryKind.movies;
+
+  _UiItem _seriesProxyFromVideo(_UiItem item) {
+    final seriesId = (item.item.seriesId ?? '').trim();
+    final seriesName = (item.item.seriesName ?? '').trim();
+    return _UiItem(
+      account: widget.account,
+      item: EmbyItem(
+        id: seriesId,
+        name: seriesName.isEmpty ? item.title : seriesName,
+        type: 'Series',
+        isFolder: true,
+        collectionType: 'tvshows',
+        dateCreated: item.item.dateCreated,
+        dateModified: item.item.dateModified,
+        datePlayed: item.item.datePlayed,
+      ),
+      isDir: true,
+      isImage: false,
+      coverUrl: item.coverUrl,
+    );
+  }
+
+  List<_UiItem> _collapsedSeriesVideoItems(List<_UiItem> src) {
+    if (src.isEmpty) return src;
+    final directSeries = <String, _UiItem>{
+      for (final item in _items)
+        if (_isSeriesDir(item) && item.item.id.trim().isNotEmpty)
+          item.item.id.trim(): item,
+    };
+    final out = <_UiItem>[];
+    final seen = <String>{};
+    for (final item in src) {
+      final seriesId = (item.item.seriesId ?? '').trim();
+      if (seriesId.isEmpty) {
+        final id = item.item.id.trim();
+        if (id.isEmpty || !seen.add(id)) continue;
+        out.add(item);
+        continue;
+      }
+      if (!seen.add(seriesId)) continue;
+      out.add(directSeries[seriesId] ?? _seriesProxyFromVideo(item));
+    }
+    return out;
+  }
+
+  List<_UiItem> _contentItemsForCurrentFolder() {
+    if (_libraryKind == _LibraryKind.series) {
+      final directSeries = _items.where(_isSeriesDir).toList(growable: false);
+      if (directSeries.isNotEmpty) return directSeries;
+      final directPlayable =
+          _items.where((x) => !x.isDir && !x.isImage).toList(growable: false);
+      return _collapsedSeriesVideoItems(
+        _mergeUiById(directPlayable, _recursiveVideos),
+      );
+    }
+
+    if (_libraryKind == _LibraryKind.movies) {
+      final directMovieFolders =
+          _items.where(_isMovieFolder).toList(growable: false);
+      final directMovieFiles =
+          _items.where(_isMovieItem).toList(growable: false);
+      if (directMovieFolders.isNotEmpty) {
+        return _mergeUiById(directMovieFolders, directMovieFiles);
+      }
+      final recursiveMovieFiles =
+          _recursiveVideos.where(_isMovieItem).toList(growable: false);
+      return _mergeUiById(directMovieFiles, recursiveMovieFiles);
+    }
+
+    return _items;
+  }
+
   List<_UiItem> _baseItemsForTab() {
     switch (_topTab) {
       case _FolderTopTab.videos:
+        if (_libraryKind == _LibraryKind.series) {
+          return _collapsedSeriesVideoItems(_recursiveVideos);
+        }
         return _recursiveVideos;
       case _FolderTopTab.images:
         return _recursiveImages;
       case _FolderTopTab.folders:
-        // Category view: keep all current-level items and group by kind in sort.
-        return _items;
+        return _contentItemsForCurrentFolder();
     }
   }
 
@@ -2702,8 +3456,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         return (a.item.dateCreated?.millisecondsSinceEpoch ?? 0)
             .compareTo(b.item.dateCreated?.millisecondsSinceEpoch ?? 0);
       case _FolderSortKind.playDuration:
-        // RunTimeTicks is not parsed yet; use file size as a temporary proxy.
-        return a.item.size.compareTo(b.item.size);
+        return (a.item.runTimeTicks ?? 0).compareTo(b.item.runTimeTicks ?? 0);
       case _FolderSortKind.playedAt:
         return (a.item.datePlayed?.millisecondsSinceEpoch ?? 0)
             .compareTo(b.item.datePlayed?.millisecondsSinceEpoch ?? 0);
@@ -2774,15 +3527,26 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   }
 
   bool _hasFolderTabItems(List<_UiItem> source) {
+    if (_prefersStructuredContentTab) {
+      return _contentItemsForCurrentFolder().isNotEmpty;
+    }
     return source.isNotEmpty;
   }
 
   List<_FolderTopTab> _visibleTopTabs() {
-    final tabs = <_FolderTopTab>[
-      _FolderTopTab.videos,
-      _FolderTopTab.folders,
-    ];
+    final tabs = <_FolderTopTab>[];
+    if (_prefersStructuredContentTab) {
+      if (_contentItemsForCurrentFolder().isNotEmpty) {
+        tabs.add(_FolderTopTab.folders);
+      } else if (_recursiveVideos.isNotEmpty) {
+        tabs.add(_FolderTopTab.videos);
+      }
+    } else {
+      tabs.add(_FolderTopTab.videos);
+      tabs.add(_FolderTopTab.folders);
+    }
     if (_hasImages) tabs.add(_FolderTopTab.images);
+    if (tabs.isEmpty) tabs.add(_FolderTopTab.videos);
     return tabs;
   }
 
@@ -2791,7 +3555,9 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     required bool hasImages,
     required bool hasFolders,
   }) {
-    // Emby-like priority: playable video first, then folders, then images.
+    if (_prefersStructuredContentTab && hasFolders) {
+      return _FolderTopTab.folders;
+    }
     if (hasVideos) return _FolderTopTab.videos;
     if (hasFolders) return _FolderTopTab.folders;
     if (hasImages) return _FolderTopTab.images;
@@ -2831,6 +3597,16 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         hasImages: hasImages,
         hasFolders: hasFolders,
       );
+    }
+
+    if (_prefersStructuredContentTab && hasFolders) {
+      if (current == _FolderTopTab.folders) {
+        return _FolderTopTab.folders;
+      }
+      if (current == _FolderTopTab.images && hasImages) {
+        return _FolderTopTab.images;
+      }
+      return _FolderTopTab.folders;
     }
 
     if (current == _FolderTopTab.videos && hasVideos) {
@@ -3350,6 +4126,28 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
           error: true);
       return;
     }
+    _FolderPageSeed? seed;
+    try {
+      final plan =
+          await _reader.readFolder(folderId: folderId, favoritesMode: false);
+      final snap = plan.immediate;
+      final mapped = _toUiItemsWithSeed(snap.directItems, maxWidth: 520);
+      final immediateIndex = _indexUiById(mapped);
+      seed = _FolderPageSeed(
+        directItems: mapped,
+        recursiveVideos: _toUiItemsWithSeed(
+          snap.directMedia.videos,
+          maxWidth: 520,
+          seed: immediateIndex,
+        ),
+        recursiveImages: _toUiItemsWithSeed(
+          snap.directMedia.images,
+          maxWidth: 520,
+          seed: immediateIndex,
+        ),
+        kindHint: snap.libraryKind,
+      );
+    } catch (_) {}
     if (!mounted) return;
     await Navigator.push(
       context,
@@ -3358,6 +4156,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
           account: widget.account,
           title: _displayTitle(item),
           folderId: folderId,
+          initialSeed: seed,
           paletteMode: widget.paletteMode,
         ),
       ),
@@ -3833,7 +4632,14 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
               aspectRatio: coverAspect,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(10),
-                child: _cover(item),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _cover(item),
+                    _itemBadgeOverlay(item),
+                    _progressOverlay(item.item),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 7),
@@ -4004,6 +4810,157 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   }
 }
 
+Widget _detailFactChip(
+  _EmbyPalette palette, {
+  required IconData icon,
+  required String label,
+  bool highlight = false,
+}) {
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+    decoration: BoxDecoration(
+      color: highlight
+          ? palette.chipSelectedBg.withValues(alpha: 0.94)
+          : palette.chipBg.withValues(alpha: 0.92),
+      borderRadius: BorderRadius.circular(999),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: highlight ? palette.text : palette.sub),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: TextStyle(
+            color: palette.text,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+Widget _detailSectionCard(
+  _EmbyPalette palette, {
+  required String title,
+  String? subtitle,
+  Widget? trailing,
+  required Widget child,
+  EdgeInsetsGeometry padding = const EdgeInsets.fromLTRB(14, 14, 14, 14),
+}) {
+  return Container(
+    width: double.infinity,
+    padding: padding,
+    decoration: BoxDecoration(
+      color: palette.panel,
+      borderRadius: BorderRadius.circular(18),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: palette.text,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  if ((subtitle ?? '').trim().isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle!.trim(),
+                      style: TextStyle(
+                        color: palette.sub,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (trailing != null) ...[
+              const SizedBox(width: 10),
+              trailing,
+            ],
+          ],
+        ),
+        const SizedBox(height: 12),
+        child,
+      ],
+    ),
+  );
+}
+
+Widget _detailGenreWrap(_EmbyPalette palette, List<String> genres) {
+  final visible = genres
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .take(6)
+      .toList(growable: false);
+  if (visible.isEmpty) return const SizedBox.shrink();
+  return Wrap(
+    spacing: 8,
+    runSpacing: 8,
+    children: [
+      for (final genre in visible)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            color: palette.chipBg.withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            genre,
+            style: TextStyle(
+              color: palette.text,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+    ],
+  );
+}
+
+Widget _detailPrimaryButton(
+  _EmbyPalette palette, {
+  required VoidCallback onPressed,
+  required IconData icon,
+  required String label,
+  bool primary = false,
+}) {
+  final fg = primary ? palette.text : Colors.white;
+  final bg = primary
+      ? palette.chipSelectedBg.withValues(alpha: 0.95)
+      : palette.chipBg.withValues(alpha: 0.94);
+  return FilledButton.icon(
+    onPressed: onPressed,
+    icon: Icon(icon),
+    label: Text(label),
+    style: FilledButton.styleFrom(
+      backgroundColor: bg,
+      foregroundColor: fg,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      textStyle: const TextStyle(
+        fontSize: 15.5,
+        fontWeight: FontWeight.w700,
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ),
+  );
+}
+
 class _EmbySeriesDetailPage extends StatefulWidget {
   final EmbyAccount account;
   final String seriesId;
@@ -4031,6 +4988,12 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
   List<_UiItem> _continueEpisodes = const <_UiItem>[];
 
   _EmbyPalette get _palette => _paletteForMode(widget.paletteMode);
+
+  bool _isResumableEpisode(EmbyItem item) {
+    final played = item.playedPercentage ?? 0;
+    if (item.playbackPositionTicks > 0 && played < 95) return true;
+    return item.playbackPositionTicks > 0 && !item.isPlayed;
+  }
 
   @override
   void initState() {
@@ -4104,6 +5067,9 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
       sortOrder: 'Descending',
       limit: 40,
     );
+    final resumable =
+        byPlayed.where(_isResumableEpisode).toList(growable: false);
+    if (resumable.isNotEmpty) return resumable;
     if (byPlayed.isNotEmpty) return byPlayed;
     return _safeChildren(
       parentId: seriesId,
@@ -4113,6 +5079,37 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
       sortOrder: 'Descending',
       limit: 40,
     );
+  }
+
+  int _episodeSortCompare(EmbyItem a, EmbyItem b) {
+    final seasonA = a.parentIndexNumber ?? 0;
+    final seasonB = b.parentIndexNumber ?? 0;
+    if (seasonA != seasonB) return seasonA.compareTo(seasonB);
+    final indexA = a.indexNumber ?? 0;
+    final indexB = b.indexNumber ?? 0;
+    if (indexA != indexB) return indexA.compareTo(indexB);
+    final ad = a.dateCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final bd = b.dateCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final cmp = ad.compareTo(bd);
+    if (cmp != 0) return cmp;
+    return _naturalTitleCompare(a.name, b.name);
+  }
+
+  int _seasonSortCompare(EmbyItem a, EmbyItem b) {
+    final indexA = a.indexNumber ?? 0;
+    final indexB = b.indexNumber ?? 0;
+    if (indexA != indexB) return indexA.compareTo(indexB);
+    return _naturalTitleCompare(a.name, b.name);
+  }
+
+  String _episodeCode(EmbyItem item) {
+    final season = item.parentIndexNumber;
+    final episode = item.indexNumber;
+    if ((season ?? 0) > 0 && (episode ?? 0) > 0) {
+      return 'S${season.toString().padLeft(2, '0')}E${episode.toString().padLeft(2, '0')}';
+    }
+    if ((episode ?? 0) > 0) return '第 $episode 集';
+    return '';
   }
 
   Future<void> _reload() async {
@@ -4158,18 +5155,25 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
             .map((e) => _toUiItem(e, maxWidth: 360))
             .toList(growable: false),
       );
+      seasons.sort((a, b) => _seasonSortCompare(a.item, b.item));
       final episodes = _uniqueById(
         episodesRaw
             .map((e) => _toUiItem(e, maxWidth: 640))
             .where((e) => !e.isDir && !e.isImage)
             .toList(growable: false),
       );
+      episodes.sort((a, b) => _episodeSortCompare(a.item, b.item));
       var continueEpisodes = _uniqueById(
         continueRaw
             .map((e) => _toUiItem(e, maxWidth: 640))
             .where((e) => !e.isDir && !e.isImage)
             .toList(growable: false),
       );
+      continueEpisodes.sort((a, b) {
+        final ad = a.item.datePlayed ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final bd = b.item.datePlayed ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return bd.compareTo(ad);
+      });
       if (continueEpisodes.isEmpty) {
         continueEpisodes = episodes.reversed.take(20).toList(growable: false);
       }
@@ -4219,6 +5223,234 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     );
   }
 
+  Map<String, String>? get _headers {
+    final token = widget.account.apiKey.trim();
+    if (token.isEmpty) return null;
+    return <String, String>{'X-Emby-Token': token};
+  }
+
+  String _posterUrl(EmbyItem series) {
+    final id = series.id.trim();
+    if (id.isEmpty) return '';
+    final tag = (series.primaryTag ?? '').trim();
+    if (tag.isNotEmpty) {
+      return _client.coverUrl(
+        id,
+        type: 'Primary',
+        maxWidth: 560,
+        quality: 90,
+        tag: tag,
+      );
+    }
+    return _client.coverUrl(
+      id,
+      type: 'Primary',
+      maxWidth: 560,
+      quality: 88,
+    );
+  }
+
+  Widget _metaChip({required IconData icon, required String text}) {
+    final p = _palette;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: p.chipBg.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: p.text),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: TextStyle(
+              color: p.text,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _episodeProgressBar(_UiItem ep) {
+    final played = ep.item.playedPercentage;
+    final ratio = played != null && played.isFinite && played > 0
+        ? (played / 100).clamp(0.0, 1.0)
+        : (() {
+            final runtime = ep.item.runTimeTicks ?? 0;
+            if (runtime <= 0 || ep.item.playbackPositionTicks <= 0) return 0.0;
+            return (ep.item.playbackPositionTicks / runtime).clamp(0.0, 1.0);
+          })();
+    if (ratio <= 0) return const SizedBox.shrink();
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Container(
+        height: 4,
+        color: Colors.black.withValues(alpha: 0.34),
+        child: FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: ratio,
+          child: Container(color: _palette.progress),
+        ),
+      ),
+    );
+  }
+
+  Widget _episodeStatusBadge(_UiItem ep) {
+    final label = ep.item.isPlayed
+        ? '已看'
+        : _isResumableEpisode(ep.item)
+            ? '继续播放'
+            : '未看';
+    return Positioned(
+      left: 8,
+      top: 8,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.46),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _seasonSubtitle(_UiItem season) {
+    final parts = <String>[];
+    final index = season.item.indexNumber;
+    if ((index ?? 0) > 0) parts.add('第 $index 季');
+    final unplayed = season.item.unplayedItemCount;
+    if (unplayed > 0) {
+      parts.add('未看 $unplayed');
+    } else if (season.item.isPlayed) {
+      parts.add('已看完');
+    }
+    return parts.join(' · ');
+  }
+
+  _UiItem? _nextUpEpisode(List<_UiItem> playlist) {
+    if (playlist.isEmpty) return null;
+    for (final item in playlist) {
+      if (!item.item.isPlayed) return item;
+    }
+    if (_continueEpisodes.isEmpty) return playlist.first;
+    final last = _continueEpisodes.first;
+    final idx = playlist.indexWhere((e) => e.item.id == last.item.id);
+    if (idx >= 0 && idx < playlist.length - 1) return playlist[idx + 1];
+    return last;
+  }
+
+  Future<void> _playNextUp() async {
+    final playlist = _episodePlaylist();
+    final next = _nextUpEpisode(playlist);
+    if (next == null) return;
+    await _playEpisode(next, pool: playlist);
+  }
+
+  Widget _nextUpCard(_UiItem ep, {required List<_UiItem> playlist}) {
+    final p = _palette;
+    final thumb = _episodeThumbUrl(ep).trim();
+    final code = _episodeCode(ep.item);
+    final title = code.isEmpty ? ep.title : '$code · ${ep.title}';
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () => _playEpisode(ep, pool: playlist),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: p.panel,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: 156,
+                height: 88,
+                child: thumb.isEmpty
+                    ? ColoredBox(
+                        color: p.coverPlaceholderBg,
+                        child: Center(
+                          child: Icon(Icons.movie_outlined, color: p.sub),
+                        ),
+                      )
+                    : Image.network(
+                        thumb,
+                        headers: _headers,
+                        fit: BoxFit.cover,
+                        cacheWidth: 720,
+                        filterQuality: FilterQuality.low,
+                        gaplessPlayback: true,
+                        errorBuilder: (_, __, ___) => ColoredBox(
+                          color: p.coverPlaceholderBg,
+                          child: Center(
+                            child:
+                                Icon(Icons.broken_image_outlined, color: p.sub),
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '\u4e0b\u4e00\u96c6',
+                    style: TextStyle(
+                      color: p.sub,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: p.text,
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                      height: 1.1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: p.chipSelectedBg,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              alignment: Alignment.center,
+              child: Icon(Icons.play_arrow_rounded, color: p.text),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   String _episodeThumbUrl(_UiItem ep) {
     final tag = ep.item.thumbTag;
     if (tag != null && tag.trim().isNotEmpty) {
@@ -4235,15 +5467,7 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
 
   List<_UiItem> _episodePlaylist() {
     final out = _episodes.where((e) => !_isSeriesDir(e)).toList(growable: true);
-    out.sort((a, b) {
-      final ad = a.item.dateCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
-      final bd = b.item.dateCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
-      var cmp = ad.compareTo(bd);
-      if (cmp == 0) {
-        cmp = _naturalTitleCompare(a.title, b.title);
-      }
-      return cmp;
-    });
+    out.sort((a, b) => _episodeSortCompare(a.item, b.item));
     return out;
   }
 
@@ -4322,19 +5546,23 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     final parts = <String>[];
     final rating = series.communityRating;
     if (rating != null && rating > 0) {
-      parts.add('\u8c46${rating.toStringAsFixed(1)}');
+      parts.add('\u8bc4\u5206 ${rating.toStringAsFixed(1)}');
     }
     final start = series.productionYear;
     if (start != null && start > 0) {
       final end =
-          series.endDate == null ? '\u73b0\u5728' : '${series.endDate!.year}';
-      parts.add('$start - $end');
+          series.endDate == null ? '\u81f3\u4eca' : '${series.endDate!.year}';
+      parts.add('$start-$end');
     }
     final seasonCount = _seasons.length;
     if (seasonCount > 0) {
       parts.add('\u5171$seasonCount\u5b63');
     }
-    return parts.join('    ');
+    final episodeCount = _episodes.length;
+    if (episodeCount > 0) {
+      parts.add('\u5171$episodeCount\u96c6');
+    }
+    return parts.join('  \u00b7  ');
   }
 
   Widget _hero(EmbyItem series) {
@@ -4348,6 +5576,7 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
           if (backdrop.isNotEmpty)
             Image.network(
               backdrop,
+              headers: _headers,
               fit: BoxFit.cover,
               cacheWidth: 1400,
               filterQuality: FilterQuality.low,
@@ -4374,14 +5603,18 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
               child: Row(
                 children: [
                   IconButton(
-                    tooltip: '杩斿洖',
+                    tooltip: '\u8fd4\u56de',
                     onPressed: () => Navigator.maybePop(context),
                     icon: const Icon(Icons.arrow_back_ios_new_rounded,
                         color: Colors.white),
                   ),
                   const Spacer(),
                   IconButton(
-                    onPressed: () {},
+                    tooltip: '\u6536\u85cf',
+                    onPressed: () => showAppToast(
+                      context,
+                      '\u6682\u4e0d\u652f\u6301\u6536\u85cf',
+                    ),
                     icon: const Icon(Icons.favorite_border_rounded,
                         color: Colors.white),
                   ),
@@ -4415,7 +5648,7 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     if (items.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Text('鏆傛棤鍐呭', style: TextStyle(color: p.sub)),
+        child: Text('\u6682\u65e0\u5185\u5bb9', style: TextStyle(color: p.sub)),
       );
     }
     final shelf = items.take(20).toList(growable: false);
@@ -4429,8 +5662,11 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
         separatorBuilder: (_, __) => const SizedBox(width: 10),
         itemBuilder: (_, i) {
           final ep = shelf[i];
+          final code = _episodeCode(ep.item);
           final no = numberById[ep.item.id.trim()];
-          final title = no == null ? ep.title : '$no. ${ep.title}';
+          final title = code.isNotEmpty
+              ? '$code · ${ep.title}'
+              : (no == null ? ep.title : '$no. ${ep.title}');
           final thumb = _episodeThumbUrl(ep).trim();
           return InkWell(
             borderRadius: BorderRadius.circular(12),
@@ -4444,27 +5680,36 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
                     aspectRatio: 16 / 9,
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(12),
-                      child: thumb.isEmpty
-                          ? ColoredBox(
-                              color: p.coverPlaceholderBg,
-                              child: Center(
-                                child: Icon(Icons.movie_outlined, color: p.sub),
-                              ),
-                            )
-                          : Image.network(
-                              thumb,
-                              fit: BoxFit.cover,
-                              cacheWidth: 640,
-                              filterQuality: FilterQuality.low,
-                              gaplessPlayback: true,
-                              errorBuilder: (_, __, ___) => ColoredBox(
-                                color: p.coverPlaceholderBg,
-                                child: Center(
-                                  child: Icon(Icons.broken_image_outlined,
-                                      color: p.sub),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          thumb.isEmpty
+                              ? ColoredBox(
+                                  color: p.coverPlaceholderBg,
+                                  child: Center(
+                                    child: Icon(Icons.movie_outlined,
+                                        color: p.sub),
+                                  ),
+                                )
+                              : Image.network(
+                                  thumb,
+                                  headers: _headers,
+                                  fit: BoxFit.cover,
+                                  cacheWidth: 640,
+                                  filterQuality: FilterQuality.low,
+                                  gaplessPlayback: true,
+                                  errorBuilder: (_, __, ___) => ColoredBox(
+                                    color: p.coverPlaceholderBg,
+                                    child: Center(
+                                      child: Icon(Icons.broken_image_outlined,
+                                          color: p.sub),
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
+                          _episodeStatusBadge(ep),
+                          _episodeProgressBar(ep),
+                        ],
+                      ),
                     ),
                   ),
                   const SizedBox(height: 6),
@@ -4492,7 +5737,8 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     if (items.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Text('鏆傛棤鍒嗗淇℃伅', style: TextStyle(color: p.sub)),
+        child: Text('\u6682\u65e0\u5206\u5b63\u4fe1\u606f',
+            style: TextStyle(color: p.sub)),
       );
     }
     return SizedBox(
@@ -4525,6 +5771,7 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
                             )
                           : Image.network(
                               season.coverUrl,
+                              headers: _headers,
                               fit: BoxFit.cover,
                               cacheWidth: 420,
                               filterQuality: FilterQuality.low,
@@ -4546,6 +5793,13 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(color: p.text, fontSize: 13),
                   ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _seasonSubtitle(season),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: p.sub, fontSize: 11.5),
+                  ),
                 ],
               ),
             ),
@@ -4562,6 +5816,9 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     final genres = series.genres.take(4).join(', ');
     final description = (series.overview ?? '').trim();
     final meta = _metaLine(series);
+    final poster = _posterUrl(series).trim();
+    final playlist = _episodePlaylist();
+    final nextUp = _nextUpEpisode(playlist);
 
     final body = () {
       if (_loading) {
@@ -4586,41 +5843,114 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (meta.isNotEmpty)
-                    Text(
-                      meta,
-                      style: TextStyle(
-                        color: p.text,
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.w600,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: SizedBox(
+                          width: 108,
+                          height: 162,
+                          child: poster.isEmpty
+                              ? ColoredBox(
+                                  color: p.coverPlaceholderBg,
+                                  child: Center(
+                                    child: Icon(Icons.live_tv_outlined,
+                                        color: p.sub),
+                                  ),
+                                )
+                              : Image.network(
+                                  poster,
+                                  headers: _headers,
+                                  fit: BoxFit.cover,
+                                  cacheWidth: 560,
+                                  filterQuality: FilterQuality.low,
+                                  gaplessPlayback: true,
+                                  errorBuilder: (_, __, ___) => ColoredBox(
+                                    color: p.coverPlaceholderBg,
+                                    child: Center(
+                                      child: Icon(Icons.broken_image_outlined,
+                                          color: p.sub),
+                                    ),
+                                  ),
+                                ),
+                        ),
                       ),
-                    ),
-                  if (genres.isNotEmpty) ...[
-                    const SizedBox(height: 7),
-                    Text(
-                      genres,
-                      style: TextStyle(
-                        color: p.sub,
-                        fontSize: 13,
-                        decoration: TextDecoration.underline,
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (meta.isNotEmpty)
+                              Text(
+                                meta,
+                                style: TextStyle(
+                                  color: p.text,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            const SizedBox(height: 10),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                if (series.productionYear != null &&
+                                    (series.productionYear ?? 0) > 0)
+                                  _metaChip(
+                                    icon: Icons.calendar_month_outlined,
+                                    text: '${series.productionYear}',
+                                  ),
+                                if (series.communityRating != null &&
+                                    (series.communityRating ?? 0) > 0)
+                                  _metaChip(
+                                    icon: Icons.star_border_rounded,
+                                    text: series.communityRating!
+                                        .toStringAsFixed(1),
+                                  ),
+                                if (_seasons.isNotEmpty)
+                                  _metaChip(
+                                    icon: Icons.video_collection_outlined,
+                                    text: '${_seasons.length}\u5b63',
+                                  ),
+                                if (_episodes.isNotEmpty)
+                                  _metaChip(
+                                    icon: Icons.list_alt_rounded,
+                                    text: '${_episodes.length}\u96c6',
+                                  ),
+                                if (genres.isNotEmpty)
+                                  _metaChip(
+                                    icon: Icons.local_offer_outlined,
+                                    text:
+                                        genres.split(', ').take(2).join(' / '),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
                   Row(
                     children: [
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed: _playPrimary,
+                          onPressed:
+                              playlist.isEmpty ? _playPrimary : _playNextUp,
                           icon: const Icon(Icons.play_arrow_rounded),
-                          label: const Text('鎾斁'),
+                          label: Text(
+                            nextUp == null
+                                ? '\u64ad\u653e'
+                                : '\u64ad\u653e\u4e0b\u4e00\u96c6',
+                          ),
                           style: FilledButton.styleFrom(
                             backgroundColor: p.chipSelectedBg,
                             foregroundColor: p.text,
                             padding: const EdgeInsets.symmetric(vertical: 11),
                             textStyle: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
                         ),
@@ -4652,27 +5982,62 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
                     ),
                   ],
                   const SizedBox(height: 18),
-                  Text(
-                    '\u7ee7\u7eed\u89c2\u770b',
-                    style: TextStyle(
-                      color: p.text,
-                      fontSize: 24,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '\u4e0b\u4e00\u96c6',
+                          style: TextStyle(
+                            color: p.text,
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _openAllEpisodes,
+                        child: Text(
+                          '\u5168\u90e8',
+                          style: TextStyle(color: p.sub),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 10),
-                  _episodeShelf(_continueEpisodes),
-                  const SizedBox(height: 16),
-                  Text(
-                    '\u5b63',
-                    style: TextStyle(
-                      color: p.text,
-                      fontSize: 24,
-                      fontWeight: FontWeight.w700,
+                  _detailSectionCard(
+                    p,
+                    title: '下一步观看',
+                    subtitle: '优先使用当前续播记录推导下一集',
+                    trailing: TextButton(
+                      onPressed: _openAllEpisodes,
+                      child: Text('全部', style: TextStyle(color: p.sub)),
                     ),
+                    child: nextUp != null
+                        ? _nextUpCard(nextUp, playlist: playlist)
+                        : Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                            child: Text(
+                              '暂无可播放剧集',
+                              style: TextStyle(color: p.sub),
+                            ),
+                          ),
                   ),
-                  const SizedBox(height: 10),
-                  _seasonShelf(_seasons),
+                  const SizedBox(height: 18),
+                  _detailSectionCard(
+                    p,
+                    title: '继续观看',
+                    subtitle: '保留你最近看过的剧集位置',
+                    child: _episodeShelf(_continueEpisodes),
+                  ),
+                  const SizedBox(height: 18),
+                  _detailSectionCard(
+                    p,
+                    title: '季',
+                    subtitle: _seasons.isEmpty
+                        ? '当前没有可用分季信息'
+                        : '共 ${_seasons.length} 季 · ${_episodes.length} 集',
+                    child: _seasonShelf(_seasons),
+                  ),
                 ],
               ),
             ),
@@ -4784,6 +6149,53 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
     );
   }
 
+  Map<String, String>? get _headers {
+    final token = widget.account.apiKey.trim();
+    if (token.isEmpty) return null;
+    return <String, String>{'X-Emby-Token': token};
+  }
+
+  String _posterUrl(EmbyItem movie) {
+    final id = movie.id.trim();
+    if (id.isEmpty) return '';
+    final tag = (movie.primaryTag ?? '').trim();
+    if (tag.isNotEmpty) {
+      return _client.coverUrl(
+        id,
+        type: 'Primary',
+        maxWidth: 560,
+        quality: 90,
+        tag: tag,
+      );
+    }
+    return _client.coverUrl(
+      id,
+      type: 'Primary',
+      maxWidth: 560,
+      quality: 88,
+    );
+  }
+
+  Future<void> _openPoster() async {
+    final movie = _movie ?? widget.seedMovie;
+    final ui = _toUiItem(movie, maxWidth: 1200);
+    final preferred = _preferOriginalUrl(ui.coverUrl).trim();
+    final url = preferred.isNotEmpty
+        ? preferred
+        : _client.originalImageUrl(movie.id).trim();
+    if (url.isEmpty || !mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ImageViewerPage(
+          imagePaths: <String>[url],
+          initialIndex: 0,
+          sourceKeys: <String>[_imageSourceKeyFor(ui)],
+        ),
+      ),
+    );
+  }
+
   String _durationLabel(int? runTimeTicks) {
     final ticks = runTimeTicks ?? 0;
     if (ticks <= 0) return '';
@@ -4811,7 +6223,127 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
     if (duration.isNotEmpty) {
       parts.add(duration);
     }
-    return parts.join('    ');
+    return parts.join('  \u00b7  ');
+  }
+
+  List<Widget> _movieFactChips(EmbyItem movie) {
+    final out = <Widget>[];
+    final rating = movie.communityRating;
+    if (rating != null && rating > 0) {
+      out.add(_detailFactChip(
+        _palette,
+        icon: Icons.star_rounded,
+        label: rating.toStringAsFixed(1),
+        highlight: true,
+      ));
+    }
+    final year = movie.productionYear;
+    if (year != null && year > 0) {
+      out.add(_detailFactChip(
+        _palette,
+        icon: Icons.calendar_today_outlined,
+        label: '$year',
+      ));
+    }
+    final duration = _durationLabel(movie.runTimeTicks);
+    if (duration.isNotEmpty) {
+      out.add(_detailFactChip(
+        _palette,
+        icon: Icons.schedule_rounded,
+        label: duration,
+      ));
+    }
+    out.add(_detailFactChip(
+      _palette,
+      icon: Icons.movie_outlined,
+      label: '电影',
+    ));
+    return out;
+  }
+
+  Widget _movieSummaryPanel(EmbyItem movie) {
+    final p = _palette;
+    final poster = _posterUrl(movie);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: p.panel,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: SizedBox(
+              width: 104,
+              height: 156,
+              child: poster.isEmpty
+                  ? ColoredBox(
+                      color: p.coverPlaceholderBg,
+                      child: Center(
+                        child:
+                            Icon(Icons.movie_outlined, color: p.sub, size: 28),
+                      ),
+                    )
+                  : Image.network(
+                      poster,
+                      headers: _headers,
+                      fit: BoxFit.cover,
+                      cacheWidth: 520,
+                      filterQuality: FilterQuality.low,
+                      gaplessPlayback: true,
+                      errorBuilder: (_, __, ___) => ColoredBox(
+                        color: p.coverPlaceholderBg,
+                        child: Center(
+                          child: Icon(Icons.broken_image_outlined,
+                              color: p.sub, size: 24),
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  movie.name.trim().isEmpty ? '未命名电影' : movie.name.trim(),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: p.text,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                    height: 1.1,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _movieFactChips(movie),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  _movieStatusText(movie),
+                  style: TextStyle(
+                    color: p.sub,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (movie.genres.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  _detailGenreWrap(p, movie.genres),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _playMovie() async {
@@ -4830,6 +6362,18 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
     );
   }
 
+  bool _isResumableMovie(EmbyItem movie) {
+    final played = movie.playedPercentage ?? 0;
+    if (movie.playbackPositionTicks > 0 && played < 95) return true;
+    return movie.playbackPositionTicks > 0 && !movie.isPlayed;
+  }
+
+  String _movieStatusText(EmbyItem movie) {
+    if (movie.isPlayed) return '已看完';
+    if (_isResumableMovie(movie)) return '继续播放';
+    return '未开始';
+  }
+
   Widget _hero(EmbyItem movie) {
     final p = _palette;
     final backdrop = _backdropUrl(movie).trim();
@@ -4841,9 +6385,11 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
           if (backdrop.isNotEmpty)
             Image.network(
               backdrop,
+              headers: _headers,
               fit: BoxFit.cover,
               cacheWidth: 1400,
               filterQuality: FilterQuality.low,
+              gaplessPlayback: true,
               errorBuilder: (_, __, ___) =>
                   ColoredBox(color: p.coverPlaceholderBg),
             )
@@ -4905,7 +6451,6 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
     final p = _palette;
     final movie = _movie ?? widget.seedMovie;
     final meta = _metaLine(movie);
-    final genres = movie.genres.take(4).join(', ');
     final overview = (movie.overview ?? '').trim();
 
     final body = () {
@@ -4931,55 +6476,68 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (meta.isNotEmpty)
+                  _movieSummaryPanel(movie),
+                  if (meta.isNotEmpty) ...[
+                    const SizedBox(height: 14),
                     Text(
                       meta,
                       style: TextStyle(
                         color: p.text,
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  if (genres.isNotEmpty) ...[
-                    const SizedBox(height: 7),
-                    Text(
-                      genres,
-                      style: TextStyle(
-                        color: p.sub,
-                        fontSize: 13,
-                        decoration: TextDecoration.underline,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                   ],
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: _playMovie,
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('\u64ad\u653e'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: p.chipSelectedBg,
-                        foregroundColor: p.text,
-                        padding: const EdgeInsets.symmetric(vertical: 11),
-                        textStyle: const TextStyle(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _detailPrimaryButton(
+                          p,
+                          onPressed: _playMovie,
+                          icon: Icons.play_arrow_rounded,
+                          label: _isResumableMovie(movie) ? '继续播放' : '播放',
+                          primary: true,
                         ),
                       ),
-                    ),
+                      const SizedBox(width: 10),
+                      SizedBox(
+                        width: 112,
+                        child: _detailPrimaryButton(
+                          p,
+                          onPressed: _openPoster,
+                          icon: Icons.image_outlined,
+                          label: '海报',
+                        ),
+                      ),
+                    ],
                   ),
                   if (overview.isNotEmpty) ...[
                     const SizedBox(height: 18),
-                    Text(
-                      overview,
-                      style: TextStyle(
-                        color: p.text,
-                        fontSize: 14,
-                        height: 1.45,
+                    _detailSectionCard(
+                      p,
+                      title: '剧情简介',
+                      child: Text(
+                        overview,
+                        style: TextStyle(
+                          color: p.text,
+                          fontSize: 14,
+                          height: 1.45,
+                        ),
                       ),
                     ),
                   ],
+                  const SizedBox(height: 18),
+                  _detailSectionCard(
+                    p,
+                    title: '媒体信息',
+                    subtitle: '沿用当前 Emby 返回的评分、年份和时长字段',
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _movieFactChips(movie),
+                    ),
+                  ),
                 ],
               ),
             ),

@@ -180,6 +180,12 @@ class EmbyItem {
   /// - 在“按日期排序”时，如果 DateCreated 缺失，使用 DateModified 能显著提升可用性。
   final DateTime? dateModified;
   final DateTime? datePlayed;
+  final int playbackPositionTicks;
+  final double? playedPercentage;
+  final bool isPlayed;
+  final int unplayedItemCount;
+  final int? indexNumber;
+  final int? parentIndexNumber;
 
   /// 文件大小（字节）。
   /// - Emby 的大小通常存在于 MediaSources[0].Size（需要 Fields=MediaSources）；
@@ -208,6 +214,12 @@ class EmbyItem {
     this.dateCreated,
     this.dateModified,
     this.datePlayed,
+    this.playbackPositionTicks = 0,
+    this.playedPercentage,
+    this.isPlayed = false,
+    this.unplayedItemCount = 0,
+    this.indexNumber,
+    this.parentIndexNumber,
     this.size = 0,
   });
 
@@ -247,6 +259,12 @@ class EmbyItem {
       return _parseRawDate(userData['LastPlayedDate']) ??
           _parseRawDate(userData['DatePlayed']) ??
           _parseRawDate(userData['DateLastPlayed']);
+    }
+
+    Map<String, dynamic> _userDataMap() {
+      final userData = j['UserData'];
+      if (userData is Map) return userData.cast<String, dynamic>();
+      return const <String, dynamic>{};
     }
 
     double? _parseDouble(String key) {
@@ -291,6 +309,7 @@ class EmbyItem {
 
     final mediaTypeRaw = (j['MediaType'] ?? '').toString().trim();
     final collectionTypeRaw = (j['CollectionType'] ?? '').toString().trim();
+    final userData = _userDataMap();
     final genresRaw = j['Genres'];
     final genres = <String>[];
     if (genresRaw is List) {
@@ -316,6 +335,32 @@ class EmbyItem {
       communityRating: _parseDouble('CommunityRating'),
       runTimeTicks: _parseInt('RunTimeTicks'),
       genres: genres,
+      playbackPositionTicks: _parseInt('PlaybackPositionTicks') ??
+          (userData['PlaybackPositionTicks'] is int
+              ? userData['PlaybackPositionTicks'] as int
+              : (userData['PlaybackPositionTicks'] is double
+                  ? (userData['PlaybackPositionTicks'] as double).toInt()
+                  : int.tryParse((userData['PlaybackPositionTicks'] ?? '')
+                          .toString()) ??
+                      0)),
+      playedPercentage: _parseDouble('PlayedPercentage') ??
+          (() {
+            final raw = userData['PlayedPercentage'];
+            if (raw is num) return raw.toDouble();
+            if (raw is String) return double.tryParse(raw.trim());
+            return null;
+          })(),
+      isPlayed: j['Played'] == true || userData['Played'] == true,
+      unplayedItemCount: _parseInt('UnplayedItemCount') ??
+          (() {
+            final raw = userData['UnplayedItemCount'];
+            if (raw is int) return raw;
+            if (raw is double) return raw.toInt();
+            if (raw is String) return int.tryParse(raw.trim()) ?? 0;
+            return 0;
+          })(),
+      indexNumber: _parseInt('IndexNumber'),
+      parentIndexNumber: _parseInt('ParentIndexNumber'),
       primaryTag: _tagOrNull(tags['Primary']),
       thumbTag: _tagOrNull(tags['Thumb']),
       backdropTags: backdropTags,
