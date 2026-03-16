@@ -126,7 +126,7 @@ class AppTheme {
 
     final baseBorder = OutlineInputBorder(
       borderRadius: BorderRadius.circular(14),
-      borderSide: BorderSide(color: Colors.black.withOpacity(0.08)),
+      borderSide: BorderSide(color: Colors.black.withValues(alpha: 0.08)),
     );
 
     final buttonShape = RoundedRectangleBorder(
@@ -139,7 +139,6 @@ class AppTheme {
       visualDensity: VisualDensity.standard,
       colorScheme: scheme.copyWith(
         surface: Colors.white,
-        background: AppThemeColors.bg,
       ),
       scaffoldBackgroundColor: AppThemeColors.bg,
       dividerColor: AppThemeColors.divider,
@@ -212,57 +211,57 @@ class AppTheme {
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: Colors.white.withOpacity(0.86),
+        fillColor: Colors.white.withValues(alpha: 0.86),
         border: baseBorder,
         enabledBorder: baseBorder,
         focusedBorder: baseBorder.copyWith(
-          borderSide:
-              BorderSide(color: scheme.primary.withOpacity(0.65), width: 1.4),
+          borderSide: BorderSide(
+              color: scheme.primary.withValues(alpha: 0.65), width: 1.4),
         ),
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       ),
       iconButtonTheme: IconButtonThemeData(
         style: ButtonStyle(
-          minimumSize: MaterialStateProperty.all(
-              const Size(kMinTapTarget, kMinTapTarget)),
-          fixedSize: MaterialStateProperty.all(
-              const Size(kMinTapTarget, kMinTapTarget)),
+          minimumSize:
+              WidgetStateProperty.all(const Size(kMinTapTarget, kMinTapTarget)),
+          fixedSize:
+              WidgetStateProperty.all(const Size(kMinTapTarget, kMinTapTarget)),
           tapTargetSize: MaterialTapTargetSize.padded,
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: ButtonStyle(
-          minimumSize: MaterialStateProperty.all(
-              const Size(kMinTapTarget, kMinTapTarget)),
-          shape: MaterialStateProperty.all(buttonShape),
+          minimumSize:
+              WidgetStateProperty.all(const Size(kMinTapTarget, kMinTapTarget)),
+          shape: WidgetStateProperty.all(buttonShape),
         ),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: ButtonStyle(
-          minimumSize: MaterialStateProperty.all(
-              const Size(kMinTapTarget, kMinTapTarget)),
-          padding: MaterialStateProperty.all(
+          minimumSize:
+              WidgetStateProperty.all(const Size(kMinTapTarget, kMinTapTarget)),
+          padding: WidgetStateProperty.all(
             const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           ),
-          shape: MaterialStateProperty.all(buttonShape),
-          textStyle: MaterialStateProperty.all(
+          shape: WidgetStateProperty.all(buttonShape),
+          textStyle: WidgetStateProperty.all(
             const TextStyle(fontWeight: FontWeight.w600),
           ),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: ButtonStyle(
-          minimumSize: MaterialStateProperty.all(
-              const Size(kMinTapTarget, kMinTapTarget)),
-          padding: MaterialStateProperty.all(
+          minimumSize:
+              WidgetStateProperty.all(const Size(kMinTapTarget, kMinTapTarget)),
+          padding: WidgetStateProperty.all(
             const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           ),
-          shape: MaterialStateProperty.all(buttonShape),
-          side: MaterialStateProperty.all(
-            BorderSide(color: Colors.black.withOpacity(0.10)),
+          shape: WidgetStateProperty.all(buttonShape),
+          side: WidgetStateProperty.all(
+            BorderSide(color: Colors.black.withValues(alpha: 0.10)),
           ),
-          textStyle: MaterialStateProperty.all(
+          textStyle: WidgetStateProperty.all(
             const TextStyle(fontWeight: FontWeight.w600),
           ),
         ),
@@ -280,9 +279,9 @@ class AppTheme {
         dividerColor: Colors.transparent,
         indicatorSize: TabBarIndicatorSize.tab,
         indicator: BoxDecoration(
-          color: Colors.white.withOpacity(0.72),
+          color: Colors.white.withValues(alpha: 0.72),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.white.withOpacity(0.58)),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.58)),
         ),
       ),
     );
@@ -554,7 +553,7 @@ class GlassAppBar extends StatelessWidget implements PreferredSizeWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bg = (tint ?? Colors.white).withOpacity(opacity);
+    final bg = (tint ?? Colors.white).withValues(alpha: opacity);
 
     return AppBar(
       systemOverlayStyle: const SystemUiOverlayStyle(
@@ -580,7 +579,7 @@ class GlassAppBar extends StatelessWidget implements PreferredSizeWidget {
               decoration: BoxDecoration(
                 border: Border(
                   bottom: BorderSide(
-                    color: Colors.black.withOpacity(0.06),
+                    color: Colors.black.withValues(alpha: 0.06),
                     width: 0.8,
                   ),
                 ),
@@ -612,9 +611,12 @@ class ControlChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = tint ?? Theme.of(context).colorScheme.primary;
-    final bg = selected ? c.withOpacity(0.14) : Colors.white.withOpacity(0.82);
-    final border =
-        selected ? c.withOpacity(0.25) : Colors.black.withOpacity(0.08);
+    final bg = selected
+        ? c.withValues(alpha: 0.14)
+        : Colors.white.withValues(alpha: 0.82);
+    final border = selected
+        ? c.withValues(alpha: 0.25)
+        : Colors.black.withValues(alpha: 0.08);
     final fg = selected ? c : AppThemeColors.text;
 
     return InkWell(
@@ -693,9 +695,9 @@ class TopActionMenu<T> extends StatelessWidget {
         height: 40,
         width: 40,
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.84),
+          color: Colors.white.withValues(alpha: 0.84),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.black.withOpacity(0.08)),
+          border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
         ),
         child: const Icon(Icons.more_horiz, size: 20),
       ),
@@ -754,13 +756,13 @@ class SelectionBar extends StatelessWidget {
       top: false,
       child: Container(
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.95),
+          color: Colors.white.withValues(alpha: 0.95),
           border: Border(
-            top: BorderSide(color: Colors.black.withOpacity(0.08)),
+            top: BorderSide(color: Colors.black.withValues(alpha: 0.08)),
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.06),
+              color: Colors.black.withValues(alpha: 0.06),
               blurRadius: 12,
               offset: const Offset(0, -2),
             ),

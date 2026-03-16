@@ -10,6 +10,22 @@ void main() {
       expect(ref.itemId, 'abc123');
     });
 
+    test('build emby source with optional name', () {
+      final source = buildEmbySource('acc-2', 'item:xyz-1', name: '写真 A 套');
+      expect(source, startsWith('emby://acc-2/item:xyz-1?name='));
+      final ref = parseEmbySourceRef(source);
+      expect(ref, isNotNull);
+      expect(ref!.accountId, 'acc-2');
+      expect(ref.itemId, 'xyz-1');
+    });
+
+    test('parse emby generic source path', () {
+      final ref = parseEmbySourcePath('emby://acc-9/view:folder-1');
+      expect(ref, isNotNull);
+      expect(ref!.accountId, 'acc-9');
+      expect(ref.path, 'view:folder-1');
+    });
+
     test('parse emby stream info', () {
       final info = parseEmbyStreamInfo(
         'https://demo.example/emby/Videos/item-9/stream.mp4?api_key=xx',

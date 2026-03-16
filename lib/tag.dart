@@ -338,10 +338,10 @@ class TagThumbCache {
       }
     } else if (_isWebDavSource(source)) {
       try {
-        final u = Uri.parse(source);
-        final accountId = u.host;
-        final rel = Uri.decodeFull(
-            u.path.startsWith('/') ? u.path.substring(1) : u.path);
+        final ref = parseWebDavSource(source);
+        if (ref == null) return null;
+        final accountId = ref.accountId;
+        final rel = ref.relPath;
 
         final acc = await _loadWebDavAccount(accountId);
         if (acc == null) return null;
@@ -352,7 +352,7 @@ class TagThumbCache {
         if (baseUrl.isEmpty) return null;
 
         final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
-        final resolved = Uri.parse(base).resolve(rel);
+        final resolved = Uri.parse(base).resolve(encodePathPreserveSlash(rel));
 
         uri = resolved;
         headers = {
@@ -1689,7 +1689,7 @@ class _TagPickerDialogState extends State<_TagPickerDialog> {
         FilledButton(
           onPressed: () async {
             await store.setTagsForTarget(widget.target, _selected);
-            if (!mounted) return;
+            if (!context.mounted) return;
             Navigator.pop(context, _selected);
           },
           child: const Text('保存'),
@@ -2378,7 +2378,7 @@ class _FilesTabViewState extends State<_FilesTabView> {
     if (selectedTag == null) return;
     await TagStore.I.copyFileToTagDir(item, selectedTag);
     await TagStore.I.syncLocalTagDir(selectedTag);
-    if (!mounted) return;
+    if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('已保存到 ${p.basename(selectedTag.localPath!)}')),
     );
@@ -2828,7 +2828,8 @@ class _TagFilterHeader extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
               color: active ? theme.colorScheme.primary : theme.dividerColor),
-          color: active ? theme.colorScheme.primary.withOpacity(0.08) : null,
+          color:
+              active ? theme.colorScheme.primary.withValues(alpha: 0.08) : null,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -3134,6 +3135,7 @@ class _TagsView extends StatelessWidget {
                         if (v == 'open_path' &&
                             t.localPath != null &&
                             onOpenTagDirectory != null) {
+                          if (!context.mounted) return;
                           await onOpenTagDirectory!(context, t);
                         }
                       },
@@ -3215,7 +3217,7 @@ class _FileCard extends StatelessWidget {
                         child: Container(
                           padding: const EdgeInsets.all(6),
                           decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.42),
+                            color: Colors.black.withValues(alpha: 0.42),
                             borderRadius: BorderRadius.circular(999),
                           ),
                           child: const Icon(Icons.play_arrow_rounded,
@@ -3300,9 +3302,9 @@ class _KindBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface.withOpacity(0.88),
+        color: theme.colorScheme.surface.withValues(alpha: 0.88),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: theme.dividerColor.withOpacity(0.7)),
+        border: Border.all(color: theme.dividerColor.withValues(alpha: 0.7)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -3326,9 +3328,9 @@ class _TagPill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: c.withOpacity(0.14),
+        color: c.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: c.withOpacity(0.35)),
+        border: Border.all(color: c.withValues(alpha: 0.35)),
       ),
       child: Text(tag.name, style: const TextStyle(fontSize: 11)),
     );
@@ -3345,9 +3347,10 @@ class _MorePill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceVariant.withOpacity(0.35),
+        color:
+            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: theme.dividerColor.withOpacity(0.8)),
+        border: Border.all(color: theme.dividerColor.withValues(alpha: 0.8)),
       ),
       child: Text('+$count', style: const TextStyle(fontSize: 11)),
     );
@@ -3467,10 +3470,10 @@ class _CoverPlaceholder extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Container(
-      color: theme.colorScheme.surfaceVariant.withOpacity(0.45),
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
       alignment: Alignment.center,
       child: Icon(icon,
-          color: theme.colorScheme.onSurfaceVariant.withOpacity(0.72),
+          color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.72),
           size: 28),
     );
   }

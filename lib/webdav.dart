@@ -971,22 +971,22 @@ class _WebDavAccountsPageState extends State<WebDavAccountsPage> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _kDarkStatusBarStyle,
       child: Scaffold(
-      appBar: GlassAppBar(
-        title: const Text('WebDAV'),
-        actions: [
-          IconButton(
-            onPressed: _reloading ? null : _reload,
-            icon: const Icon(Icons.refresh),
-            tooltip: '刷新',
-          ),
-        ],
-      ),
-      body: body,
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _add,
-        icon: const Icon(Icons.add),
-        label: const Text('添加 WebDAV'),
-      ),
+        appBar: GlassAppBar(
+          title: const Text('WebDAV'),
+          actions: [
+            IconButton(
+              onPressed: _reloading ? null : _reload,
+              icon: const Icon(Icons.refresh),
+              tooltip: '刷新',
+            ),
+          ],
+        ),
+        body: body,
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: _add,
+          icon: const Icon(Icons.add),
+          label: const Text('添加 WebDAV'),
+        ),
       ),
     );
   }
@@ -1352,53 +1352,57 @@ class _WebDavBrowserPageState extends State<WebDavBrowserPage> {
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _kDarkStatusBarStyle,
-      child: WillPopScope(
-        onWillPop: _onBack,
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) async {
+          if (didPop) return;
+          await _onBack();
+        },
         child: Scaffold(
-        appBar: GlassAppBar(
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            tooltip: '返回',
-            onPressed: () => _onBack(),
+          appBar: GlassAppBar(
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back),
+              tooltip: '返回',
+              onPressed: () => _onBack(),
+            ),
+            title: !_searching
+                ? Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis)
+                : TextField(
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                        hintText: '搜索…', border: InputBorder.none),
+                    onChanged: (v) => setState(() => _q = v),
+                  ),
+            actions: [
+              IconButton(
+                tooltip: _searching ? '关闭搜索' : '搜索',
+                onPressed: () => setState(() {
+                  _searching = !_searching;
+                  if (!_searching) _q = '';
+                }),
+                icon: Icon(_searching ? Icons.close : Icons.search),
+              ),
+              IconButton(
+                  tooltip: '视图：${_vmLabel(_viewMode)}',
+                  onPressed: _pickView,
+                  icon: Icon(_vmIcon(_viewMode))),
+              IconButton(
+                  tooltip: '排序：${_skLabel(_sortKey)}',
+                  onPressed: _pickSort,
+                  icon: Icon(_skIcon(_sortKey))),
+              IconButton(
+                tooltip: _asc ? '升序' : '降序',
+                onPressed: () => setState(() => _asc = !_asc),
+                icon: Icon(_asc ? Icons.arrow_upward : Icons.arrow_downward),
+              ),
+              IconButton(
+                  tooltip: '刷新',
+                  onPressed: _refreshing ? null : _refresh,
+                  icon: const Icon(Icons.refresh)),
+            ],
           ),
-          title: !_searching
-              ? Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis)
-              : TextField(
-                  autofocus: true,
-                  decoration: const InputDecoration(
-                      hintText: '搜索…', border: InputBorder.none),
-                  onChanged: (v) => setState(() => _q = v),
-                ),
-          actions: [
-            IconButton(
-              tooltip: _searching ? '关闭搜索' : '搜索',
-              onPressed: () => setState(() {
-                _searching = !_searching;
-                if (!_searching) _q = '';
-              }),
-              icon: Icon(_searching ? Icons.close : Icons.search),
-            ),
-            IconButton(
-                tooltip: '视图：${_vmLabel(_viewMode)}',
-                onPressed: _pickView,
-                icon: Icon(_vmIcon(_viewMode))),
-            IconButton(
-                tooltip: '排序：${_skLabel(_sortKey)}',
-                onPressed: _pickSort,
-                icon: Icon(_skIcon(_sortKey))),
-            IconButton(
-              tooltip: _asc ? '升序' : '降序',
-              onPressed: () => setState(() => _asc = !_asc),
-              icon: Icon(_asc ? Icons.arrow_upward : Icons.arrow_downward),
-            ),
-            IconButton(
-                tooltip: '刷新',
-                onPressed: _refreshing ? null : _refresh,
-                icon: const Icon(Icons.refresh)),
-          ],
+          body: body,
         ),
-        body: body,
-      ),
       ),
     );
   }
@@ -1560,7 +1564,7 @@ class _WebDavBrowserPageState extends State<WebDavBrowserPage> {
                     child: Container(
                       padding: const EdgeInsets.all(6),
                       decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.35),
+                          color: Colors.black.withValues(alpha: 0.35),
                           borderRadius: BorderRadius.circular(999)),
                       child: Icon(badge, size: 16, color: Colors.white),
                     ),
@@ -1614,52 +1618,52 @@ class WebDavPickSourcePage extends StatelessWidget {
       child: FutureBuilder<List<WebDavAccount>>(
         future: WebDavStore.load(),
         builder: (_, snap) {
-        final accs = snap.data ?? [];
-        if (snap.connectionState != ConnectionState.done) {
-          return const Scaffold(body: AppLoadingState());
-        }
-        if (accs.isEmpty) {
+          final accs = snap.data ?? [];
+          if (snap.connectionState != ConnectionState.done) {
+            return const Scaffold(body: AppLoadingState());
+          }
+          if (accs.isEmpty) {
+            return Scaffold(
+              appBar: GlassAppBar(title: const Text('选择 WebDAV')),
+              body: const AppEmptyState(
+                title: '还没有 WebDAV 账号',
+                subtitle: '请先在 WebDAV 页面添加',
+                icon: Icons.cloud_off_outlined,
+              ),
+            );
+          }
           return Scaffold(
             appBar: GlassAppBar(title: const Text('选择 WebDAV')),
-            body: const AppEmptyState(
-              title: '还没有 WebDAV 账号',
-              subtitle: '请先在 WebDAV 页面添加',
-              icon: Icons.cloud_off_outlined,
+            body: AppViewport(
+              child: ListView.separated(
+                padding: const EdgeInsets.all(12),
+                itemCount: accs.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                itemBuilder: (_, i) {
+                  final a = accs[i];
+                  return Card(
+                    child: ListTile(
+                      leading: const Icon(Icons.cloud_outlined),
+                      title: Text(a.name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(a.baseUrl,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () async {
+                        final src = await Navigator.push<String>(
+                          context,
+                          _noAnimRoute(_WebDavPickBrowserPage(account: a)),
+                        );
+                        if (src == null) return;
+                        if (!context.mounted) return;
+                        Navigator.pop(context, src);
+                      },
+                    ),
+                  );
+                },
+              ),
             ),
           );
-        }
-        return Scaffold(
-          appBar: GlassAppBar(title: const Text('选择 WebDAV')),
-          body: AppViewport(
-            child: ListView.separated(
-              padding: const EdgeInsets.all(12),
-              itemCount: accs.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 10),
-              itemBuilder: (_, i) {
-                final a = accs[i];
-                return Card(
-                  child: ListTile(
-                    leading: const Icon(Icons.cloud_outlined),
-                    title: Text(a.name,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: Text(a.baseUrl,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () async {
-                      final src = await Navigator.push<String>(
-                        context,
-                        _noAnimRoute(_WebDavPickBrowserPage(account: a)),
-                      );
-                      if (src == null) return;
-                      if (!context.mounted) return;
-                      Navigator.pop(context, src);
-                    },
-                  ),
-                );
-              },
-            ),
-          ),
-        );
         },
       ),
     );
@@ -1845,44 +1849,48 @@ class _WebDavPickBrowserPageState extends State<_WebDavPickBrowserPage> {
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _kDarkStatusBarStyle,
-      child: WillPopScope(
-        onWillPop: _onBack,
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) async {
+          if (didPop) return;
+          await _onBack();
+        },
         child: Scaffold(
-        appBar: GlassAppBar(
-          leading: IconButton(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: _onBack,
-              tooltip: '返回'),
-          title: !_searching
-              ? Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis)
-              : TextField(
-                  autofocus: true,
-                  decoration: const InputDecoration(
-                      hintText: '搜索…', border: InputBorder.none),
-                  onChanged: (v) => setState(() => _q = v),
-                ),
-          actions: [
-            IconButton(
-              tooltip: _searching ? '关闭搜索' : '搜索',
-              onPressed: () => setState(() {
-                _searching = !_searching;
-                if (!_searching) _q = '';
-              }),
-              icon: Icon(_searching ? Icons.close : Icons.search),
-            ),
-            IconButton(
-              tooltip: '添加当前目录',
-              onPressed: () => Navigator.pop(context, _sourceForCurrentDir()),
-              icon: const Icon(Icons.playlist_add),
-            ),
-            IconButton(
-                tooltip: '刷新',
-                onPressed: _refreshing ? null : _refresh,
-                icon: const Icon(Icons.refresh)),
-          ],
+          appBar: GlassAppBar(
+            leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _onBack,
+                tooltip: '返回'),
+            title: !_searching
+                ? Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis)
+                : TextField(
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                        hintText: '搜索…', border: InputBorder.none),
+                    onChanged: (v) => setState(() => _q = v),
+                  ),
+            actions: [
+              IconButton(
+                tooltip: _searching ? '关闭搜索' : '搜索',
+                onPressed: () => setState(() {
+                  _searching = !_searching;
+                  if (!_searching) _q = '';
+                }),
+                icon: Icon(_searching ? Icons.close : Icons.search),
+              ),
+              IconButton(
+                tooltip: '添加当前目录',
+                onPressed: () => Navigator.pop(context, _sourceForCurrentDir()),
+                icon: const Icon(Icons.playlist_add),
+              ),
+              IconButton(
+                  tooltip: '刷新',
+                  onPressed: _refreshing ? null : _refresh,
+                  icon: const Icon(Icons.refresh)),
+            ],
+          ),
+          body: body,
         ),
-        body: body,
-      ),
       ),
     );
   }

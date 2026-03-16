@@ -23,6 +23,13 @@ class EmbyStreamSourceInfo {
   const EmbyStreamSourceInfo({required this.itemId});
 }
 
+class EmbyPathSourceRef {
+  final String accountId;
+  final String path;
+
+  const EmbyPathSourceRef({required this.accountId, required this.path});
+}
+
 bool isWebDavSource(String source) {
   try {
     final u = Uri.parse(source);
@@ -42,12 +49,20 @@ bool isEmbySource(String source) {
 }
 
 String buildWebDavSource(String accountId, String relPath) {
-  final normalized = relPath
-      .split('/')
-      .where((s) => s.isNotEmpty)
-      .map(Uri.encodeComponent)
-      .join('/');
+  final normalized = encodePathPreserveSlash(relPath);
   return 'webdav://$accountId/$normalized';
+}
+
+String buildEmbySource(String accountId, String path, {String? name}) {
+  final host = accountId.trim();
+  var normalizedPath = path.trim();
+  if (normalizedPath.startsWith('/')) {
+    normalizedPath = normalizedPath.substring(1);
+  }
+  final base = 'emby://$host/$normalizedPath';
+  final n = (name ?? '').trim();
+  if (n.isEmpty) return base;
+  return '$base?name=${Uri.encodeComponent(n)}';
 }
 
 String decodeMaybeTwice(String s) {
@@ -68,11 +83,14 @@ String encodePathPreserveSlash(String relPath) {
   var value = relPath.trim();
   if (value.startsWith('/')) value = value.substring(1);
   if (value.isEmpty) return '';
-  return value
+  final endsWithSlash = value.endsWith('/');
+  final encoded = value
       .split('/')
       .where((s) => s.isNotEmpty)
       .map(Uri.encodeComponent)
       .join('/');
+  if (encoded.isEmpty) return '';
+  return endsWithSlash ? '$encoded/' : encoded;
 }
 
 WebDavSourceRef? parseWebDavSource(String source) {
@@ -103,6 +121,18 @@ EmbySourceRef? parseEmbySourceRef(String source) {
     final itemId = (m?.group(1) ?? '').trim();
     if (itemId.isEmpty) return null;
     return EmbySourceRef(accountId: u.host.trim(), itemId: itemId);
+  } catch (_) {
+    return null;
+  }
+}
+
+EmbyPathSourceRef? parseEmbySourcePath(String source) {
+  try {
+    final u = Uri.parse(source);
+    if (u.scheme.toLowerCase() != 'emby' || u.host.isEmpty) return null;
+    final segs = u.pathSegments.where((x) => x.isNotEmpty).toList();
+    final path = segs.isEmpty ? 'favorites' : segs.join('/');
+    return EmbyPathSourceRef(accountId: u.host.trim(), path: path);
   } catch (_) {
     return null;
   }

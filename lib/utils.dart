@@ -3,10 +3,8 @@ import 'dart:convert';
 import 'dart:collection';
 import 'dart:io';
 import 'dart:math'; // 确保引入 max
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
@@ -53,6 +51,18 @@ class AppSettings {
   // 播放器“上下集”按钮开关（默认开启）。
   static const String _kVideoEpisodeNavButtonsEnabled =
       '${_kPrefix}video_episode_nav_buttons_enabled';
+  // 锁定后是否仍允许“暂停 + 进度条拖动”（仅保留轻量控制，不展开完整控制层）。
+  static const String _kVideoLockPauseSeekEnabled =
+      '${_kPrefix}video_lock_pause_seek_enabled';
+  // 打开播放器目录时，是否自动定位到当前播放项附近。
+  static const String _kVideoCatalogLocateCurrentOnOpen =
+      '${_kPrefix}video_catalog_locate_current_on_open';
+  // Emby 混合库里“图片主导”的判定阈值（百分比）。
+  static const String _kEmbyImageDominantThresholdPercent =
+      '${_kPrefix}emby_image_dominant_threshold_percent';
+  // Emby 图片库简化模式：目录优先、图片就近展示（默认开启）。
+  static const String _kEmbyImageLibrarySimpleModeEnabled =
+      '${_kPrefix}emby_image_library_simple_mode_enabled';
   // 是否自动从历史进度续播（默认开启）。
   static const String _kVideoResumeEnabled = '${_kPrefix}video_resume_enabled';
   // 断点续播提示开关（默认开启）。
@@ -82,13 +92,6 @@ class AppSettings {
 
   // --- 历史记录 ---
   static const String _kHistoryEnabled = '${_kPrefix}history_enabled';
-
-  // --- 历史记录增强（已废弃） ---
-  // 说明：旧版本曾支持“打开图片时记录上级目录到历史”。
-  // 按最新需求已移除该功能，因此不再读取/写入该设置。
-  // 这里保留 key 仅用于兼容旧数据，避免 SharedPreferences 膨胀或冲突。
-  static const String _kHistoryRecordFolderOnImageOpen =
-      '${_kPrefix}history_record_folder_on_image_open';
 
   // --- 标签(Tag) ---
   static const String _kTagEnabled = '${_kPrefix}tag_enabled';
@@ -198,6 +201,52 @@ class AppSettings {
   static Future<void> setVideoEpisodeNavButtonsEnabled(bool v) async {
     final sp = await _sp();
     await sp.setBool(_kVideoEpisodeNavButtonsEnabled, v);
+  }
+
+  /// 锁定后是否仍允许“暂停 + 进度条拖动”（默认 true）。
+  static Future<bool> getVideoLockPauseSeekEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kVideoLockPauseSeekEnabled) ?? true;
+  }
+
+  static Future<void> setVideoLockPauseSeekEnabled(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kVideoLockPauseSeekEnabled, v);
+  }
+
+  /// 目录打开时是否自动定位当前播放项（默认 true）。
+  static Future<bool> getVideoCatalogLocateCurrentOnOpen() async {
+    final sp = await _sp();
+    return sp.getBool(_kVideoCatalogLocateCurrentOnOpen) ?? true;
+  }
+
+  static Future<void> setVideoCatalogLocateCurrentOnOpen(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kVideoCatalogLocateCurrentOnOpen, v);
+  }
+
+  /// Emby 混合库里“图片主导”判定阈值（默认 67）。
+  /// - 取值范围：50~90（越高越不容易触发图片主导）。
+  static Future<int> getEmbyImageDominantThresholdPercent() async {
+    final sp = await _sp();
+    final raw = sp.getInt(_kEmbyImageDominantThresholdPercent) ?? 67;
+    return raw.clamp(50, 90);
+  }
+
+  static Future<void> setEmbyImageDominantThresholdPercent(int v) async {
+    final sp = await _sp();
+    await sp.setInt(_kEmbyImageDominantThresholdPercent, v.clamp(50, 90));
+  }
+
+  /// Emby 图片库简化模式（默认 true）。
+  static Future<bool> getEmbyImageLibrarySimpleModeEnabled() async {
+    final sp = await _sp();
+    return sp.getBool(_kEmbyImageLibrarySimpleModeEnabled) ?? true;
+  }
+
+  static Future<void> setEmbyImageLibrarySimpleModeEnabled(bool v) async {
+    final sp = await _sp();
+    await sp.setBool(_kEmbyImageLibrarySimpleModeEnabled, v);
   }
 
   /// 是否自动从历史进度续播（默认 true）。

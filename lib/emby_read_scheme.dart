@@ -226,7 +226,7 @@ class EmbyReadCoordinator {
     final id = folderId.trim();
     if (id.isEmpty) return const EmbyMediaSplit();
     final include = _recursiveIncludeItemTypesForHint(hint: kindHint);
-    final recursive = await _safeList(
+    var recursive = await _safeList(
       () => client
           .listChildren(
             parentId: id,
@@ -239,6 +239,20 @@ class EmbyReadCoordinator {
           )
           .timeout(timeout),
     );
+    if (recursive.isEmpty) {
+      recursive = await _safeList(
+        () => client
+            .listChildren(
+              parentId: id,
+              recursive: true,
+              sortBy: 'DateCreated',
+              sortOrder: 'Descending',
+              limit: limit,
+              lightweight: true,
+            )
+            .timeout(timeout),
+      );
+    }
     if (recursive.isEmpty) return const EmbyMediaSplit();
     return _splitMedia(recursive, kind: kindHint);
   }
@@ -260,15 +274,28 @@ class EmbyReadCoordinator {
         hint: EmbyLibraryKindSignal.unknown,
       );
       final loaded = await Future.wait<dynamic>([
-        _safeList(
-          () => client
-              .listChildren(
-                parentId: folderId,
-                includeItemTypes: kindInclude,
-                lightweight: true,
-              )
-              .timeout(timeout),
-        ),
+        () async {
+          var children = await _safeList(
+            () => client
+                .listChildren(
+                  parentId: folderId,
+                  includeItemTypes: kindInclude,
+                  lightweight: true,
+                )
+                .timeout(timeout),
+          );
+          if (children.isEmpty) {
+            children = await _safeList(
+              () => client
+                  .listChildren(
+                    parentId: folderId,
+                    lightweight: true,
+                  )
+                  .timeout(timeout),
+            );
+          }
+          return children;
+        }(),
         _safeItem(
           () =>
               client.getItemById(folderId).timeout(const Duration(seconds: 5)),
@@ -299,7 +326,7 @@ class EmbyReadCoordinator {
     // explosion in movie/series libraries with category->movie double nesting.
     if (!favoritesMode && folderId.isNotEmpty) {
       final include = _recursiveIncludeItemTypesForHint(hint: kind);
-      final recursive = await _safeList(
+      var recursive = await _safeList(
         () => client
             .listChildren(
               parentId: folderId,
@@ -310,6 +337,18 @@ class EmbyReadCoordinator {
             )
             .timeout(const Duration(seconds: 10)),
       );
+      if (recursive.isEmpty) {
+        recursive = await _safeList(
+          () => client
+              .listChildren(
+                parentId: folderId,
+                recursive: true,
+                limit: 2000,
+                lightweight: true,
+              )
+              .timeout(const Duration(seconds: 10)),
+        );
+      }
       if (recursive.isNotEmpty) return _splitMedia(recursive, kind: kind);
     }
 
@@ -464,14 +503,14 @@ class EmbyReadCoordinator {
   }) {
     switch (hint) {
       case EmbyLibraryKindSignal.movies:
-        return 'Folder,CollectionFolder,BoxSet,Movie,Video,MusicVideo,Photo';
+        return 'Folder,CollectionFolder,PhotoAlbum,BoxSet,Movie,Video,MusicVideo,Photo';
       case EmbyLibraryKindSignal.series:
-        return 'Folder,CollectionFolder,Series,Season,Episode,Video,Photo';
+        return 'Folder,CollectionFolder,PhotoAlbum,Series,Season,Episode,Video,Photo';
       case EmbyLibraryKindSignal.homeVideos:
-        return 'Folder,CollectionFolder,Video,Photo';
+        return 'Folder,CollectionFolder,PhotoAlbum,Video,Photo';
       case EmbyLibraryKindSignal.mixed:
       case EmbyLibraryKindSignal.unknown:
-        return 'Folder,CollectionFolder,BoxSet,Series,Season,Movie,Episode,Video,MusicVideo,Photo';
+        return 'Folder,CollectionFolder,PhotoAlbum,BoxSet,Series,Season,Movie,Episode,Video,MusicVideo,Photo';
     }
   }
 

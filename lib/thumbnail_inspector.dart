@@ -14,15 +14,19 @@ class ThumbnailInspector {
   /// - 本地视频：检查列表缩略图缓存是否存在；若不存在，做一次“干跑抽帧”来捕获错误原因（不落盘）
   /// - WebDAV：当前层拿不到鉴权与真实下载地址，无法直接抽帧；会提示用户先让其落地缓存
   static Future<void> inspectAndExplain(
-      BuildContext context, {
-        required String name,
-        required bool isWebDav,
-        String? localPath,
-        String? wdHref,
-        String? wdAccountId,
-        String? wdRelPath,
-      }) async {
+    BuildContext context, {
+    required String name,
+    required bool isWebDav,
+    String? localPath,
+    String? wdHref,
+    String? wdAccountId,
+    String? wdRelPath,
+  }) async {
     if (!context.mounted) return;
+    Future<void> safeShow(List<String> lines, {String title = '封面检查结果'}) async {
+      if (!context.mounted) return;
+      await _showDialog(context, title: title, lines: lines);
+    }
 
     // WebDAV：Android 上可以通过 WebDavClient 下载到临时缓存，再用本地抽帧检查原因。
     if (isWebDav) {
@@ -35,24 +39,34 @@ class ThumbnailInspector {
 
       if (wdAccountId == null || wdAccountId.trim().isEmpty) {
         lines.add('原因：缺少 wdAccountId，无法获取鉴权信息。');
-        await _showDialog(context, title: '封面检查结果', lines: lines);
+        await safeShow(lines);
         return;
       }
 
       final ext = p.extension(name).toLowerCase();
-      final isImg = <String>{'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}.contains(ext);
-      final isVid = <String>{'.mp4', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.webm', '.m4v'}.contains(ext);
+      final isImg = <String>{'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
+          .contains(ext);
+      final isVid = <String>{
+        '.mp4',
+        '.mkv',
+        '.mov',
+        '.avi',
+        '.wmv',
+        '.flv',
+        '.webm',
+        '.m4v'
+      }.contains(ext);
 
       if (isImg) {
         lines.add('类型：图片');
         lines.add('结论：图片本身就是封面源，不需要抽帧生成。');
-        await _showDialog(context, title: '封面检查结果', lines: lines);
+        await safeShow(lines);
         return;
       }
       if (!isVid) {
         lines.add('类型：其它文件');
         lines.add('原因：当前仅支持 图片/视频 的封面检查。');
-        await _showDialog(context, title: '封面检查结果', lines: lines);
+        await safeShow(lines);
         return;
       }
 
@@ -63,20 +77,23 @@ class ThumbnailInspector {
         final acc = WebDavManager.instance.accountsMap[wdAccountId.trim()];
         if (acc == null) {
           lines.add('原因：WebDAV 账号不存在/已删除：$wdAccountId');
-          await _showDialog(context, title: '封面检查结果', lines: lines);
+          await safeShow(lines);
           return;
         }
         final client = WebDavClient(acc);
 
-        final href = (wdHref != null && wdHref!.trim().isNotEmpty)
-            ? wdHref!.trim()
-            : (wdRelPath != null && wdRelPath!.trim().isNotEmpty
-            ? client.resolveRel(wdRelPath!.trim()).toString()
-            : '');
+        final wdHrefTrimmed = wdHref?.trim() ?? '';
+        final wdRelPathTrimmed = wdRelPath?.trim() ?? '';
+
+        final href = wdHrefTrimmed.isNotEmpty
+            ? wdHrefTrimmed
+            : (wdRelPathTrimmed.isNotEmpty
+                ? client.resolveRel(wdRelPathTrimmed).toString()
+                : '');
 
         if (href.trim().isEmpty) {
           lines.add('原因：缺少 href/relPath，无法下载检查。');
-          await _showDialog(context, title: '封面检查结果', lines: lines);
+          await safeShow(lines);
           return;
         }
 
@@ -99,7 +116,8 @@ class ThumbnailInspector {
         File? localForThumb = cachedFull;
         if (localForThumb == null) {
           try {
-            final part = await client.ensureCachedForThumb(href, name, maxBytes: 4 * 1024 * 1024);
+            final part = await client.ensureCachedForThumb(href, name,
+                maxBytes: 4 * 1024 * 1024);
             if (await part.exists() && await part.length() > 0) {
               localForThumb = part;
               lines.add('✅ 已下载前缀缓存：${part.path}');
@@ -111,7 +129,7 @@ class ThumbnailInspector {
 
         if (localForThumb == null) {
           lines.add('原因：下载失败，无法进行本地抽帧。');
-          await _showDialog(context, title: '封面检查结果', lines: lines);
+          await safeShow(lines);
           return;
         }
 
@@ -120,7 +138,7 @@ class ThumbnailInspector {
         if (cachedThumb != null) {
           lines.add('✅ 已存在列表缩略图缓存：${cachedThumb.path}');
           lines.add('结论：封面已生成过；若仍看到占位图，可能是 UI 未刷新或缓存 key 变化。');
-          await _showDialog(context, title: '封面检查结果', lines: lines);
+          await safeShow(lines);
           return;
         }
 
@@ -153,49 +171,47 @@ class ThumbnailInspector {
           lines.add('异常：$e');
         }
 
-        await _showDialog(context, title: '封面检查结果', lines: lines);
+        await safeShow(lines);
         return;
       } catch (e) {
         lines.add('原因：WebDAV 检查流程异常');
         lines.add('异常：$e');
-        await _showDialog(context, title: '封面检查结果', lines: lines);
+        await safeShow(lines);
         return;
       }
     }
 
     if (localPath == null || localPath.trim().isEmpty) {
-      await _showDialog(
-        context,
-        title: '封面检查结果',
-        lines: const <String>['原因：本地路径为空（localPath 为空），无法检查/生成封面。'],
-      );
+      await safeShow(const <String>['原因：本地路径为空（localPath 为空），无法检查/生成封面。']);
       return;
     }
 
     final lp = localPath.trim();
     final f = File(lp);
     if (!await f.exists()) {
-      await _showDialog(
-        context,
-        title: '封面检查结果',
-        lines: <String>['原因：文件不存在', '路径：$lp'],
-      );
+      await safeShow(<String>['原因：文件不存在', '路径：$lp']);
       return;
     }
 
     final len = await f.length();
     if (len <= 0) {
-      await _showDialog(
-        context,
-        title: '封面检查结果',
-        lines: <String>['原因：文件大小为 0（空文件）', '路径：$lp'],
-      );
+      await safeShow(<String>['原因：文件大小为 0（空文件）', '路径：$lp']);
       return;
     }
 
     final ext = p.extension(lp).toLowerCase();
-    final isImg = <String>{'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}.contains(ext);
-    final isVid = <String>{'.mp4', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.webm', '.m4v'}.contains(ext);
+    final isImg = <String>{'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
+        .contains(ext);
+    final isVid = <String>{
+      '.mp4',
+      '.mkv',
+      '.mov',
+      '.avi',
+      '.wmv',
+      '.flv',
+      '.webm',
+      '.m4v'
+    }.contains(ext);
 
     final lines = <String>[];
     lines.add('文件：$name');
@@ -206,14 +222,14 @@ class ThumbnailInspector {
     if (isImg) {
       lines.add('类型：图片');
       lines.add('结论：图片本身就是封面源，不需要抽帧生成封面。');
-      await _showDialog(context, title: '封面检查结果', lines: lines);
+      await safeShow(lines);
       return;
     }
 
     if (!isVid) {
       lines.add('类型：其它文件');
       lines.add('原因：当前仅支持 图片/视频 的封面检查。');
-      await _showDialog(context, title: '封面检查结果', lines: lines);
+      await safeShow(lines);
       return;
     }
 
@@ -225,7 +241,7 @@ class ThumbnailInspector {
     if (cached != null) {
       lines.add('✅ 已存在列表缩略图缓存：${cached.path}');
       lines.add('结论：列表封面已经生成过。若你仍看到占位图，可能是 UI 未刷新或路径变化导致缓存 key 变化。');
-      await _showDialog(context, title: '封面检查结果', lines: lines);
+      await safeShow(lines);
       return;
     }
 
@@ -254,7 +270,7 @@ class ThumbnailInspector {
       lines.add('提示：常见是编码格式不支持、视频文件损坏、或 Android 端缺少解码能力。');
     }
 
-    await _showDialog(context, title: '封面检查结果', lines: lines);
+    await safeShow(lines);
   }
 
   /// 🟢 新增：手动检查持久化存储中是否存在缩略图
@@ -281,10 +297,10 @@ class ThumbnailInspector {
   }
 
   static Future<void> _showDialog(
-      BuildContext context, {
-        required String title,
-        required List<String> lines,
-      }) async {
+    BuildContext context, {
+    required String title,
+    required List<String> lines,
+  }) async {
     if (!context.mounted) return;
     await showDialog<void>(
       context: context,
@@ -295,7 +311,8 @@ class ThumbnailInspector {
           child: SingleChildScrollView(child: Text(lines.join('\n'))),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('确定')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('确定')),
         ],
       ),
     );

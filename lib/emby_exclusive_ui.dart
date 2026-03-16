@@ -2740,6 +2740,8 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   bool _sortAsc = true;
   int _coverHydrationToken = 0;
   bool _perDirectoryDisplaySettingsEnabled = false;
+  bool _imageLibrarySimpleModeEnabled = true;
+  int _imageDominantThresholdPercent = 67;
   int _moviePrewarmRunToken = 0;
   Timer? _coverBatchTimer;
   final Map<String, String> _pendingMovieCoverBatch = <String, String>{};
@@ -2854,6 +2856,15 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   }
 
   Future<void> _bootstrap() async {
+    try {
+      _imageDominantThresholdPercent =
+          await AppSettings.getEmbyImageDominantThresholdPercent();
+      _imageLibrarySimpleModeEnabled =
+          await AppSettings.getEmbyImageLibrarySimpleModeEnabled();
+    } catch (_) {
+      _imageDominantThresholdPercent = 67;
+      _imageLibrarySimpleModeEnabled = true;
+    }
     await _reload();
   }
 
@@ -3203,14 +3214,21 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   }
 
   List<_UiItem> _contentItemsForCurrentFolder() {
+    if (_isImageDominantMixedLibrary()) {
+      // 图片主导库：分类页严格按“当前目录直系结构”展示，
+      // 不做跨层合并/推断，避免把单层与双层目录混成抽象视图。
+      return _items;
+    }
+
     if (_libraryKind == _LibraryKind.series) {
       final directSeries = _items.where(_isSeriesDir).toList(growable: false);
       if (directSeries.isNotEmpty) return directSeries;
       final directPlayable =
           _items.where((x) => !x.isDir && !x.isImage).toList(growable: false);
-      return _collapsedSeriesVideoItems(
+      final collapsed = _collapsedSeriesVideoItems(
         _mergeUiById(directPlayable, _recursiveVideos),
       );
+      return collapsed.isNotEmpty ? collapsed : _items;
     }
 
     if (_libraryKind == _LibraryKind.movies) {
@@ -3223,20 +3241,36 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
       }
       final recursiveMovieFiles =
           _recursiveVideos.where(_isMovieItem).toList(growable: false);
-      return _mergeUiById(directMovieFiles, recursiveMovieFiles);
+      final merged = _mergeUiById(directMovieFiles, recursiveMovieFiles);
+      return merged.isNotEmpty ? merged : _items;
     }
 
     return _items;
   }
 
   List<_UiItem> _baseItemsForTab() {
+    final directImages = _items.where((x) => x.isImage).toList(growable: false);
+    final directVideos = _items
+        .where((x) => !x.isDir && _isVideoItem(x))
+        .toList(growable: false);
+    final imageHeavy = _isImageDominantMixedLibrary();
+
     switch (_topTab) {
       case _FolderTopTab.videos:
         if (_libraryKind == _LibraryKind.series) {
           return _collapsedSeriesVideoItems(_recursiveVideos);
         }
+        if (imageHeavy && directVideos.isNotEmpty) {
+          return directVideos;
+        }
         return _recursiveVideos;
       case _FolderTopTab.images:
+        if (imageHeavy && directImages.isNotEmpty) {
+          return _mergeUiById(directImages, _recursiveImages);
+        }
+        if (_recursiveImages.isEmpty && directImages.isNotEmpty) {
+          return directImages;
+        }
         return _recursiveImages;
       case _FolderTopTab.folders:
         return _contentItemsForCurrentFolder();
@@ -3535,18 +3569,35 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
 
   List<_FolderTopTab> _visibleTopTabs() {
     final tabs = <_FolderTopTab>[];
+    void addTab(_FolderTopTab tab) {
+      if (!tabs.contains(tab)) tabs.add(tab);
+    }
+
+    final imageHeavy = _isImageDominantMixedLibrary();
     if (_prefersStructuredContentTab) {
       if (_contentItemsForCurrentFolder().isNotEmpty) {
-        tabs.add(_FolderTopTab.folders);
+        addTab(_FolderTopTab.folders);
       } else if (_recursiveVideos.isNotEmpty) {
-        tabs.add(_FolderTopTab.videos);
+        addTab(_FolderTopTab.videos);
       }
+    } else if (imageHeavy) {
+      addTab(_FolderTopTab.folders);
+      if (_hasImages) addTab(_FolderTopTab.images);
+      if (_recursiveVideos.isNotEmpty) addTab(_FolderTopTab.videos);
     } else {
-      tabs.add(_FolderTopTab.videos);
-      tabs.add(_FolderTopTab.folders);
+      if (_recursiveVideos.isNotEmpty) {
+        addTab(_FolderTopTab.videos);
+      }
+      addTab(_FolderTopTab.folders);
     }
-    if (_hasImages) tabs.add(_FolderTopTab.images);
-    if (tabs.isEmpty) tabs.add(_FolderTopTab.videos);
+    if (_hasImages) addTab(_FolderTopTab.images);
+    if (tabs.isEmpty) {
+      if (_recursiveVideos.isNotEmpty) {
+        addTab(_FolderTopTab.videos);
+      } else {
+        addTab(_FolderTopTab.folders);
+      }
+    }
     return tabs;
   }
 
@@ -3555,13 +3606,33 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     required bool hasImages,
     required bool hasFolders,
   }) {
+    final imageDominantMixed = _isImageDominantMixedLibrary();
     if (_prefersStructuredContentTab && hasFolders) {
       return _FolderTopTab.folders;
+    }
+    if (imageDominantMixed) {
+      if (hasFolders) return _FolderTopTab.folders;
+      if (hasImages) return _FolderTopTab.images;
+      if (hasVideos) return _FolderTopTab.videos;
     }
     if (hasVideos) return _FolderTopTab.videos;
     if (hasFolders) return _FolderTopTab.folders;
     if (hasImages) return _FolderTopTab.images;
     return _FolderTopTab.videos;
+  }
+
+  bool _isImageDominantMixedLibrary() {
+    if (!_imageLibrarySimpleModeEnabled) return false;
+    if (_prefersStructuredContentTab) return false;
+    final imagesCount = _recursiveImages.length;
+    final videosCount = _recursiveVideos.length;
+    if (imagesCount <= 0) return false;
+    if (videosCount <= 0) return true;
+    final total = imagesCount + videosCount;
+    if (total <= 0) return false;
+    final imageRatioPct = imagesCount * 100.0 / total;
+    final threshold = _imageDominantThresholdPercent.clamp(50, 90);
+    return imageRatioPct >= threshold;
   }
 
   void _onFolderTopTabSwipe(DragEndDetails details) {

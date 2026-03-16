@@ -42,6 +42,12 @@ bool embyNativeTypeIsSeason(String type) => _normType(type) == 'season';
 
 bool embyNativeItemIsFolder(EmbyItem item) {
   if (item.isFolder) return true;
+  // 某些 Emby 媒体库会给目录条目标注 mediaType=photo/video，
+  // 但只要类型本身是 Folder/PhotoAlbum/Series/Season 等目录型，就应按目录处理。
+  if (embyNativeTypeIsFolder(item.type)) return true;
+  // 兜底：CollectionType 通常只出现在目录/视图容器上。
+  // 当服务端返回了弱化 type（或 type 缺失）时，仍应优先识别为目录。
+  if (_normCollectionType(item.collectionType).isNotEmpty) return true;
   if (embyNativeTypeIsMovie(item.type) || embyNativeTypeIsImage(item.type)) {
     return false;
   }
@@ -49,7 +55,7 @@ bool embyNativeItemIsFolder(EmbyItem item) {
   if (mediaType == 'video' || mediaType == 'photo' || mediaType == 'image') {
     return false;
   }
-  return embyNativeTypeIsFolder(item.type);
+  return false;
 }
 
 bool embyNativeItemIsImage(EmbyItem item) {

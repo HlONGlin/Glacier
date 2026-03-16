@@ -51,13 +51,13 @@ String tagKeyForEntry({
   if (isEmby) {
     final a = (embyAccountId ?? '').trim();
     final i = (embyItemId ?? '').trim();
-    if (a.isNotEmpty && i.isNotEmpty) return 'emby://$a/item:$i';
-    return 'emby://unknown';
+    if (a.isNotEmpty && i.isNotEmpty) return buildEmbySource(a, 'item:$i');
+    return buildEmbySource('unknown', 'item:');
   }
   if (!isWebDav) return (localPath ?? '').trim();
   final a = (wdAccountId ?? '').trim();
   final r = (wdRelPath ?? '').trim();
-  if (a.isNotEmpty && r.isNotEmpty) return 'webdav://$a/$r';
+  if (a.isNotEmpty && r.isNotEmpty) return buildWebDavSource(a, r);
   return (wdHref ?? '').trim();
 }
 
@@ -118,13 +118,13 @@ bool _isVidName(String name) =>
     _vidExts.contains(p.extension(name).toLowerCase());
 
 bool _tagMetaIsEmby(TagTargetMeta meta) {
-  final key = meta.key.trim().toLowerCase();
-  return meta.isEmby || key.startsWith('emby://');
+  final key = meta.key.trim();
+  return meta.isEmby || isEmbySource(key);
 }
 
 bool _tagMetaIsWebDav(TagTargetMeta meta) {
-  final key = meta.key.trim().toLowerCase();
-  return meta.isWebDav || key.startsWith('webdav://');
+  final key = meta.key.trim();
+  return meta.isWebDav || isWebDavSource(key);
 }
 
 /// Tag 管理页/详情页点击条目时，复用现有页面打开逻辑。
@@ -168,10 +168,11 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
             .showSnackBar(const SnackBar(content: Text('目录信息缺失，无法打开')));
         return;
       }
+      if (!context.mounted) return;
       await _openTagSourceAsFolder(
         context,
         title: meta.name,
-        source: 'emby://${account.id}/view:$folderId',
+        source: buildEmbySource(account.id, 'view:$folderId'),
       );
       return;
     }
@@ -238,10 +239,11 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
       try {
         final selfChildren = await client.listChildren(parentId: itemId);
         if (selfChildren.isNotEmpty) {
+          if (!context.mounted) return;
           await _openTagSourceAsFolder(
             context,
             title: meta.name,
-            source: 'emby://${account.id}/view:$itemId',
+            source: buildEmbySource(account.id, 'view:$itemId'),
           );
           return;
         }
@@ -249,12 +251,13 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
     }
 
     if (isDirByApi || meta.isDir) {
+      if (!context.mounted) return;
       await _openTagSourceAsFolder(
         context,
         title: (current != null && current.name.isNotEmpty)
             ? current.name
             : meta.name,
-        source: 'emby://${account.id}/view:$itemId',
+        source: buildEmbySource(account.id, 'view:$itemId'),
       );
       return;
     }
@@ -293,19 +296,21 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
         final pb = await client.playbackInfo(itemId);
         if (pb == null) {
           if (await tryOpenSingleImage()) return;
+          if (!context.mounted) return;
           await _openTagSourceAsFolder(
             context,
             title: meta.name,
-            source: 'emby://${account.id}/view:$itemId',
+            source: buildEmbySource(account.id, 'view:$itemId'),
           );
           return;
         }
       } catch (_) {
         if (await tryOpenSingleImage()) return;
+        if (!context.mounted) return;
         await _openTagSourceAsFolder(
           context,
           title: meta.name,
-          source: 'emby://${account.id}/view:$itemId',
+          source: buildEmbySource(account.id, 'view:$itemId'),
         );
         return;
       }
@@ -319,7 +324,7 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
 
       final paths = vids.map((it) {
         final nm = it.name.trim().isEmpty ? meta.name : it.name.trim();
-        return 'emby://${account.id}/item:${it.id}?name=${Uri.encodeComponent(nm)}';
+        return buildEmbySource(account.id, 'item:${it.id}', name: nm);
       }).toList(growable: false);
       final idx = vids.indexWhere((it) => it.id == itemId);
 
@@ -329,9 +334,7 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
         MaterialPageRoute(
           builder: (_) => VideoPlayerPage(
             videoPaths: paths.isEmpty
-                ? [
-                    'emby://${account.id}/item:$itemId?name=${Uri.encodeComponent(meta.name)}'
-                  ]
+                ? [buildEmbySource(account.id, 'item:$itemId', name: meta.name)]
                 : paths,
             initialIndex: idx < 0 ? 0 : idx,
           ),
@@ -472,10 +475,11 @@ Future<void> locateTagTarget(BuildContext context, TagTargetMeta meta) async {
       final folderId =
           directViewId.isNotEmpty ? directViewId : (ref.itemId ?? '').trim();
       if (folderId.isEmpty) return;
+      if (!context.mounted) return;
       await _openTagSourceAsFolder(
         context,
         title: '定位：${meta.name}',
-        source: 'emby://${account.id}/view:$folderId',
+        source: buildEmbySource(account.id, 'view:$folderId'),
       );
       return;
     }
@@ -488,20 +492,22 @@ Future<void> locateTagTarget(BuildContext context, TagTargetMeta meta) async {
       itemType = (await client.getItemType(itemId) ?? '').trim();
     } catch (_) {}
     if (itemType.isNotEmpty && _tagEmbyTypeIsDir(itemType)) {
+      if (!context.mounted) return;
       await _openTagSourceAsFolder(
         context,
         title: '定位：${meta.name}',
-        source: 'emby://${account.id}/view:$itemId',
+        source: buildEmbySource(account.id, 'view:$itemId'),
       );
       return;
     }
     try {
       final selfChildren = await client.listChildren(parentId: itemId);
       if (selfChildren.isNotEmpty) {
+        if (!context.mounted) return;
         await _openTagSourceAsFolder(
           context,
           title: '定位：${meta.name}',
-          source: 'emby://${account.id}/view:$itemId',
+          source: buildEmbySource(account.id, 'view:$itemId'),
         );
         return;
       }
@@ -513,10 +519,11 @@ Future<void> locateTagTarget(BuildContext context, TagTargetMeta meta) async {
 
     final sourcePath =
         (targetFolderId == itemId) ? 'favorites' : 'view:$targetFolderId';
+    if (!context.mounted) return;
     await _openTagSourceAsFolder(
       context,
       title: '定位：${meta.name}',
-      source: 'emby://${account.id}/$sourcePath',
+      source: buildEmbySource(account.id, sourcePath),
     );
     return;
   }
@@ -755,33 +762,9 @@ String _embyPreferOriginalUrl(String url) {
   }
 }
 
-class _EmbyRef {
-  final String accountId;
-  final String path;
-  const _EmbyRef({required this.accountId, required this.path});
-}
+typedef _EmbyRef = EmbyPathSourceRef;
 
-_EmbyRef? _parseEmbySource(String s) {
-  // emby://<accountId>/favorites
-  try {
-    final u = Uri.parse(s);
-    if (u.scheme.toLowerCase() != 'emby') return null;
-    final accId = u.host;
-    final segs = u.pathSegments.where((x) => x.isNotEmpty).toList();
-    final path = segs.isEmpty ? 'favorites' : segs.join('/');
-    if (accId.trim().isEmpty) return null;
-    return _EmbyRef(accountId: accId, path: path);
-  } catch (_) {
-    const prefix = 'emby://';
-    if (!s.startsWith(prefix)) return null;
-    final raw = s.substring(prefix.length);
-    final slash = raw.indexOf('/');
-    if (slash == -1) return null;
-    final accId = raw.substring(0, slash);
-    final path = raw.substring(slash + 1);
-    return _EmbyRef(accountId: accId, path: path.isEmpty ? 'favorites' : path);
-  }
-}
+_EmbyRef? _parseEmbySource(String s) => parseEmbySourcePath(s);
 
 class _WebDavRef {
   final String accountId;
@@ -793,8 +776,7 @@ class _WebDavRef {
 
 // 放在 const _imgExts = <String>{...} 这行代码的后面即可
 extension CharExt on String {
-  bool get isDigit =>
-      this.length == 1 && this.codeUnitAt(0) >= 48 && this.codeUnitAt(0) <= 57;
+  bool get isDigit => length == 1 && codeUnitAt(0) >= 48 && codeUnitAt(0) <= 57;
 }
 
 _WebDavRef? _parseWebDavSource(String s) {
@@ -809,8 +791,7 @@ _WebDavRef? _parseWebDavSource(String s) {
 
 String _buildWebDavSource(String accountId, String relPath,
     {required bool isDir}) {
-  final encoded = encodePathPreserveSlash(relPath);
-  final base = 'webdav://$accountId/${encoded.isEmpty ? '' : encoded}';
+  final base = buildWebDavSource(accountId, relPath);
   if (isDir) return base.endsWith('/') ? base : '$base/';
   return base.endsWith('/') ? base.substring(0, base.length - 1) : base;
 }
@@ -967,8 +948,8 @@ class FavoriteCollection {
 // 设计原因：收藏夹 sources 目前用字符串存储来源，使用前缀区分类型。
 // 这里做成顶层方法，方便 _CollectionCard / _MultiSourcePreview 等多个组件复用。
 // ===============================
-bool _isWebDavSource(String s) => s.startsWith('webdav://');
-bool _isEmbySource(String s) => s.startsWith('emby://');
+bool _isWebDavSource(String s) => isWebDavSource(s);
+bool _isEmbySource(String s) => isEmbySource(s);
 
 class _Store {
   static const _kV2 = 'favorite_collections_v2';
@@ -1142,6 +1123,7 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
   Future<void> _openProjection(_EmbyCollectionProjection p) async {
     await AppSettings.setLastFavoriteId(p.base.id);
     final embyOnly = p.base.copy()..sources = List<String>.from(p.embySources);
+    if (!mounted) return;
     final updated = await Navigator.push<FavoriteCollection>(
       context,
       MaterialPageRoute(builder: (_) => FolderDetailPage(collection: embyOnly)),
@@ -1169,7 +1151,7 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
 
   Map<String, List<_EmbyCollectionProjection>> _groupByAccount(
       List<_EmbyCollectionProjection> list) {
-    final out = LinkedHashMap<String, List<_EmbyCollectionProjection>>();
+    final out = <String, List<_EmbyCollectionProjection>>{};
     for (final it in list) {
       final names = it.accountIds
           .map((id) => (_accountMap[id]?.name ?? id).trim())
@@ -1546,6 +1528,7 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
     );
   }
 
+  @override
   @override
   Widget build(BuildContext context) {
     final shown = _filtered();
@@ -2354,8 +2337,10 @@ class FolderDetailPage extends StatefulWidget {
   /// 设计原因：
   /// - 用户希望“点击图片后，把上级目录记入历史”，因此历史点击需要能还原到对应目录。
   /// - 为了最小改动，这里复用现有 FolderDetailPage 的导航栈，而不是新建一套页面。
+  // ignore: library_private_types_in_public_api
   final _NavCtx? initialNav;
   final bool exitOnInitialContextBack;
+  // ignore: library_private_types_in_public_api
   const FolderDetailPage(
       {super.key,
       required this.collection,
@@ -2464,19 +2449,18 @@ class _Entry {
   bool get isEmby => embyAccountId != null;
 
   String get displayPath => isWebDav
-      ? 'webdav://$wdAccountId/${wdRelPath ?? ''}'
+      ? _buildWebDavSource(wdAccountId ?? '', wdRelPath ?? '', isDir: isDir)
       : (isEmby
           ? () {
               // ✅ 设计原因：历史记录标题需要可读的中文名称。
               // 如果仅保存 emby://.../item:<id>，播放器侧会无法从 URL 推出名称，
               // 最终历史只能显示“Emby 媒体”。因此这里把名称作为 query 参数携带。
               final id = (embyItemId ?? '').trim();
-              if (id.isEmpty) return 'emby://$embyAccountId/item:';
-              final nm = name.trim();
-              if (nm.isNotEmpty) {
-                return 'emby://$embyAccountId/item:$id?name=${Uri.encodeComponent(nm)}';
+              if (id.isEmpty) {
+                return buildEmbySource(embyAccountId ?? '', 'item:');
               }
-              return 'emby://$embyAccountId/item:$id';
+              final nm = name.trim();
+              return buildEmbySource(embyAccountId ?? '', 'item:$id', name: nm);
             }()
           : (localPath ?? '')); // Skeleton/loading placeholder support
   static const String kLoadingTypeKey = '__loading__';
@@ -2518,6 +2502,10 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _videoMiniProgressWhenHidden = true;
   bool _videoCatalogEnabled = true;
   bool _videoEpisodeNavButtonsEnabled = true;
+  bool _videoLockPauseSeekEnabled = true;
+  bool _videoCatalogLocateCurrentOnOpen = true;
+  bool _embyImageLibrarySimpleModeEnabled = true;
+  int _embyImageDominantThresholdPercent = 67;
   bool _videoResumeEnabled = true;
   bool _videoResumeHintEnabled = true;
   bool _imageVolumeKeyPaging = false;
@@ -2550,6 +2538,14 @@ class _SettingsPageState extends State<SettingsPage> {
       final catalogEnabled = await AppSettings.getVideoCatalogEnabled();
       final episodeNavEnabled =
           await AppSettings.getVideoEpisodeNavButtonsEnabled();
+      final lockPauseSeekEnabled =
+          await AppSettings.getVideoLockPauseSeekEnabled();
+      final locateCurrentOnOpen =
+          await AppSettings.getVideoCatalogLocateCurrentOnOpen();
+      final imageDominantThreshold =
+          await AppSettings.getEmbyImageDominantThresholdPercent();
+      final imageLibrarySimpleMode =
+          await AppSettings.getEmbyImageLibrarySimpleModeEnabled();
       final videoResumeEnabled = await AppSettings.getVideoResumeEnabled();
       final videoResumeHint = await AppSettings.getVideoResumeHintEnabled();
       final imageVolumePaging = await AppSettings.getImageVolumeKeyPaging();
@@ -2571,6 +2567,10 @@ class _SettingsPageState extends State<SettingsPage> {
         _videoMiniProgressWhenHidden = miniProgress;
         _videoCatalogEnabled = catalogEnabled;
         _videoEpisodeNavButtonsEnabled = episodeNavEnabled;
+        _videoLockPauseSeekEnabled = lockPauseSeekEnabled;
+        _videoCatalogLocateCurrentOnOpen = locateCurrentOnOpen;
+        _embyImageLibrarySimpleModeEnabled = imageLibrarySimpleMode;
+        _embyImageDominantThresholdPercent = imageDominantThreshold;
         _videoResumeEnabled = videoResumeEnabled;
         _videoResumeHintEnabled = videoResumeHint;
         _imageVolumeKeyPaging = imageVolumePaging;
@@ -2691,6 +2691,51 @@ class _SettingsPageState extends State<SettingsPage> {
                 onChanged: (v) async {
                   setState(() => _videoEpisodeNavButtonsEnabled = v);
                   await AppSettings.setVideoEpisodeNavButtonsEnabled(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('锁定后允许手势快进/拖动'),
+                subtitle: const Text('锁定状态下隐藏进度条，但保留双击快进和水平手势拖动'),
+                value: _videoLockPauseSeekEnabled,
+                onChanged: (v) async {
+                  setState(() => _videoLockPauseSeekEnabled = v);
+                  await AppSettings.setVideoLockPauseSeekEnabled(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('打开目录时定位当前播放项'),
+                subtitle: const Text('展开目录后第一屏优先看到当前视频附近位置'),
+                value: _videoCatalogLocateCurrentOnOpen,
+                onChanged: (v) async {
+                  setState(() => _videoCatalogLocateCurrentOnOpen = v);
+                  await AppSettings.setVideoCatalogLocateCurrentOnOpen(v);
+                },
+              ),
+              _SettingsSliderTile(
+                title: 'Emby 图片主导阈值',
+                subtitle: '混合库中图片占比达到该阈值时，默认优先目录/图片（50~90%）',
+                value: _embyImageDominantThresholdPercent.toDouble(),
+                min: 50,
+                max: 90,
+                divisions: 40,
+                valueText:
+                    '${_embyImageDominantThresholdPercent.toStringAsFixed(0)}%',
+                onChanged: (v) async {
+                  final next = v.round().clamp(50, 90);
+                  setState(() => _embyImageDominantThresholdPercent = next);
+                  await AppSettings.setEmbyImageDominantThresholdPercent(next);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Emby 图片库简化模式'),
+                subtitle: const Text('目录优先、图片就近展示，减少递归全量带来的复杂感'),
+                value: _embyImageLibrarySimpleModeEnabled,
+                onChanged: (v) async {
+                  setState(() => _embyImageLibrarySimpleModeEnabled = v);
+                  await AppSettings.setEmbyImageLibrarySimpleModeEnabled(v);
                 },
               ),
               SwitchListTile(
@@ -2844,7 +2889,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       title: '清空历史', message: '确定要清空全部历史记录吗？');
                   if (!ok) return;
                   await AppHistory.clear();
-                  if (!mounted) return;
+                  if (!context.mounted) return;
                   showAppToast(context, '已清空历史记录');
                 },
               ),
@@ -2981,7 +3026,7 @@ class _HistoryPageState extends State<HistoryPage> {
   String _fmtTime(int ms) {
     try {
       final d = DateTime.fromMillisecondsSinceEpoch(ms);
-      final two = (int v) => v.toString().padLeft(2, '0');
+      String two(int v) => v.toString().padLeft(2, '0');
       return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
     } catch (_) {
       return '';
@@ -2994,13 +3039,13 @@ class _HistoryPageState extends State<HistoryPage> {
     final h = s ~/ 3600;
     final m = (s % 3600) ~/ 60;
     final ss = s % 60;
-    if (h > 0) return '${h}小时${m}分${ss}秒';
-    if (m > 0) return '${m}分${ss}秒';
-    return '${ss}秒';
+    if (h > 0) return '$h小时$m分$ss秒';
+    if (m > 0) return '$m分$ss秒';
+    return '$ss秒';
   }
 
-  bool _isWebDavPath(String path) => path.startsWith('webdav://');
-  bool _isEmbyPath(String path) => path.startsWith('emby://');
+  bool _isWebDavPath(String path) => isWebDavSource(path);
+  bool _isEmbyPath(String path) => isEmbySource(path);
 
   /// 历史记录封面（尽量统一“封面 + 标题”的观感，类似 B 站历史列表）
   /// - kind=media：本地/WebDAV/Emby 媒体
@@ -3348,7 +3393,7 @@ class _HistoryPageState extends State<HistoryPage> {
             wdAccountId: accId,
             wdRel: rel2,
             title: title.isEmpty ? null : title);
-        source = 'webdav://$accId/$rel2';
+        source = _buildWebDavSource(accId, rel2, isDir: true);
       } else if (kind == 'emby') {
         final accId = (e['embyAccountId'] ?? '').toString().trim();
         final pth = (e['embyPath'] ?? '').toString().trim();
@@ -3359,7 +3404,7 @@ class _HistoryPageState extends State<HistoryPage> {
           title: title.isEmpty ? null : title,
         );
         // 这里的 source 只是为了“能创建收藏夹对象”，实际浏览以 initialNav 为准。
-        source = 'emby://$accId/${pth.isEmpty ? 'favorites' : pth}';
+        source = buildEmbySource(accId, pth.isEmpty ? 'favorites' : pth);
       } else {
         return;
       }
@@ -3386,8 +3431,6 @@ class _HistoryPageState extends State<HistoryPage> {
 }
 
 class _FolderDetailPageState extends State<FolderDetailPage> {
-  static Future<Map<String, WebDavAccount>> _loadWebDavAccountsMap() =>
-      _loadWebDavAccountsMapShared();
   final Map<String, Future<_CoverInfo?>> _dirCoverJobs =
       <String, Future<_CoverInfo?>>{};
 
@@ -4426,6 +4469,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
   Future<String?> _pickSingleSearchCollection() async {
     await _ensureSearchCollectionsLoaded();
+    if (!mounted) return null;
     final all = _allSearchCollections()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     if (all.isEmpty) return null;
@@ -4807,12 +4851,12 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         final accId = (ctx.wdAccountId ?? '').trim();
         if (accId.isEmpty) return '';
         final rel = _normWebDavDirForDisplayKey(ctx.wdRel);
-        return 'webdav://$accId/$rel';
+        return _buildWebDavSource(accId, rel, isDir: true);
       case _CtxKind.emby:
         final accId = (ctx.embyAccountId ?? '').trim();
         if (accId.isEmpty) return '';
         final path = _normEmbyPathForDisplayKey(ctx.embyPath);
-        return 'emby://$accId/$path';
+        return buildEmbySource(accId, path);
     }
   }
 
@@ -4821,35 +4865,31 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     if (key.isEmpty) return '';
 
     const localPrefix = 'local://';
-    const webDavPrefix = 'webdav://';
-    const embyPrefix = 'emby://';
-
     if (key.startsWith(localPrefix)) {
       final dir = _normLocalDirForDisplayKey(key.substring(localPrefix.length));
       if (dir.isEmpty) return '';
       return '$localPrefix$dir';
     }
 
-    if (key.startsWith(webDavPrefix)) {
-      final rest = key.substring(webDavPrefix.length);
-      final slash = rest.indexOf('/');
-      final accId = (slash < 0 ? rest : rest.substring(0, slash)).trim();
-      if (accId.isEmpty) return '';
-      final rel = slash < 0
-          ? ''
-          : _normWebDavDirForDisplayKey(rest.substring(slash + 1));
-      return '$webDavPrefix$accId/$rel';
+    if (isWebDavSource(key)) {
+      final ref = parseWebDavSource(key);
+      if (ref == null || ref.accountId.trim().isEmpty) return '';
+      final rel = _normWebDavDirForDisplayKey(ref.relPath);
+      return _buildWebDavSource(ref.accountId, rel, isDir: true);
     }
 
-    if (key.startsWith(embyPrefix)) {
-      final rest = key.substring(embyPrefix.length);
-      final slash = rest.indexOf('/');
-      final accId = (slash < 0 ? rest : rest.substring(0, slash)).trim();
-      if (accId.isEmpty) return '';
-      final path = slash < 0
-          ? 'favorites'
-          : _normEmbyPathForDisplayKey(rest.substring(slash + 1));
-      return '$embyPrefix$accId/$path';
+    if (isEmbySource(key)) {
+      try {
+        final u = Uri.parse(key);
+        final accId = u.host.trim();
+        if (accId.isEmpty) return '';
+        final segs = u.pathSegments.where((x) => x.isNotEmpty).toList();
+        final path = _normEmbyPathForDisplayKey(
+            segs.isEmpty ? 'favorites' : segs.join('/'));
+        return buildEmbySource(accId, path);
+      } catch (_) {
+        return '';
+      }
     }
 
     return key;
@@ -4916,7 +4956,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
   Future<void> _loadPerDirectoryDisplaySettings() async {
     bool enabled = false;
-    final loaded = LinkedHashMap<String, LayerSettings>();
+    final loaded = <String, LayerSettings>{};
     try {
       enabled =
           await AppSettings.getFavoritePerDirectoryDisplaySettingsEnabled();
@@ -5106,8 +5146,9 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
   String _folderKeyForCtx(_NavCtx ctx) {
     if (ctx.kind == _CtxKind.local) return (ctx.localDir ?? '').trim();
-    if (ctx.kind == _CtxKind.webdav)
-      return 'webdav://${ctx.wdAccountId}/${ctx.wdRel}';
+    if (ctx.kind == _CtxKind.webdav) {
+      return buildWebDavSource(ctx.wdAccountId ?? '', ctx.wdRel);
+    }
     return '';
   }
 
@@ -5116,7 +5157,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     if (!e.isWebDav) return (e.localPath ?? '').trim();
     var rel = (e.wdRelPath ?? '').trim();
     if (rel.isNotEmpty && !rel.endsWith('/')) rel = '$rel/';
-    return 'webdav://${e.wdAccountId}/$rel';
+    final base = buildWebDavSource(e.wdAccountId ?? '', rel);
+    return base.endsWith('/') ? base : '$base/';
   }
 
   String _normWebDavDirRel(String rel) {
@@ -5129,11 +5171,13 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
   String _folderCoverCacheKey(_Entry e) {
     if (!e.isDir) return '';
     if (e.isEmby) {
-      return 'emby://${e.embyAccountId}/item:${e.embyItemId ?? ''}';
+      return buildEmbySource(
+          e.embyAccountId ?? '', 'item:${e.embyItemId ?? ''}');
     }
     if (e.isWebDav) {
       final rel = _normWebDavDirRel(e.wdRelPath ?? '');
-      return 'webdav://${e.wdAccountId}/$rel';
+      final base = buildWebDavSource(e.wdAccountId ?? '', rel);
+      return base.endsWith('/') ? base : '$base/';
     }
     return 'local://${(e.localPath ?? '').trim()}';
   }
@@ -5391,7 +5435,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     if (embyAccMap.containsKey(ref.accountId)) return false;
     if (embyAccMap.length != 1) return false;
     final newId = embyAccMap.keys.first;
-    final neu = 'emby://$newId/${ref.path}';
+    final neu = buildEmbySource(newId, ref.path);
     for (int k = 0; k < widget.collection.sources.length; k++) {
       final s = widget.collection.sources[k];
       final r = _parseEmbySource(s);
@@ -6054,6 +6098,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     final a = await _ctxMenu<String>(context, pos, items);
     switch (a) {
       case 'thumb':
+        if (!mounted) return;
         await ThumbnailInspector.inspectAndExplain(
           context,
           name: e.name,
@@ -6109,6 +6154,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           embyCoverUrl: e.embyCoverUrl,
           localPath: e.localPath,
         );
+        if (!mounted) return;
         await TagUI.showTagPicker(context, target: meta);
         if (!mounted) return;
         setState(() {}); // 让 TagChipsBar / 列表过滤即时刷新
@@ -6642,8 +6688,8 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       );
     }
 
-    final selected =
-        isCompactWidth(context) ? await showMobile() : await showDesktop();
+    final compact = isCompactWidth(context);
+    final selected = compact ? await showMobile() : await showDesktop();
 
     if (!mounted) return;
     pick = selected;
@@ -6652,6 +6698,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     }
   }
 
+  @override
   Widget build(BuildContext context) {
     final list = _shown();
     final imgs = _imgs(list);
@@ -6700,8 +6747,12 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _kDarkStatusBarStyle,
-      child: WillPopScope(
-        onWillPop: _onBack,
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) async {
+          if (didPop) return;
+          await _onBack();
+        },
         child: Scaffold(
           body: Container(
             decoration: const BoxDecoration(
@@ -6746,7 +6797,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                                         color: Theme.of(context)
                                             .colorScheme
                                             .onSurface
-                                            .withOpacity(0.65),
+                                            .withValues(alpha: 0.65),
                                       ),
                                     ),
                                     Text(
@@ -7099,7 +7150,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       final next = FavoriteCollection(
         id: '_tmp_emby_${DateTime.now().millisecondsSinceEpoch}',
         name: e.name,
-        sources: ['emby://${a.id}/view:${e.embyItemId}'],
+        sources: [buildEmbySource(a.id, 'view:${e.embyItemId}')],
         layer1: widget.collection.layer1,
         layer2: widget.collection.layer2,
       );
@@ -7191,7 +7242,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       // - 统一用 emby:// 作为“稳定 key”，历史与 Tag 都能复用同一套逻辑。
       final urls = items
           .map((x) =>
-              'emby://${a.id}/item:${x.embyItemId!}?name=${Uri.encodeComponent(x.name)}')
+              buildEmbySource(a.id, 'item:${x.embyItemId!}', name: x.name))
           .toList(growable: false);
       final idx = items.indexWhere((x) => x.embyItemId == e.embyItemId);
 
@@ -7210,9 +7261,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         MaterialPageRoute(
           builder: (_) => VideoPlayerPage(
             videoPaths: urls.isEmpty
-                ? [
-                    'emby://${a.id}/item:${e.embyItemId!}?name=${Uri.encodeComponent(e.name)}'
-                  ]
+                ? [buildEmbySource(a.id, 'item:${e.embyItemId!}', name: e.name)]
                 : urls,
             initialIndex: (idx < 0) ? 0 : idx,
           ),
@@ -7641,7 +7690,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           fit: BoxFit.cover,
           errorBuilder: (_, __, ___) => Container(
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.06),
+              color: Colors.black.withValues(alpha: 0.06),
               borderRadius: BorderRadius.circular(12),
             ),
             child: const Center(
@@ -7654,7 +7703,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     // fallback icon
     return Container(
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.06),
+        color: Colors.black.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(12),
       ),
       child: const Center(
@@ -7840,14 +7889,16 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       onLongPress: () => _onEntryLongPress(e),
       child: Card(
         color: selected
-            ? Theme.of(context).colorScheme.primary.withOpacity(0.10)
+            ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.10)
             : null,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
           side: selected
               ? BorderSide(
-                  color:
-                      Theme.of(context).colorScheme.primary.withOpacity(0.55),
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primary
+                      .withValues(alpha: 0.55),
                   width: 1.3,
                 )
               : BorderSide.none,
@@ -7986,7 +8037,10 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           borderRadius: radius,
           side: selected
               ? BorderSide(
-                  color: Theme.of(context).colorScheme.primary.withOpacity(0.6),
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primary
+                      .withValues(alpha: 0.6),
                   width: 1.4,
                 )
               : BorderSide.none,
@@ -8019,7 +8073,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                         width: 20,
                         height: 20,
                         decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.32),
+                          color: Colors.black.withValues(alpha: 0.32),
                           shape: BoxShape.circle,
                         ),
                         child: const Icon(Icons.circle_outlined,
@@ -8032,7 +8086,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
                     child: Container(
                       padding: const EdgeInsets.all(6),
                       decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.35),
+                          color: Colors.black.withValues(alpha: 0.35),
                           borderRadius: BorderRadius.circular(999)),
                       child: Icon(badge, size: 16, color: Colors.white),
                     ),
@@ -8265,15 +8319,15 @@ class _FolderCoverPlaceholder extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            scheme.primary.withOpacity(0.10),
-            scheme.secondary.withOpacity(0.08),
-            scheme.tertiary.withOpacity(0.06),
+            scheme.primary.withValues(alpha: 0.10),
+            scheme.secondary.withValues(alpha: 0.08),
+            scheme.tertiary.withValues(alpha: 0.06),
           ],
         ),
       ),
       child: Center(
         child: Icon(Icons.folder_outlined,
-            color: scheme.onSurface.withOpacity(0.55), size: 26),
+            color: scheme.onSurface.withValues(alpha: 0.55), size: 26),
       ),
     );
   }
@@ -9198,7 +9252,8 @@ class _ActiveTagBanner extends StatelessWidget {
         decoration: BoxDecoration(
           border: Border(
               bottom: BorderSide(
-                  color: Theme.of(context).dividerColor.withOpacity(0.6))),
+                  color:
+                      Theme.of(context).dividerColor.withValues(alpha: 0.6))),
         ),
         child: Row(
           children: [

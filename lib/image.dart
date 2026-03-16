@@ -1,12 +1,15 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'emby.dart';
 import 'source_accounts.dart';
 import 'video.dart';
 import 'source_refs.dart';
@@ -148,6 +151,9 @@ class MediaTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final name = p.basename(filePath);
+    final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
+    final thumbW = (110 * dpr).round().clamp(110, 440);
+    final thumbH = (90 * dpr).round().clamp(90, 360);
 
     return Card(
       child: ListTile(
@@ -155,12 +161,11 @@ class MediaTile extends StatelessWidget {
           width: 110,
           height: 90,
           child: _isImage
-              ? Image.file(
-                  File(filePath),
+              ? _LocalImageThumb(
+                  filePath: filePath,
+                  cacheWidth: thumbW,
+                  cacheHeight: thumbH,
                   fit: BoxFit.cover,
-                  filterQuality: FilterQuality.medium,
-                  gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
                 )
               : _isVideo
                   ? VideoThumbImage(videoPath: filePath)
@@ -202,6 +207,125 @@ class MediaTile extends StatelessWidget {
             );
           }
         },
+      ),
+    );
+  }
+}
+
+class _AsyncLimiter {
+  final int maxConcurrent;
+  int _running = 0;
+  final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
+
+  _AsyncLimiter({required this.maxConcurrent});
+
+  Future<T> run<T>(Future<T> Function() action) async {
+    if (_running >= maxConcurrent) {
+      final gate = Completer<void>();
+      _waiters.addLast(gate);
+      await gate.future;
+    }
+    _running++;
+    try {
+      return await action();
+    } finally {
+      _running--;
+      if (_waiters.isNotEmpty) {
+        final next = _waiters.removeFirst();
+        if (!next.isCompleted) next.complete();
+      }
+    }
+  }
+}
+
+class _SharedImageProviderCache {
+  static final LinkedHashMap<String, ImageProvider> _cache =
+      LinkedHashMap<String, ImageProvider>();
+  static const int _kCap = 1024;
+
+  static ImageProvider local(
+    String filePath, {
+    required int width,
+    required int height,
+  }) {
+    final key = 'file|${filePath.trim()}|$width|$height';
+    final hit = _cache.remove(key);
+    if (hit != null) {
+      _cache[key] = hit;
+      return hit;
+    }
+    final provider = ResizeImage(
+      FileImage(File(filePath)),
+      width: width,
+      height: height,
+    );
+    _cache[key] = provider;
+    _trim();
+    return provider;
+  }
+
+  static ImageProvider network(
+    String url, {
+    Map<String, String>? headers,
+    required int width,
+    required int height,
+  }) {
+    final headerKey = headers == null || headers.isEmpty
+        ? ''
+        : headers.entries.map((e) => '${e.key}=${e.value}').join('&');
+    final key = 'net|$url|$headerKey|$width|$height';
+    final hit = _cache.remove(key);
+    if (hit != null) {
+      _cache[key] = hit;
+      return hit;
+    }
+    final provider = ResizeImage(
+      NetworkImage(url, headers: headers),
+      width: width,
+      height: height,
+    );
+    _cache[key] = provider;
+    _trim();
+    return provider;
+  }
+
+  static void _trim() {
+    while (_cache.length > _kCap) {
+      _cache.remove(_cache.keys.first);
+    }
+  }
+}
+
+class _LocalImageThumb extends StatelessWidget {
+  final String filePath;
+  final int cacheWidth;
+  final int cacheHeight;
+  final BoxFit fit;
+
+  const _LocalImageThumb({
+    required this.filePath,
+    required this.cacheWidth,
+    required this.cacheHeight,
+    this.fit = BoxFit.cover,
+  });
+
+  ImageProvider _provider() {
+    return _SharedImageProviderCache.local(
+      filePath,
+      width: cacheWidth,
+      height: cacheHeight,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: Image(
+        image: _provider(),
+        fit: fit,
+        filterQuality: FilterQuality.low,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
       ),
     );
   }
@@ -250,6 +374,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   bool _uiVisible = true;
   bool _topHover = false;
   bool _disposed = false;
+  bool _viewerPrefsLoaded = false;
 
   // ✅ 图片查看器：是否启用“音量键翻页”。
   // 说明：这是用户可选功能，避免与系统音量调节冲突。
@@ -276,10 +401,22 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   // WebDAV 解析缓存
   final Map<String, Future<({String url, Map<String, String> headers})?>>
       _webdavResolveFutureCache = {};
+  final Map<String, Future<({String url, Map<String, String> headers})?>>
+      _embyResolveFutureCache = {};
+  static final _AsyncLimiter _remoteResolveLimiter =
+      _AsyncLimiter(maxConcurrent: 3);
 
   // 预加载控制
   final Set<int> _preloadedIndices = {};
+  final Queue<int> _preloadedOrder = Queue<int>();
   int _preloadGeneration = 0;
+  int _lastPreloadCenter = -1;
+  static const int _kMaxPreloadedEntries = 240;
+  static const int _kPreloadForward = 3;
+  static const int _kPreloadBackward = 2;
+  static const int _kStripActiveRadius = 8;
+  static const int _kStripWarmForward = 10;
+  static const int _kStripWarmBackward = 4;
 
   // ============================
   // 自然排序
@@ -336,6 +473,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   }
 
   bool _isWebDavSource(String s) => isWebDavSource(s);
+  bool _isEmbySource(String s) => isEmbySource(s);
 
   Future<Map<String, dynamic>?> _loadWebDavAccountJson(String accountId) async {
     try {
@@ -375,36 +513,117 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   Future<({String url, Map<String, String> headers})?> _webdavFutureFor(
       String source) {
     return _webdavResolveFutureCache.putIfAbsent(
-        source, () => _resolveWebDav(source));
+      source,
+      () => _remoteResolveLimiter.run(() => _resolveWebDav(source)),
+    );
+  }
+
+  Future<({String url, Map<String, String> headers})?> _resolveEmby(
+      String source) async {
+    try {
+      final ref = parseEmbySourceRef(source);
+      if (ref == null) return null;
+      final map = await loadEmbyAccountsMapShared();
+      final account = map[ref.accountId];
+      if (account == null) return null;
+      final client = EmbyClient(account);
+      final url = client.originalImageUrl(ref.itemId).trim();
+      if (url.isEmpty) return null;
+      return (url: url, headers: client.imageHeaders());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<({String url, Map<String, String> headers})?> _embyFutureFor(
+      String source) {
+    return _embyResolveFutureCache.putIfAbsent(
+      source,
+      () => _remoteResolveLimiter.run(() => _resolveEmby(source)),
+    );
+  }
+
+  int _targetCacheWidth() {
+    if (!mounted) return 1920;
+    final mq = MediaQuery.of(context);
+    final dpr = mq.devicePixelRatio.clamp(1.0, 2.0);
+    return max(512, (mq.size.width * dpr).round());
+  }
+
+  int _targetCacheHeight() {
+    if (!mounted) return 1920;
+    final mq = MediaQuery.of(context);
+    final dpr = mq.devicePixelRatio.clamp(1.0, 2.0);
+    return max(512, (mq.size.height * dpr).round());
+  }
+
+  void _markPreloaded(int index) {
+    _preloadedIndices.remove(index);
+    _preloadedIndices.add(index);
+    _preloadedOrder.remove(index);
+    _preloadedOrder.add(index);
+    while (_preloadedOrder.length > _kMaxPreloadedEntries) {
+      final oldest = _preloadedOrder.removeFirst();
+      _preloadedIndices.remove(oldest);
+    }
   }
 
   // ============================
   // 预加载
   // ============================
-  Future<void> _precacheIndex(int i) async {
+  Future<void> _precacheIndex(int i, {required int generation}) async {
     if (_disposed) return;
+    if (generation != _preloadGeneration) return;
     if (i < 0 || i >= widget.imagePaths.length) return;
     if (_preloadedIndices.contains(i)) return;
 
     final src = widget.imagePaths[i];
     ImageProvider? provider;
+    final cacheWidth = _targetCacheWidth();
+    final cacheHeight = _targetCacheHeight();
 
     try {
       if (_isWebDavSource(src)) {
         final r = await _webdavFutureFor(src);
+        if (generation != _preloadGeneration) return;
         if (r == null || _disposed) return;
-        provider = NetworkImage(r.url, headers: r.headers);
+        provider = _SharedImageProviderCache.network(
+          r.url,
+          headers: r.headers,
+          width: cacheWidth,
+          height: cacheHeight,
+        );
+      } else if (_isEmbySource(src)) {
+        final r = await _embyFutureFor(src);
+        if (generation != _preloadGeneration) return;
+        if (r == null || _disposed) return;
+        provider = _SharedImageProviderCache.network(
+          r.url,
+          headers: r.headers,
+          width: cacheWidth,
+          height: cacheHeight,
+        );
       } else if (src.startsWith('http://') || src.startsWith('https://')) {
-        provider = NetworkImage(src);
+        provider = _SharedImageProviderCache.network(
+          src,
+          width: cacheWidth,
+          height: cacheHeight,
+        );
       } else {
         final f = File(src);
-        if (await f.exists()) provider = FileImage(f);
+        if (await f.exists()) {
+          provider = _SharedImageProviderCache.local(
+            src,
+            width: cacheWidth,
+            height: cacheHeight,
+          );
+        }
       }
 
       if (provider != null && mounted) {
         await precacheImage(provider, context);
-        _preloadedIndices.add(i);
-        if (_preloadedIndices.length > 200) _preloadedIndices.clear();
+        if (generation != _preloadGeneration) return;
+        _markPreloaded(i);
       }
     } catch (_) {}
   }
@@ -412,18 +631,58 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   void _updatePreloadWindow(int centerIndex) async {
     if (_disposed) return;
     _preloadGeneration++;
-    final myGen = _preloadGeneration;
+    final gen = _preloadGeneration;
+    final direction =
+        _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).sign;
+    _lastPreloadCenter = centerIndex;
+    final plan = <int>[centerIndex];
+    if (direction >= 0) {
+      for (int i = 1; i <= _kPreloadForward + 2; i++) {
+        plan.add(centerIndex + i);
+      }
+      for (int i = 1; i <= _kPreloadBackward; i++) {
+        plan.add(centerIndex - i);
+      }
+    } else {
+      for (int i = 1; i <= _kPreloadBackward + 2; i++) {
+        plan.add(centerIndex - i);
+      }
+      for (int i = 1; i <= _kPreloadForward; i++) {
+        plan.add(centerIndex + i);
+      }
+    }
+    for (final idx in plan) {
+      unawaited(_precacheIndex(idx, generation: gen));
+    }
+  }
 
-    _precacheIndex(centerIndex);
-    await _precacheIndex(centerIndex + 1);
-    if (myGen != _preloadGeneration || _disposed) return;
-
-    _precacheIndex(centerIndex - 1);
-
-    const preloadCount = 10;
-    for (int i = 2; i <= preloadCount; i++) {
-      if (myGen != _preloadGeneration || _disposed) return;
-      await _precacheIndex(centerIndex + i);
+  void _warmStripSourcesAround(int centerIndex) {
+    final direction =
+        _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).sign;
+    final plan = <int>[centerIndex];
+    if (direction >= 0) {
+      for (int i = 1; i <= _kStripWarmForward; i++) {
+        plan.add(centerIndex + i);
+      }
+      for (int i = 1; i <= _kStripWarmBackward; i++) {
+        plan.add(centerIndex - i);
+      }
+    } else {
+      for (int i = 1; i <= _kStripWarmForward; i++) {
+        plan.add(centerIndex - i);
+      }
+      for (int i = 1; i <= _kStripWarmBackward; i++) {
+        plan.add(centerIndex + i);
+      }
+    }
+    for (final idx in plan) {
+      if (idx < 0 || idx >= widget.imagePaths.length) continue;
+      final src = widget.imagePaths[idx];
+      if (_isWebDavSource(src)) {
+        unawaited(_webdavFutureFor(src));
+      } else if (_isEmbySource(src)) {
+        unawaited(_embyFutureFor(src));
+      }
     }
   }
 
@@ -458,9 +717,52 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
             return const Center(
                 child: Text('无法解析', style: TextStyle(color: Colors.white54)));
           }
-          return Image.network(
-            resolved.url,
-            headers: resolved.headers,
+          return Image(
+            image: _SharedImageProviderCache.network(
+              resolved.url,
+              headers: resolved.headers,
+              width: _targetCacheWidth(),
+              height: _targetCacheHeight(),
+            ),
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.medium,
+            gaplessPlayback: true,
+            errorBuilder: (_, __, ___) => const Center(
+              child: Icon(Icons.broken_image, color: Colors.white54),
+            ),
+            loadingBuilder: (ctx, child, loading) {
+              if (loading == null) return child;
+              final expected = loading.expectedTotalBytes;
+              final loaded = loading.cumulativeBytesLoaded;
+              final p = (expected != null && expected > 0)
+                  ? (loaded / expected).clamp(0.0, 1.0)
+                  : null;
+              return Center(
+                  child: _LoadingThumb(progress: p, lightText: !isLightBg));
+            },
+          );
+        },
+      );
+    } else if (_isEmbySource(source)) {
+      imageWidget = FutureBuilder(
+        future: _embyFutureFor(source),
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return Center(
+                child: _LoadingThumb(progress: null, lightText: !isLightBg));
+          }
+          final resolved = snap.data;
+          if (resolved == null) {
+            return const Center(
+                child: Text('无法解析', style: TextStyle(color: Colors.white54)));
+          }
+          return Image(
+            image: _SharedImageProviderCache.network(
+              resolved.url,
+              headers: resolved.headers,
+              width: _targetCacheWidth(),
+              height: _targetCacheHeight(),
+            ),
             fit: BoxFit.contain,
             filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
@@ -481,8 +783,12 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         },
       );
     } else if (source.startsWith('http://') || source.startsWith('https://')) {
-      imageWidget = Image.network(
-        source,
+      imageWidget = Image(
+        image: _SharedImageProviderCache.network(
+          source,
+          width: _targetCacheWidth(),
+          height: _targetCacheHeight(),
+        ),
         fit: BoxFit.contain,
         filterQuality: FilterQuality.medium,
         gaplessPlayback: true,
@@ -501,8 +807,12 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         },
       );
     } else {
-      imageWidget = Image.file(
-        File(source),
+      imageWidget = Image(
+        image: _SharedImageProviderCache.local(
+          source,
+          width: _targetCacheWidth(),
+          height: _targetCacheHeight(),
+        ),
         fit: BoxFit.contain,
         filterQuality: FilterQuality.medium,
         gaplessPlayback: true,
@@ -569,6 +879,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         });
       }
     } catch (_) {}
+    _viewerPrefsLoaded = true;
+    if (!mounted) return;
+    if (_stripMode) {
+      _warmStripSourcesAround(_index);
+    } else {
+      _updatePreloadWindow(_index);
+    }
   }
 
   /// 在上下拼接模式下，先用“默认占位高度”粗略跳转到目标索引附近。
@@ -671,7 +988,6 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _applyImmersiveAndOrientation(landscape: false);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _updatePreloadWindow(_index);
       _ensureKeyFocus();
     });
   }
@@ -770,7 +1086,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     } else if (_controller.hasClients) {
       _controller.jumpToPage(idx);
     }
-    _updatePreloadWindow(idx);
+    if (_viewerPrefsLoaded) {
+      if (_stripMode) {
+        _warmStripSourcesAround(idx);
+      } else {
+        _updatePreloadWindow(idx);
+      }
+    }
   }
 
   void _onMouseWheel(PointerScrollEvent e) {
@@ -819,7 +1141,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     if (bestIndex != _index) {
       _index = bestIndex;
       _indexVN.value = bestIndex;
-      _updatePreloadWindow(bestIndex);
+      if (_viewerPrefsLoaded) {
+        if (_stripMode) {
+          _warmStripSourcesAround(bestIndex);
+        } else {
+          _updatePreloadWindow(bestIndex);
+        }
+      }
     }
   }
 
@@ -844,7 +1172,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     final isLight = _bg == Colors.white;
     return BoxDecoration(
       borderRadius: BorderRadius.circular(999),
-      color: (isLight ? Colors.white : Colors.black).withOpacity(0.6),
+      color: (isLight ? Colors.white : Colors.black).withValues(alpha: 0.6),
       border: Border.all(color: Colors.white24, width: 0.5),
     );
   }
@@ -1109,10 +1437,11 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     final total = widget.imagePaths.length;
     final fg = Colors.white;
 
-    return WillPopScope(
-      onWillPop: () async {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
         _popWithCurrentSource();
-        return false;
       },
       child: Scaffold(
         backgroundColor: Colors.transparent,
@@ -1191,7 +1520,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                               controller: _stripController,
                               padding: EdgeInsets.zero,
                               itemCount: total,
-                              cacheExtent: 1200,
+                              cacheExtent:
+                                  MediaQuery.of(context).size.height * 2,
                               itemBuilder: (_, i) {
                                 final path = widget.imagePaths[i];
                                 final screenW =
@@ -1215,15 +1545,26 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                                             () => _uiVisible = !_uiVisible);
                                       },
                                       child: Center(
-                                        child: StripImageItem(
-                                          source: path,
-                                          targetW: targetW,
-                                          bg: _bg,
-                                          showIndexBadge: _showIndexBadge,
-                                          index: i,
-                                          isWebDavSource: _isWebDavSource,
-                                          webdavFutureFor: _webdavFutureFor,
-                                          placeholderH: 220, // ✅ 你要的“默认高度”
+                                        child: ValueListenableBuilder<int>(
+                                          valueListenable: _indexVN,
+                                          builder: (_, center, __) {
+                                            final eagerLoad =
+                                                (i - center).abs() <=
+                                                    _kStripActiveRadius;
+                                            return StripImageItem(
+                                              source: path,
+                                              targetW: targetW,
+                                              bg: _bg,
+                                              showIndexBadge: _showIndexBadge,
+                                              index: i,
+                                              isWebDavSource: _isWebDavSource,
+                                              webdavFutureFor: _webdavFutureFor,
+                                              isEmbySource: _isEmbySource,
+                                              embyFutureFor: _embyFutureFor,
+                                              eagerLoad: eagerLoad,
+                                              placeholderH: 220, // ✅ 你要的“默认高度”
+                                            );
+                                          },
                                         ),
                                       ),
                                     ),
@@ -1244,7 +1585,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                                       child: IconButton(
                                         icon: Icon(Icons.chevron_left,
                                             size: 48,
-                                            color: fg.withOpacity(0.5)),
+                                            color: fg.withValues(alpha: 0.5)),
                                         onPressed: _index <= 0
                                             ? null
                                             : () => _jumpToIndex(_index - 1),
@@ -1256,7 +1597,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                                       child: IconButton(
                                         icon: Icon(Icons.chevron_right,
                                             size: 48,
-                                            color: fg.withOpacity(0.5)),
+                                            color: fg.withValues(alpha: 0.5)),
                                         onPressed: _index >= total - 1
                                             ? null
                                             : () => _jumpToIndex(_index + 1),
@@ -1418,7 +1759,11 @@ class StripImageItem extends StatefulWidget {
 
   final Future<({String url, Map<String, String> headers})?> Function(String)
       webdavFutureFor;
+  final Future<({String url, Map<String, String> headers})?> Function(String)
+      embyFutureFor;
   final bool Function(String) isWebDavSource;
+  final bool Function(String) isEmbySource;
+  final bool eagerLoad;
 
   const StripImageItem({
     super.key,
@@ -1428,7 +1773,10 @@ class StripImageItem extends StatefulWidget {
     required this.showIndexBadge,
     required this.index,
     required this.webdavFutureFor,
+    required this.embyFutureFor,
     required this.isWebDavSource,
+    required this.isEmbySource,
+    this.eagerLoad = true,
     this.placeholderH = 220,
   });
 
@@ -1437,16 +1785,73 @@ class StripImageItem extends StatefulWidget {
 }
 
 class _StripImageItemState extends State<StripImageItem>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
+  static final LinkedHashMap<String, double> _ratioCache =
+      LinkedHashMap<String, double>();
+  static const int _kRatioCacheCap = 800;
+
   double? _ratio; // w/h
   bool _listening = false;
+  bool _hasEverLoaded = false;
+  Future<({String url, Map<String, String> headers})?>? _webdavFuture;
+  Future<({String url, Map<String, String> headers})?>? _embyFuture;
+
+  String get _sourceKey => widget.source.trim();
 
   bool get _lightText => widget.bg != Colors.white;
+  BoxFit get _stripFit => _ratio == null ? BoxFit.contain : BoxFit.fitWidth;
 
   double get _currentHeight {
     if (_ratio == null || _ratio! <= 0) return widget.placeholderH;
     final h = widget.targetW / _ratio!;
     return h.clamp(80.0, 20000.0);
+  }
+
+  int _decodeWidth() {
+    final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
+    return max(256, (widget.targetW * dpr).round());
+  }
+
+  int _decodeHeight() {
+    final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
+    return max(256, (_currentHeight * dpr).round());
+  }
+
+  void _rememberRatio(double ratio) {
+    if (ratio <= 0 || !ratio.isFinite) return;
+    final key = _sourceKey;
+    if (key.isEmpty) return;
+    _ratioCache.remove(key);
+    _ratioCache[key] = ratio;
+    while (_ratioCache.length > _kRatioCacheCap) {
+      _ratioCache.remove(_ratioCache.keys.first);
+    }
+  }
+
+  bool _applyCachedRatio() {
+    final cached = _ratioCache[_sourceKey];
+    if (cached == null || cached <= 0 || !cached.isFinite) return false;
+    _ratio = cached;
+    return true;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _applyCachedRatio();
+  }
+
+  @override
+  void didUpdateWidget(covariant StripImageItem oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.source != widget.source) {
+      _ratio = null;
+      _listening = false;
+      _hasEverLoaded = false;
+      _webdavFuture = null;
+      _embyFuture = null;
+      _applyCachedRatio();
+    }
   }
 
   Widget _badgeWrap(Widget child) {
@@ -1461,6 +1866,10 @@ class _StripImageItemState extends State<StripImageItem>
   }
 
   void _resolveSizeOnce(ImageProvider provider) {
+    if (_ratio != null && _ratio! > 0) return;
+    if (_applyCachedRatio()) {
+      return;
+    }
     if (_listening) return;
     _listening = true;
 
@@ -1472,6 +1881,7 @@ class _StripImageItemState extends State<StripImageItem>
       final h = info.image.height.toDouble();
       if (mounted && w > 0 && h > 0) {
         final next = w / h;
+        _rememberRatio(next);
 
         // ✅ 关键修复：拼接模式下，图片可能“同步命中缓存”（sync=true）。
         // 如果在 build()/FutureBuilder builder 过程中立刻 setState，
@@ -1489,6 +1899,7 @@ class _StripImageItemState extends State<StripImageItem>
       stream.removeListener(listener);
     }, onError: (e, s) {
       stream.removeListener(listener);
+      _listening = false;
     });
 
     stream.addListener(listener);
@@ -1496,6 +1907,7 @@ class _StripImageItemState extends State<StripImageItem>
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     return AnimatedSize(
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
@@ -1510,13 +1922,23 @@ class _StripImageItemState extends State<StripImageItem>
     );
   }
 
+  @override
+  bool get wantKeepAlive => true;
+
   Widget _buildImage() {
+    if (!widget.eagerLoad && !_hasEverLoaded) {
+      return _LoadingThumb(progress: null, lightText: _lightText);
+    }
+
     final src = widget.source;
+    final decodeW = _decodeWidth();
+    final decodeH = _decodeHeight();
 
     // WebDAV
     if (widget.isWebDavSource(src)) {
+      final future = _webdavFuture ??= widget.webdavFutureFor(src);
       return FutureBuilder(
-        future: widget.webdavFutureFor(src),
+        future: future,
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
             return _LoadingThumb(progress: null, lightText: _lightText);
@@ -1526,14 +1948,72 @@ class _StripImageItemState extends State<StripImageItem>
             return const Center(
                 child: Icon(Icons.broken_image, color: Colors.white54));
           }
+          _hasEverLoaded = true;
 
-          final provider =
-              NetworkImage(resolved.url, headers: resolved.headers);
-          _resolveSizeOnce(provider);
+          final provider = _SharedImageProviderCache.network(
+            resolved.url,
+            headers: resolved.headers,
+            width: decodeW,
+            height: decodeH,
+          );
+          _resolveSizeOnce(
+              NetworkImage(resolved.url, headers: resolved.headers));
+          if (_ratio == null) {
+            return _LoadingThumb(progress: null, lightText: _lightText);
+          }
 
           return Image(
             image: provider,
-            fit: BoxFit.fitWidth,
+            fit: _stripFit,
+            filterQuality: FilterQuality.medium,
+            gaplessPlayback: true,
+            errorBuilder: (_, __, ___) => const Center(
+                child: Icon(Icons.broken_image, color: Colors.white54)),
+            loadingBuilder: (ctx, child, loading) {
+              if (loading == null) return child;
+              final expected = loading.expectedTotalBytes;
+              final loaded = loading.cumulativeBytesLoaded;
+              final p = (expected != null && expected > 0)
+                  ? (loaded / expected).clamp(0.0, 1.0)
+                  : null;
+              return _LoadingThumb(progress: p, lightText: _lightText);
+            },
+          );
+        },
+      );
+    }
+
+    // Emby
+    if (widget.isEmbySource(src)) {
+      final future = _embyFuture ??= widget.embyFutureFor(src);
+      return FutureBuilder(
+        future: future,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return _LoadingThumb(progress: null, lightText: _lightText);
+          }
+          final resolved = snap.data;
+          if (resolved == null) {
+            return const Center(
+                child: Icon(Icons.broken_image, color: Colors.white54));
+          }
+          _hasEverLoaded = true;
+
+          final provider = _SharedImageProviderCache.network(
+            resolved.url,
+            headers: resolved.headers,
+            width: decodeW,
+            height: decodeH,
+          );
+          _resolveSizeOnce(
+              NetworkImage(resolved.url, headers: resolved.headers));
+          if (_ratio == null) {
+            return _LoadingThumb(progress: null, lightText: _lightText);
+          }
+
+          return Image(
+            image: provider,
+            fit: _stripFit,
             filterQuality: FilterQuality.medium,
             gaplessPlayback: true,
             errorBuilder: (_, __, ___) => const Center(
@@ -1554,12 +2034,20 @@ class _StripImageItemState extends State<StripImageItem>
 
     // Network
     if (src.startsWith('http://') || src.startsWith('https://')) {
-      final provider = NetworkImage(src);
-      _resolveSizeOnce(provider);
+      _hasEverLoaded = true;
+      final provider = _SharedImageProviderCache.network(
+        src,
+        width: decodeW,
+        height: decodeH,
+      );
+      _resolveSizeOnce(NetworkImage(src));
+      if (_ratio == null) {
+        return _LoadingThumb(progress: null, lightText: _lightText);
+      }
 
       return Image(
         image: provider,
-        fit: BoxFit.fitWidth,
+        fit: _stripFit,
         filterQuality: FilterQuality.medium,
         gaplessPlayback: true,
         errorBuilder: (_, __, ___) => const Center(
@@ -1577,12 +2065,20 @@ class _StripImageItemState extends State<StripImageItem>
     }
 
     // Local
-    final provider = FileImage(File(src));
-    _resolveSizeOnce(provider);
+    _hasEverLoaded = true;
+    final provider = _SharedImageProviderCache.local(
+      src,
+      width: decodeW,
+      height: decodeH,
+    );
+    _resolveSizeOnce(FileImage(File(src)));
+    if (_ratio == null) {
+      return _LoadingThumb(progress: null, lightText: _lightText);
+    }
 
     return Image(
       image: provider,
-      fit: BoxFit.fitWidth,
+      fit: _stripFit,
       filterQuality: FilterQuality.medium,
       gaplessPlayback: true,
       errorBuilder: (_, __, ___) =>
@@ -1644,15 +2140,15 @@ class _LoadingThumb extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(Icons.image_outlined,
-                      color: fg.withOpacity(0.55), size: 52),
+                      color: fg.withValues(alpha: 0.55), size: 52),
                   const SizedBox(height: 12),
                   if (progress != null) ...[
                     LinearProgressIndicator(value: progress),
                     const SizedBox(height: 10),
                     Text(
                       '${(progress! * 100).clamp(0, 100).toStringAsFixed(0)}%',
-                      style:
-                          TextStyle(color: fg.withOpacity(0.75), fontSize: 13),
+                      style: TextStyle(
+                          color: fg.withValues(alpha: 0.75), fontSize: 13),
                     ),
                   ] else ...[
                     SizedBox(
@@ -1660,14 +2156,14 @@ class _LoadingThumb extends StatelessWidget {
                       height: 32,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: fg.withOpacity(0.4),
+                        color: fg.withValues(alpha: 0.4),
                       ),
                     ),
                     const SizedBox(height: 10),
                     Text(
                       '加载中...',
-                      style:
-                          TextStyle(color: fg.withOpacity(0.75), fontSize: 13),
+                      style: TextStyle(
+                          color: fg.withValues(alpha: 0.75), fontSize: 13),
                     ),
                   ],
                 ],
@@ -1691,7 +2187,7 @@ class _IndexBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.55),
+        color: Colors.black.withValues(alpha: 0.55),
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: Colors.white24, width: 0.5),
       ),

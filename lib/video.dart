@@ -133,6 +133,37 @@ class _EmbyNowPlaying {
   const _EmbyNowPlaying({required this.account, required this.itemId});
 }
 
+class _PlayerInteractionPolicy {
+  static bool canOpenCatalog({
+    required bool hasPlaylist,
+    required bool isScreenLocked,
+    required bool catalogEnabled,
+    required bool menuAlreadyOpen,
+  }) {
+    return hasPlaylist && !isScreenLocked && catalogEnabled && !menuAlreadyOpen;
+  }
+
+  static bool canUseSeekGestures({
+    required bool isScreenLocked,
+    required bool lockPauseSeekEnabled,
+  }) {
+    return !isScreenLocked || lockPauseSeekEnabled;
+  }
+
+  static bool canUseVerticalGestures({
+    required bool isScreenLocked,
+  }) {
+    return !isScreenLocked;
+  }
+
+  static bool canUseLongPressSpeed({
+    required bool isScreenLocked,
+    required bool longPressSpeedEnabled,
+  }) {
+    return !isScreenLocked && longPressSpeedEnabled;
+  }
+}
+
 class VideoPlayerPage extends StatefulWidget {
   final List<String> videoPaths;
   final int initialIndex;
@@ -275,10 +306,14 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   bool _insPlaying = false;
   double _insRate = 1.0;
 
-  final Map<String, String> _shaderDiskCache = <String, String>{};
-
   // 目录弹窗
   bool _catalogOpen = false;
+  bool get _canOpenCatalogPopup => _PlayerInteractionPolicy.canOpenCatalog(
+        hasPlaylist: _hasPlaylist,
+        isScreenLocked: _isScreenLocked,
+        catalogEnabled: _videoCatalogEnabled,
+        menuAlreadyOpen: _catalogOpen,
+      );
   Timer? _catalogHotspotTimer;
 
   // 手势控制相关状态
@@ -328,8 +363,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   // 拖动进度相关
   Duration _dragStartPos = Duration.zero;
   Duration _dragTargetPos = Duration.zero;
-  double _dragAccumulator = 0.0;
-  double _dragStartVal = 0.0;
 
   // Getters
   bool get _hasPlaylist => _sources.isNotEmpty;
@@ -361,21 +394,11 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   }
 
   bool _isWebDavSource(String s) {
-    try {
-      final u = Uri.parse(s);
-      return u.scheme.toLowerCase() == 'webdav' && u.host.isNotEmpty;
-    } catch (_) {
-      return false;
-    }
+    return isWebDavSource(s);
   }
 
   bool _isEmbySource(String s) {
-    try {
-      final u = Uri.parse(s);
-      return u.scheme.toLowerCase() == 'emby' && u.host.isNotEmpty;
-    } catch (_) {
-      return false;
-    }
+    return isEmbySource(s);
   }
 
   Future<Media?> _createEmbyMediaAsync(
@@ -384,12 +407,10 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     bool prefetchPlaybackInfo = false,
   }) async {
     try {
-      // source: emby://<accId>/item:<itemId>?name=xxx
       final u = Uri.parse(source);
-      final accId = u.host.trim();
-      final raw = u.path.startsWith('/') ? u.path.substring(1) : u.path;
-      final m = RegExp(r'^item:([^/?#]+)').firstMatch(raw);
-      final itemId = m?.group(1) ?? '';
+      final ref = parseEmbySourceRef(source);
+      final accId = ref?.accountId.trim() ?? '';
+      final itemId = ref?.itemId.trim() ?? '';
       if (accId.isEmpty || itemId.isEmpty) return null;
 
       final acc = accMap[accId];
@@ -783,9 +804,9 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       // 这会导致标题退化为“Emby 媒体”。为了让中文标题稳定显示，这里做一次轻量补全。
       if (title == 'Emby 媒体' && _isEmbySource(p0)) {
         try {
-          final m = RegExp(r'^emby://([^/]+)/item:([^/?#]+)').firstMatch(p0);
-          final accId = (m?.group(1) ?? '').trim();
-          final itemId = (m?.group(2) ?? '').trim();
+          final ref = parseEmbySourceRef(p0);
+          final accId = ref?.accountId.trim() ?? '';
+          final itemId = ref?.itemId.trim() ?? '';
           if (accId.isNotEmpty && itemId.isNotEmpty) {
             final accs = await EmbyStore.load();
             // 注意：如果未找到对应账号，则不强行请求，避免误用 token。
@@ -1554,6 +1575,8 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       }
     } catch (_) {}
 
+    unawaited(_stopEmbyPlaybackCheckIns(reason: 'desktop dispose'));
+
     // ✅ 退出播放器：停止自动旋转监听，并解锁原生方向锁，避免影响其它页面。
     _stopAutoRotateIfAny();
     _unlockNativeOrientation();
@@ -1815,35 +1838,45 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   }
 
   Future<void> _showCatalogPopup({bool fromHotspot = false}) async {
-    if (!_hasPlaylist) return;
-    if (_isScreenLocked) return;
-    if (!_videoCatalogEnabled) return;
-    if (_catalogOpen) return;
+    if (!_canOpenCatalogPopup) return;
     _pokeUI();
     setState(() => _catalogOpen = true);
-
-    // ✅ 目录增强：如果当前只有 1 条播放源（常见：从历史打开），尝试补全同目录/同季播放列表。
-    // 仅在“第一次打开目录”时触发，避免反复网络请求。
-    if (_sources.length <= 1 && !_sourcesExpandedOnce) {
-      await _runWithBusyDialog(
-        () => _ensureCatalogSourcesReady(),
-        message: '正在加载同目录视频...',
-      );
-    }
-
-    // ✅ 目录封面预热：优先预热“当前集 + 前后各 2 集”，让打开目录时就能看到封面。
-    // 说明：移动端边播边拉封面可能抢带宽，因此仅做小范围预热，且并发=1。
-    _prefetchCatalogThumbsAround(_index);
-
     int? picked;
-    if (_isMobile) {
-      picked = await _showCatalogBottomSheetMobile();
-    } else {
-      picked = await _showCatalogSidePanelDesktop();
+    try {
+      // ✅ 目录增强：如果当前只有 1 条播放源（常见：从历史打开），尝试补全同目录/同季播放列表。
+      // 仅在“第一次打开目录”时触发，避免反复网络请求。
+      if (_sources.length <= 1 && !_sourcesExpandedOnce) {
+        await _runWithBusyDialog(
+          () => _ensureCatalogSourcesReady(),
+          message: '正在加载同目录视频...',
+        );
+      }
+
+      // ✅ 目录封面预热：优先预热“当前集 + 前后各 2 集”，让打开目录时就能看到封面。
+      // 说明：移动端边播边拉封面可能抢带宽，因此仅做小范围预热，且并发=1。
+      _prefetchCatalogThumbsAround(_index);
+
+      if (_isMobile) {
+        picked = await _showCatalogBottomSheetMobile();
+      } else {
+        picked = await _showCatalogSidePanelDesktop();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('目录打开失败：${redactSensitiveText(e.toString())}'),
+          ),
+        );
+      }
+      return;
+    } finally {
+      if (mounted) {
+        setState(() => _catalogOpen = false);
+      }
     }
 
     if (!mounted) return;
-    setState(() => _catalogOpen = false);
     if (picked != null && picked != _index) {
       setState(() => _index = picked!);
       await _player.jump(_index);
@@ -2291,7 +2324,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       if (baseUrl.isEmpty) return null;
 
       final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
-      final relEncoded = _encodePathPreserveSlash(relDecoded);
+      final relEncoded = encodePathPreserveSlash(relDecoded);
       final url = Uri.parse(base).resolve(relEncoded).toString();
       final token = base64Encode(utf8.encode('$username:$password'));
       return (
@@ -2856,19 +2889,8 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     return s.substring(0, idx + 1);
   }
 
-  String _encodePathPreserveSlash(String relDecoded) {
-    final segs = relDecoded
-        .split('/')
-        .where((s) => s.isNotEmpty)
-        .map(Uri.encodeComponent)
-        .toList();
-    final encoded = segs.join('/');
-    return relDecoded.endsWith('/') ? '$encoded/' : encoded;
-  }
-
   String _buildWebDavSource(String accountId, String relDecoded) {
-    final encoded = _encodePathPreserveSlash(relDecoded);
-    return 'webdav://$accountId/$encoded';
+    return buildWebDavSource(accountId, relDecoded);
   }
 
   _WebDavRef? _parseWebDavSourceForListing(String source) {
@@ -2887,7 +2909,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     client.connectionTimeout = const Duration(seconds: 15);
     try {
       final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
-      final folderEncoded = _encodePathPreserveSlash(relFolder);
+      final folderEncoded = encodePathPreserveSlash(relFolder);
       final url =
           Uri.parse(base).resolve(folderEncoded.isEmpty ? '' : folderEncoded);
 
@@ -3008,18 +3030,9 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   // -------- Emby source parsing helper --------
 
   _EmbyRef? _parseEmbySourceRef(String source) {
-    try {
-      final u = Uri.parse(source);
-      if (u.scheme != 'emby') return null;
-      final accId = u.host;
-      final pth = u.path;
-      final m = RegExp(r'item:([^/]+)').firstMatch(pth);
-      final itemId = (m?.group(1) ?? '').trim();
-      if (accId.isEmpty || itemId.isEmpty) return null;
-      return _EmbyRef(accountId: accId, itemId: itemId);
-    } catch (_) {
-      return null;
-    }
+    final parsed = parseEmbySourceRef(source);
+    if (parsed == null) return null;
+    return _EmbyRef(accountId: parsed.accountId, itemId: parsed.itemId);
   }
 
   Future<void> _showRateSubMenu(
@@ -3132,7 +3145,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.keyL) {
-      if (!_videoCatalogEnabled) return KeyEventResult.handled;
+      if (!_canOpenCatalogPopup) return KeyEventResult.handled;
       _showCatalogPopup();
       return KeyEventResult.handled;
     }
@@ -3155,12 +3168,16 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     _gestureType = 'seek';
     _dragStartPos = _player.state.position;
     _dragTargetPos = _dragStartPos;
-    _dragAccumulator = 0.0;
     setState(() {});
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    if (_isScreenLocked) return;
+    if (!_PlayerInteractionPolicy.canUseSeekGestures(
+      isScreenLocked: _isScreenLocked,
+      lockPauseSeekEnabled: false,
+    )) {
+      return;
+    }
     if (!_ready) return;
     final deltaMs = (details.delta.dx * 600).toInt();
     final duration = _player.state.duration;
@@ -3190,18 +3207,20 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   }
 
   void _onVerticalDragStart(DragStartDetails details) {
-    if (_isScreenLocked) return;
+    if (!_PlayerInteractionPolicy.canUseVerticalGestures(
+      isScreenLocked: _isScreenLocked,
+    )) {
+      return;
+    }
     if (!_ready) return;
     final width = MediaQuery.of(context).size.width;
     _gestureActive = true;
 
     if (details.globalPosition.dx > width / 2) {
       _gestureType = 'volume';
-      _dragStartVal = _volume;
       _gestureIcon = Icons.volume_up;
     } else {
       _gestureType = 'brightness';
-      _dragStartVal = _brightness;
       _gestureIcon = Icons.brightness_6;
     }
     setState(() {});
@@ -3265,19 +3284,45 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
           },
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onHorizontalDragStart: _isMobile && !_isScreenLocked
+            onHorizontalDragStart: _isMobile &&
+                    _PlayerInteractionPolicy.canUseSeekGestures(
+                      isScreenLocked: _isScreenLocked,
+                      lockPauseSeekEnabled: false,
+                    )
                 ? _onHorizontalDragStart
                 : null, // 锁定状态下稍微限制手势防止误触(可选)
-            onHorizontalDragUpdate:
-                _isMobile && !_isScreenLocked ? _onHorizontalDragUpdate : null,
-            onHorizontalDragEnd:
-                _isMobile && !_isScreenLocked ? _onHorizontalDragEnd : null,
-            onVerticalDragStart:
-                _isMobile && !_isScreenLocked ? _onVerticalDragStart : null,
-            onVerticalDragUpdate:
-                _isMobile && !_isScreenLocked ? _onVerticalDragUpdate : null,
-            onVerticalDragEnd:
-                _isMobile && !_isScreenLocked ? _onVerticalDragEnd : null,
+            onHorizontalDragUpdate: _isMobile &&
+                    _PlayerInteractionPolicy.canUseSeekGestures(
+                      isScreenLocked: _isScreenLocked,
+                      lockPauseSeekEnabled: false,
+                    )
+                ? _onHorizontalDragUpdate
+                : null,
+            onHorizontalDragEnd: _isMobile &&
+                    _PlayerInteractionPolicy.canUseSeekGestures(
+                      isScreenLocked: _isScreenLocked,
+                      lockPauseSeekEnabled: false,
+                    )
+                ? _onHorizontalDragEnd
+                : null,
+            onVerticalDragStart: _isMobile &&
+                    _PlayerInteractionPolicy.canUseVerticalGestures(
+                      isScreenLocked: _isScreenLocked,
+                    )
+                ? _onVerticalDragStart
+                : null,
+            onVerticalDragUpdate: _isMobile &&
+                    _PlayerInteractionPolicy.canUseVerticalGestures(
+                      isScreenLocked: _isScreenLocked,
+                    )
+                ? _onVerticalDragUpdate
+                : null,
+            onVerticalDragEnd: _isMobile &&
+                    _PlayerInteractionPolicy.canUseVerticalGestures(
+                      isScreenLocked: _isScreenLocked,
+                    )
+                ? _onVerticalDragEnd
+                : null,
 
             // 若要锁定状态下依然允许手势，将上面的 && !_isScreenLocked 去掉即可。
             // 建议：保留手势，下面的 onHorizontalDragStart: _isMobile ? _onHorizontalDragStart : null, 即可
@@ -3308,8 +3353,10 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
             // - 松开：恢复到原倍速；
             // - 若用户在设置中关闭此功能，则不生效。
             onLongPressStart: _isMobile &&
-                    !_isScreenLocked &&
-                    _longPressSpeedEnabled
+                    _PlayerInteractionPolicy.canUseLongPressSpeed(
+                      isScreenLocked: _isScreenLocked,
+                      longPressSpeedEnabled: _longPressSpeedEnabled,
+                    )
                 ? (_) async {
                     if (!_ready) return;
                     // 防抖：如果系统回调多次，确保只提升一次。
@@ -3337,19 +3384,22 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
                     }
                   }
                 : null,
-            onLongPressEnd:
-                _isMobile && !_isScreenLocked && _longPressSpeedEnabled
-                    ? (_) async {
-                        final back = _rateBeforeLongPress;
-                        _rateBeforeLongPress = null;
-                        if (back == null) return;
+            onLongPressEnd: _isMobile &&
+                    _PlayerInteractionPolicy.canUseLongPressSpeed(
+                      isScreenLocked: _isScreenLocked,
+                      longPressSpeedEnabled: _longPressSpeedEnabled,
+                    )
+                ? (_) async {
+                    final back = _rateBeforeLongPress;
+                    _rateBeforeLongPress = null;
+                    if (back == null) return;
 
-                        try {
-                          await _player.setRate(back);
-                        } catch (_) {}
-                        if (mounted) setState(() => _rate = back);
-                      }
-                    : null,
+                    try {
+                      await _player.setRate(back);
+                    } catch (_) {}
+                    if (mounted) setState(() => _rate = back);
+                  }
+                : null,
             child: MouseRegion(
               cursor: (!_isDesktop || !_cursorHidden)
                   ? SystemMouseCursors.basic
@@ -3420,8 +3470,8 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
                   Positioned.fill(
                     child: IgnorePointer(
                       child: Container(
-                        color: Colors.black.withOpacity(
-                            (1.0 - _brightness).clamp(0.0, 1.0) * 0.75),
+                        color: Colors.black.withValues(
+                            alpha: (1.0 - _brightness).clamp(0.0, 1.0) * 0.75),
                       ),
                     ),
                   ),
@@ -3433,7 +3483,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 14, vertical: 10),
                         decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.5),
+                          color: Colors.black.withValues(alpha: 0.5),
                           borderRadius: BorderRadius.circular(10),
                         ),
                         child: const Row(
@@ -3547,16 +3597,14 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
                       child: MouseRegion(
                         opaque: false,
                         onEnter: (_) {
-                          if (!_isDesktop ||
-                              _catalogOpen ||
-                              !_videoCatalogEnabled) {
+                          if (!_isDesktop || !_canOpenCatalogPopup) {
                             return;
                           }
                           _catalogHotspotTimer?.cancel();
                           _catalogHotspotTimer =
                               Timer(const Duration(milliseconds: 300), () {
                             if (!mounted) return;
-                            if (_catalogOpen) return;
+                            if (!_canOpenCatalogPopup) return;
                             _showCatalogPopup(fromHotspot: true);
                           });
                         },
@@ -4354,6 +4402,9 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   bool _showMiniProgressWhenHidden = true;
   bool _videoCatalogEnabled = true;
   bool _videoEpisodeNavButtonsEnabled = true;
+  bool _lockPauseSeekEnabled = true;
+  bool _catalogLocateCurrentOnOpen = true;
+  bool _catalogMenuOpen = false;
   bool _isScreenLocked = false;
   bool _lockButtonVisible = true;
   double _brightness = 1.0;
@@ -4370,6 +4421,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   bool _gestureActive = false;
   String _gestureType = '';
   String _gestureText = '';
+  bool get _canOpenCatalogMenu => _PlayerInteractionPolicy.canOpenCatalog(
+        hasPlaylist: _hasPlaylist,
+        isScreenLocked: _isScreenLocked,
+        catalogEnabled: _videoCatalogEnabled,
+        menuAlreadyOpen: _catalogMenuOpen,
+      );
   IconData? _gestureIcon;
   Timer? _gestureHideTimer;
   Timer? _lockButtonHideTimer;
@@ -4477,6 +4534,10 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       final catalogEnabled = await AppSettings.getVideoCatalogEnabled();
       final episodeNavButtonsEnabled =
           await AppSettings.getVideoEpisodeNavButtonsEnabled();
+      final lockPauseSeekEnabled =
+          await AppSettings.getVideoLockPauseSeekEnabled();
+      final catalogLocateCurrentOnOpen =
+          await AppSettings.getVideoCatalogLocateCurrentOnOpen();
       final dblTap = await AppSettings.getDoubleTapSeekSeconds();
       if (!mounted) return;
       setState(() {
@@ -4489,6 +4550,8 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
         _showMiniProgressWhenHidden = miniProgress;
         _videoCatalogEnabled = catalogEnabled;
         _videoEpisodeNavButtonsEnabled = episodeNavButtonsEnabled;
+        _lockPauseSeekEnabled = lockPauseSeekEnabled;
+        _catalogLocateCurrentOnOpen = catalogLocateCurrentOnOpen;
         _doubleTapSeekSeconds = dblTap.clamp(5, 60);
       });
     } catch (_) {}
@@ -4734,20 +4797,11 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   bool _isWebDavSource(String s) {
-    try {
-      final u = Uri.parse(s);
-      return u.scheme.toLowerCase() == 'webdav' && u.host.isNotEmpty;
-    } catch (_) {}
-    return false;
+    return isWebDavSource(s);
   }
 
   bool _isEmbySource(String s) {
-    try {
-      final u = Uri.parse(s);
-      return u.scheme.toLowerCase() == 'emby' && u.host.isNotEmpty;
-    } catch (_) {
-      return false;
-    }
+    return isEmbySource(s);
   }
 
   Future<Map<String, Map<String, String>>> _loadWebDavAccountCache() async {
@@ -5267,70 +5321,88 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   Future<void> _showCatalogMenu() async {
-    if (!_hasPlaylist || !_videoCatalogEnabled) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      isScrollControlled: true,
-      builder: (ctx) {
-        return SafeArea(
-          child: SizedBox(
-            height: min(MediaQuery.of(ctx).size.height * 0.78, 540),
-            child: ListView.builder(
-              itemCount: _sources.length,
-              itemBuilder: (_, i) {
-                final selected = i == _index;
-                final source = _sources[i];
-                return ListTile(
-                  dense: true,
-                  minLeadingWidth: 72,
-                  leading: SizedBox(
-                    width: 72,
-                    height: 40,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        _buildMobileCatalogCover(source, cacheWidth: 260),
-                        if (selected)
-                          DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: Colors.black45,
-                              borderRadius: BorderRadius.circular(6),
+    if (!_canOpenCatalogMenu) return;
+    if (!mounted) return;
+    setState(() => _catalogMenuOpen = true);
+    const itemExtent = 56.0;
+    final viewportHeight =
+        min(MediaQuery.of(context).size.height * 0.78, 540.0);
+    final centeredOffset =
+        _index * itemExtent - (viewportHeight - itemExtent) / 2;
+    final initialOffset =
+        _catalogLocateCurrentOnOpen ? max(0.0, centeredOffset) : 0.0;
+    final controller = ScrollController(initialScrollOffset: initialOffset);
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: const Color(0xFF1A1A1A),
+        isScrollControlled: true,
+        builder: (ctx) {
+          return SafeArea(
+            child: SizedBox(
+              height: min(MediaQuery.of(ctx).size.height * 0.78, 540),
+              child: ListView.builder(
+                controller: controller,
+                itemCount: _sources.length,
+                itemBuilder: (_, i) {
+                  final selected = i == _index;
+                  final source = _sources[i];
+                  return ListTile(
+                    dense: true,
+                    minLeadingWidth: 72,
+                    leading: SizedBox(
+                      width: 72,
+                      height: 40,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          _buildMobileCatalogCover(source, cacheWidth: 260),
+                          if (selected)
+                            DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: Colors.black45,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Icon(
+                                Icons.play_arrow,
+                                color: Colors.white,
+                                size: 18,
+                              ),
                             ),
-                            child: const Icon(
-                              Icons.play_arrow,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  title: Text(
-                    _displayName(source),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: selected ? Colors.white : Colors.white70,
+                    title: Text(
+                      _displayName(source),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: selected ? Colors.white : Colors.white70,
+                      ),
                     ),
-                  ),
-                  trailing: selected
-                      ? const Icon(Icons.check_circle,
-                          color: Colors.white70, size: 18)
-                      : null,
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    if (i != _index) {
-                      unawaited(_jumpTo(i));
-                    }
-                  },
-                );
-              },
+                    trailing: selected
+                        ? const Icon(Icons.check_circle,
+                            color: Colors.white70, size: 18)
+                        : null,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      if (i != _index) {
+                        unawaited(_jumpTo(i));
+                      }
+                    },
+                  );
+                },
+              ),
             ),
-          ),
-        );
-      },
-    );
+          );
+        },
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _catalogMenuOpen = false);
+      }
+      controller.dispose();
+    }
   }
 
   Widget _mobileCatalogCoverPlaceholder() {
@@ -5601,7 +5673,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   Future<void> _onDoubleTap() async {
-    if (_isScreenLocked) return;
+    if (!_PlayerInteractionPolicy.canUseSeekGestures(
+      isScreenLocked: _isScreenLocked,
+      lockPauseSeekEnabled: _lockPauseSeekEnabled,
+    )) {
+      return;
+    }
     final pos = _lastDoubleTapPos;
     final box = context.findRenderObject();
     if (pos != null && box is RenderBox) {
@@ -5623,7 +5700,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   void _onHorizontalDragStart(DragStartDetails details) {
-    if (_isScreenLocked) return;
+    if (!_PlayerInteractionPolicy.canUseSeekGestures(
+      isScreenLocked: _isScreenLocked,
+      lockPauseSeekEnabled: _lockPauseSeekEnabled,
+    )) {
+      return;
+    }
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
     _gestureType = 'seek';
@@ -5667,7 +5749,11 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   void _onVerticalDragStart(DragStartDetails details) {
-    if (_isScreenLocked) return;
+    if (!_PlayerInteractionPolicy.canUseVerticalGestures(
+      isScreenLocked: _isScreenLocked,
+    )) {
+      return;
+    }
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
     final width = MediaQuery.of(context).size.width;
@@ -5716,7 +5802,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   }
 
   Future<void> _onLongPressStart(LongPressStartDetails details) async {
-    if (_isScreenLocked || !_longPressSpeedEnabled) return;
+    if (!_PlayerInteractionPolicy.canUseLongPressSpeed(
+      isScreenLocked: _isScreenLocked,
+      longPressSpeedEnabled: _longPressSpeedEnabled,
+    )) {
+      return;
+    }
     if (_rateBeforeLongPress != null) return;
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
@@ -6129,22 +6220,59 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
           onTap: _toggleControls,
           onDoubleTapDown: _onDoubleTapDown,
           onDoubleTap: _onDoubleTap,
-          onHorizontalDragStart:
-              initialized && !_isScreenLocked ? _onHorizontalDragStart : null,
-          onHorizontalDragUpdate:
-              initialized && !_isScreenLocked ? _onHorizontalDragUpdate : null,
-          onHorizontalDragEnd:
-              initialized && !_isScreenLocked ? _onHorizontalDragEnd : null,
-          onVerticalDragStart:
-              initialized && !_isScreenLocked ? _onVerticalDragStart : null,
-          onVerticalDragUpdate:
-              initialized && !_isScreenLocked ? _onVerticalDragUpdate : null,
-          onVerticalDragEnd:
-              initialized && !_isScreenLocked ? _onVerticalDragEnd : null,
-          onLongPressStart:
-              initialized && !_isScreenLocked ? _onLongPressStart : null,
-          onLongPressEnd:
-              initialized && !_isScreenLocked ? _onLongPressEnd : null,
+          onHorizontalDragStart: initialized &&
+                  _PlayerInteractionPolicy.canUseSeekGestures(
+                    isScreenLocked: _isScreenLocked,
+                    lockPauseSeekEnabled: _lockPauseSeekEnabled,
+                  )
+              ? _onHorizontalDragStart
+              : null,
+          onHorizontalDragUpdate: initialized &&
+                  _PlayerInteractionPolicy.canUseSeekGestures(
+                    isScreenLocked: _isScreenLocked,
+                    lockPauseSeekEnabled: _lockPauseSeekEnabled,
+                  )
+              ? _onHorizontalDragUpdate
+              : null,
+          onHorizontalDragEnd: initialized &&
+                  _PlayerInteractionPolicy.canUseSeekGestures(
+                    isScreenLocked: _isScreenLocked,
+                    lockPauseSeekEnabled: _lockPauseSeekEnabled,
+                  )
+              ? _onHorizontalDragEnd
+              : null,
+          onVerticalDragStart: initialized &&
+                  _PlayerInteractionPolicy.canUseVerticalGestures(
+                    isScreenLocked: _isScreenLocked,
+                  )
+              ? _onVerticalDragStart
+              : null,
+          onVerticalDragUpdate: initialized &&
+                  _PlayerInteractionPolicy.canUseVerticalGestures(
+                    isScreenLocked: _isScreenLocked,
+                  )
+              ? _onVerticalDragUpdate
+              : null,
+          onVerticalDragEnd: initialized &&
+                  _PlayerInteractionPolicy.canUseVerticalGestures(
+                    isScreenLocked: _isScreenLocked,
+                  )
+              ? _onVerticalDragEnd
+              : null,
+          onLongPressStart: initialized &&
+                  _PlayerInteractionPolicy.canUseLongPressSpeed(
+                    isScreenLocked: _isScreenLocked,
+                    longPressSpeedEnabled: _longPressSpeedEnabled,
+                  )
+              ? _onLongPressStart
+              : null,
+          onLongPressEnd: initialized &&
+                  _PlayerInteractionPolicy.canUseLongPressSpeed(
+                    isScreenLocked: _isScreenLocked,
+                    longPressSpeedEnabled: _longPressSpeedEnabled,
+                  )
+              ? _onLongPressEnd
+              : null,
           child: Stack(
             children: [
               Center(
@@ -6338,9 +6466,8 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                                 color: Colors.white),
                           ),
                           IconButton(
-                            onPressed: (_hasPlaylist && _videoCatalogEnabled)
-                                ? _showCatalogMenu
-                                : null,
+                            onPressed:
+                                _canOpenCatalogMenu ? _showCatalogMenu : null,
                             icon: const Icon(Icons.playlist_play,
                                 color: Colors.white),
                           ),
