@@ -214,23 +214,22 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
     final isImageByMeta = meta.kind == TagKind.image;
     final isVideoByMeta = meta.kind == TagKind.video;
     Future<bool> tryOpenSingleImage() async {
-      var single = '';
-      if (current != null) {
-        single = client.bestImageUrl(current).trim();
-      }
-      if (single.isEmpty) {
-        single = _embyPreferOriginalUrl((meta.embyCoverUrl ?? '').trim());
-      }
-      if (single.isEmpty) {
-        single = client.originalImageUrl(itemId).trim();
-      }
+      final single = buildEmbySource(account.id, 'item:$itemId').trim();
       if (single.isEmpty) return false;
+      final aspectRatios = <double?>[
+        current?.primaryImageAspectRatio,
+      ];
       if (!context.mounted) return true;
       await Navigator.push(
         context,
         MaterialPageRoute(
-            builder: (_) =>
-                ImageViewerPage(imagePaths: [single], initialIndex: 0)),
+          builder: (_) => ImageViewerPage(
+            imagePaths: [single],
+            initialIndex: 0,
+            sourceKeys: [single],
+            sourceAspectRatios: aspectRatios,
+          ),
+        ),
       );
       return true;
     }
@@ -268,19 +267,26 @@ Future<void> openTagTarget(BuildContext context, TagTargetMeta meta) async {
               !_tagEmbyTypeIsDir(it.type) && _tagEmbyTypeIsImage(it.type))
           .toList(growable: false);
       if (imgs.isNotEmpty) {
-        final urls = imgs
-            .map((it) => client.bestImageUrl(it).trim())
-            .where((u) => u.isNotEmpty)
-            .toList(growable: false);
-        if (urls.isNotEmpty) {
-          final idx = imgs.indexWhere((it) => it.id == itemId);
+        final imageSources = <String>[];
+        final aspectRatios = <double?>[];
+        var idx = 0;
+        for (final it in imgs) {
+          final source = buildEmbySource(account.id, 'item:${it.id}').trim();
+          if (source.isEmpty) continue;
+          if (it.id == itemId) idx = imageSources.length;
+          imageSources.add(source);
+          aspectRatios.add(it.primaryImageAspectRatio);
+        }
+        if (imageSources.isNotEmpty) {
           if (!context.mounted) return;
           await Navigator.push(
             context,
             MaterialPageRoute(
               builder: (_) => ImageViewerPage(
-                imagePaths: urls,
-                initialIndex: idx < 0 ? 0 : idx,
+                imagePaths: imageSources,
+                initialIndex: idx.clamp(0, imageSources.length - 1),
+                sourceKeys: imageSources,
+                sourceAspectRatios: aspectRatios,
               ),
             ),
           );
@@ -2422,6 +2428,7 @@ class _Entry {
   final String? embyAccountId;
   final String? embyItemId;
   final String? embyCoverUrl;
+  final double? embyAspectRatio;
 
   // Optional metadata for cross-collection search results.
   final String? searchCollectionId;
@@ -2441,6 +2448,7 @@ class _Entry {
     this.embyAccountId,
     this.embyItemId,
     this.embyCoverUrl,
+    this.embyAspectRatio,
     this.searchCollectionId,
     this.searchCollectionName,
   });
@@ -7175,49 +7183,45 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               x.typeKey == 'emby_image')
           .toList(growable: false);
 
-      // 组装图片 URL 列表（优先使用列表项已有封面 URL，避免部分无 tag 的 Primary 404）
-      String imgUrlFor(_Entry x) {
-        final preferred = _embyPreferOriginalUrl((x.embyCoverUrl ?? '').trim());
-        if (preferred.isNotEmpty) return preferred;
-        final id = (x.embyItemId ?? '').trim();
-        if (id.isEmpty) return '';
-        return client.originalImageUrl(id);
-      }
-
-      final single = imgUrlFor(e).trim();
       final currentItemId = (e.embyItemId ?? '').trim();
-      final currentSourceKey = _embyImageSourceKey(a.id, currentItemId);
-      final urls = <String>[];
+      final currentSourceKey = buildEmbySource(a.id, 'item:$currentItemId');
+      final imageSources = <String>[];
       final sourceKeys = <String>[];
+      final sourceAspectRatios = <double?>[];
       if (items.isEmpty) {
-        if (single.isNotEmpty) {
-          urls.add(single);
+        if (currentSourceKey.isNotEmpty) {
+          imageSources.add(currentSourceKey);
           sourceKeys.add(currentSourceKey);
+          sourceAspectRatios.add(e.embyAspectRatio);
         }
       } else {
         for (final item in items) {
-          final url = imgUrlFor(item).trim();
           final itemId = (item.embyItemId ?? '').trim();
-          if (url.isEmpty || itemId.isEmpty) continue;
-          urls.add(url);
-          sourceKeys.add(_embyImageSourceKey(a.id, itemId));
+          if (itemId.isEmpty) continue;
+          final source = buildEmbySource(a.id, 'item:$itemId').trim();
+          if (source.isEmpty) continue;
+          imageSources.add(source);
+          sourceKeys.add(source);
+          sourceAspectRatios.add(item.embyAspectRatio);
         }
       }
 
       final idx = sourceKeys.indexOf(currentSourceKey);
-      final fallbackSingle = single.isNotEmpty
-          ? single
-          : client.originalImageUrl(e.embyItemId!).trim();
+      final fallbackSingle = currentSourceKey;
 
       if (!mounted) return;
       final source = await Navigator.push<String>(
         context,
         MaterialPageRoute(
           builder: (_) => ImageViewerPage(
-            imagePaths: urls.isEmpty ? <String>[fallbackSingle] : urls,
+            imagePaths:
+                imageSources.isEmpty ? <String>[fallbackSingle] : imageSources,
             initialIndex: (idx < 0) ? 0 : idx,
             sourceKeys:
                 sourceKeys.isEmpty ? <String>[currentSourceKey] : sourceKeys,
+            sourceAspectRatios: sourceAspectRatios.isEmpty
+                ? <double?>[e.embyAspectRatio]
+                : sourceAspectRatios,
           ),
         ),
       );
@@ -7370,6 +7374,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               embyAccountId: accountId,
               embyItemId: it.id,
               embyCoverUrl: cover,
+              embyAspectRatio: it.primaryImageAspectRatio,
             ),
           );
         }
@@ -7406,6 +7411,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               embyAccountId: a.id,
               embyItemId: it.id,
               embyCoverUrl: cover,
+              embyAspectRatio: it.primaryImageAspectRatio,
             ),
           );
         }
@@ -7439,6 +7445,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
             embyAccountId: accountId,
             embyItemId: it.id,
             embyCoverUrl: cover,
+            embyAspectRatio: it.primaryImageAspectRatio,
           ),
         );
       }

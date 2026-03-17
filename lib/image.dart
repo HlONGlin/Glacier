@@ -238,10 +238,29 @@ class _AsyncLimiter {
   }
 }
 
+class _SharedImageProviderCacheEntry {
+  final ImageProvider provider;
+  final int cost;
+
+  const _SharedImageProviderCacheEntry({
+    required this.provider,
+    required this.cost,
+  });
+}
+
 class _SharedImageProviderCache {
-  static final LinkedHashMap<String, ImageProvider> _cache =
-      LinkedHashMap<String, ImageProvider>();
+  static final LinkedHashMap<String, _SharedImageProviderCacheEntry> _cache =
+      LinkedHashMap<String, _SharedImageProviderCacheEntry>();
   static const int _kCap = 1024;
+  static const int _kMaxCost = 72 * 1000 * 1000;
+  static int _totalCost = 0;
+  static int _hitCount = 0;
+  static int _missCount = 0;
+  static int _evictionCount = 0;
+
+  static int _estimateCost(int width, int height) {
+    return max(1, width * height);
+  }
 
   static ImageProvider local(
     String filePath, {
@@ -251,15 +270,22 @@ class _SharedImageProviderCache {
     final key = 'file|${filePath.trim()}|$width|$height';
     final hit = _cache.remove(key);
     if (hit != null) {
+      _hitCount++;
       _cache[key] = hit;
-      return hit;
+      return hit.provider;
     }
+    _missCount++;
     final provider = ResizeImage(
       FileImage(File(filePath)),
       width: width,
       height: height,
     );
-    _cache[key] = provider;
+    final entry = _SharedImageProviderCacheEntry(
+      provider: provider,
+      cost: _estimateCost(width, height),
+    );
+    _cache[key] = entry;
+    _totalCost += entry.cost;
     _trim();
     return provider;
   }
@@ -272,27 +298,52 @@ class _SharedImageProviderCache {
   }) {
     final headerKey = headers == null || headers.isEmpty
         ? ''
-        : headers.entries.map((e) => '${e.key}=${e.value}').join('&');
+        : (headers.entries.toList()..sort((a, b) => a.key.compareTo(b.key)))
+            .map((e) => '${e.key}=${e.value}')
+            .join('&');
     final key = 'net|$url|$headerKey|$width|$height';
     final hit = _cache.remove(key);
     if (hit != null) {
+      _hitCount++;
       _cache[key] = hit;
-      return hit;
+      return hit.provider;
     }
+    _missCount++;
     final provider = ResizeImage(
       NetworkImage(url, headers: headers),
       width: width,
       height: height,
     );
-    _cache[key] = provider;
+    final entry = _SharedImageProviderCacheEntry(
+      provider: provider,
+      cost: _estimateCost(width, height),
+    );
+    _cache[key] = entry;
+    _totalCost += entry.cost;
     _trim();
     return provider;
   }
 
   static void _trim() {
-    while (_cache.length > _kCap) {
-      _cache.remove(_cache.keys.first);
+    while (_cache.length > _kCap || _totalCost > _kMaxCost) {
+      final oldestKey = _cache.keys.first;
+      final removed = _cache.remove(oldestKey);
+      if (removed != null) {
+        _evictionCount++;
+        _totalCost = max(0, _totalCost - removed.cost);
+      }
     }
+  }
+
+  // ignore: unused_element
+  static Map<String, int> debugSnapshot() {
+    return <String, int>{
+      'entries': _cache.length,
+      'totalCost': _totalCost,
+      'hitCount': _hitCount,
+      'missCount': _missCount,
+      'evictionCount': _evictionCount,
+    };
   }
 }
 
@@ -339,12 +390,14 @@ class ImageViewerPage extends StatefulWidget {
   final int initialIndex;
   // 用于退出时回传“稳定定位键”；为空时默认回传 imagePaths[index]。
   final List<String>? sourceKeys;
+  final List<double?>? sourceAspectRatios;
 
   const ImageViewerPage({
     super.key,
     required this.imagePaths,
     required this.initialIndex,
     this.sourceKeys,
+    this.sourceAspectRatios,
   });
 
   @override
@@ -397,14 +450,26 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   static const _kStripModeKey = 'img_view_strip_mode_v1';
   static const _kStripScaleKey = 'img_view_strip_scale_v1';
   static const _kIndexBadgeKey = 'img_view_index_badge_v1';
+  static const _kRatioCacheKey = 'img_view_ratio_cache_v1';
 
   // WebDAV 解析缓存
   final Map<String, Future<({String url, Map<String, String> headers})?>>
       _webdavResolveFutureCache = {};
-  final Map<String, Future<({String url, Map<String, String> headers})?>>
-      _embyResolveFutureCache = {};
+  final Map<
+      String,
+      Future<
+          ({
+            String url,
+            Map<String, String> headers,
+            double? aspectRatio
+          })?>> _embyResolveFutureCache = {};
+  final Map<String, Future<EmbyItem?>> _embyItemFutureCache = {};
+  final Map<String, Future<Map<String, dynamic>?>> _webdavAccountFutureCache =
+      {};
+  Future<Map<String, EmbyAccount>>? _embyAccountsMapFuture;
   static final _AsyncLimiter _remoteResolveLimiter =
       _AsyncLimiter(maxConcurrent: 3);
+  static final _AsyncLimiter _precacheLimiter = _AsyncLimiter(maxConcurrent: 2);
 
   // 预加载控制
   final Set<int> _preloadedIndices = {};
@@ -417,6 +482,59 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   static const int _kStripActiveRadius = 8;
   static const int _kStripWarmForward = 10;
   static const int _kStripWarmBackward = 4;
+  int _stripActiveRadiusCurrent = _kStripActiveRadius;
+  late final ValueNotifier<int> _stripActiveRadiusVN;
+  static const int _kStripDecodeWarmForward = 3;
+  static const int _kStripDecodeWarmBackward = 1;
+
+  ({int forward, int backward}) _warmWindowForDelta(int delta) {
+    if (delta >= 4) {
+      return (forward: 16, backward: 5);
+    }
+    if (delta >= 2) {
+      return (forward: 13, backward: 5);
+    }
+    return (forward: _kStripWarmForward, backward: _kStripWarmBackward);
+  }
+
+  ({int forward, int backward}) _pagedWindowForDelta(int delta, int direction) {
+    if (delta >= 4) {
+      return direction >= 0
+          ? (forward: 8, backward: 2)
+          : (forward: 2, backward: 8);
+    }
+    if (delta >= 2) {
+      return direction >= 0
+          ? (forward: 6, backward: 2)
+          : (forward: 2, backward: 6);
+    }
+    return direction >= 0
+        ? (forward: _kPreloadForward + 2, backward: _kPreloadBackward)
+        : (forward: _kPreloadBackward + 2, backward: _kPreloadForward);
+  }
+
+  ({int forward, int backward}) _pagedSourceWarmWindowForDelta(
+      int delta, int direction) {
+    if (delta >= 4) {
+      return direction >= 0
+          ? (forward: 12, backward: 3)
+          : (forward: 3, backward: 12);
+    }
+    if (delta >= 2) {
+      return direction >= 0
+          ? (forward: 9, backward: 3)
+          : (forward: 3, backward: 9);
+    }
+    return direction >= 0
+        ? (forward: 7, backward: 2)
+        : (forward: 2, backward: 7);
+  }
+
+  int _activeRadiusForDelta(int delta) {
+    if (delta >= 4) return 12;
+    if (delta >= 2) return 10;
+    return _kStripActiveRadius;
+  }
 
   // ============================
   // 自然排序
@@ -483,6 +601,31 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     }
   }
 
+  Future<Map<String, dynamic>?> _webdavAccountFutureFor(String accountId) {
+    return _webdavAccountFutureCache.putIfAbsent(
+      accountId,
+      () => _loadWebDavAccountJson(accountId),
+    );
+  }
+
+  Future<Map<String, EmbyAccount>> _embyAccountsMapFutureFor() {
+    return _embyAccountsMapFuture ??= loadEmbyAccountsMapShared();
+  }
+
+  Future<EmbyItem?> _embyItemFutureFor(EmbyClient client, String itemId) {
+    final key = '${client.account.id}|$itemId';
+    return _embyItemFutureCache.putIfAbsent(
+      key,
+      () async {
+        try {
+          return await client.getItemById(itemId);
+        } catch (_) {
+          return null;
+        }
+      },
+    );
+  }
+
   Future<({String url, Map<String, String> headers})?> _resolveWebDav(
       String source) async {
     try {
@@ -490,7 +633,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       if (ref == null) return null;
       final accountId = ref.accountId;
       final rel = encodePathPreserveSlash(ref.relPath);
-      final j = await _loadWebDavAccountJson(accountId);
+      final j = await _webdavAccountFutureFor(accountId);
       if (j == null) return null;
 
       final baseUrl = (j['baseUrl'] ?? '').toString();
@@ -518,25 +661,36 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     );
   }
 
-  Future<({String url, Map<String, String> headers})?> _resolveEmby(
-      String source) async {
+  Future<({String url, Map<String, String> headers, double? aspectRatio})?>
+      _resolveEmby(String source) async {
     try {
       final ref = parseEmbySourceRef(source);
       if (ref == null) return null;
-      final map = await loadEmbyAccountsMapShared();
+      final map = await _embyAccountsMapFutureFor();
       final account = map[ref.accountId];
       if (account == null) return null;
       final client = EmbyClient(account);
-      final url = client.originalImageUrl(ref.itemId).trim();
+      final item = await _embyItemFutureFor(client, ref.itemId);
+      var url = '';
+      if (item != null) {
+        url = client.bestImageUrl(item).trim();
+      }
+      if (url.isEmpty) {
+        url = client.originalImageUrl(ref.itemId).trim();
+      }
       if (url.isEmpty) return null;
-      return (url: url, headers: client.imageHeaders());
+      return (
+        url: url,
+        headers: client.imageHeaders(),
+        aspectRatio: item?.primaryImageAspectRatio
+      );
     } catch (_) {
       return null;
     }
   }
 
-  Future<({String url, Map<String, String> headers})?> _embyFutureFor(
-      String source) {
+  Future<({String url, Map<String, String> headers, double? aspectRatio})?>
+      _embyFutureFor(String source) {
     return _embyResolveFutureCache.putIfAbsent(
       source,
       () => _remoteResolveLimiter.run(() => _resolveEmby(source)),
@@ -621,7 +775,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       }
 
       if (provider != null && mounted) {
-        await precacheImage(provider, context);
+        await _precacheLimiter.run(() => precacheImage(provider!, context));
         if (generation != _preloadGeneration) return;
         _markPreloaded(i);
       }
@@ -632,22 +786,27 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     if (_disposed) return;
     _preloadGeneration++;
     final gen = _preloadGeneration;
+    final deltaRaw =
+        _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).abs();
     final direction =
         _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).sign;
     _lastPreloadCenter = centerIndex;
+    final window = _pagedWindowForDelta(deltaRaw, direction);
+    _warmPagedSourcesAround(centerIndex,
+        deltaRaw: deltaRaw, direction: direction);
     final plan = <int>[centerIndex];
     if (direction >= 0) {
-      for (int i = 1; i <= _kPreloadForward + 2; i++) {
+      for (int i = 1; i <= window.forward; i++) {
         plan.add(centerIndex + i);
       }
-      for (int i = 1; i <= _kPreloadBackward; i++) {
+      for (int i = 1; i <= window.backward; i++) {
         plan.add(centerIndex - i);
       }
     } else {
-      for (int i = 1; i <= _kPreloadBackward + 2; i++) {
+      for (int i = 1; i <= window.backward; i++) {
         plan.add(centerIndex - i);
       }
-      for (int i = 1; i <= _kPreloadForward; i++) {
+      for (int i = 1; i <= window.forward; i++) {
         plan.add(centerIndex + i);
       }
     }
@@ -656,22 +815,22 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     }
   }
 
-  void _warmStripSourcesAround(int centerIndex) {
-    final direction =
-        _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).sign;
+  void _warmPagedSourcesAround(int centerIndex,
+      {required int deltaRaw, required int direction}) {
+    final window = _pagedSourceWarmWindowForDelta(deltaRaw, direction);
     final plan = <int>[centerIndex];
     if (direction >= 0) {
-      for (int i = 1; i <= _kStripWarmForward; i++) {
+      for (int i = 1; i <= window.forward; i++) {
         plan.add(centerIndex + i);
       }
-      for (int i = 1; i <= _kStripWarmBackward; i++) {
+      for (int i = 1; i <= window.backward; i++) {
         plan.add(centerIndex - i);
       }
     } else {
-      for (int i = 1; i <= _kStripWarmForward; i++) {
+      for (int i = 1; i <= window.backward; i++) {
         plan.add(centerIndex - i);
       }
-      for (int i = 1; i <= _kStripWarmBackward; i++) {
+      for (int i = 1; i <= window.forward; i++) {
         plan.add(centerIndex + i);
       }
     }
@@ -683,6 +842,69 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       } else if (_isEmbySource(src)) {
         unawaited(_embyFutureFor(src));
       }
+    }
+  }
+
+  void _warmStripSourcesAround(int centerIndex) {
+    final deltaRaw =
+        _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).abs();
+    final direction =
+        _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).sign;
+    final window = _warmWindowForDelta(deltaRaw);
+    final nextRadius = _activeRadiusForDelta(deltaRaw);
+    _stripActiveRadiusCurrent = nextRadius;
+    if (_stripActiveRadiusVN.value != nextRadius) {
+      _stripActiveRadiusVN.value = nextRadius;
+    }
+    final plan = <int>[centerIndex];
+    if (direction >= 0) {
+      for (int i = 1; i <= window.forward; i++) {
+        plan.add(centerIndex + i);
+      }
+      for (int i = 1; i <= window.backward; i++) {
+        plan.add(centerIndex - i);
+      }
+    } else {
+      for (int i = 1; i <= window.forward; i++) {
+        plan.add(centerIndex - i);
+      }
+      for (int i = 1; i <= window.backward; i++) {
+        plan.add(centerIndex + i);
+      }
+    }
+    for (final idx in plan) {
+      if (idx < 0 || idx >= widget.imagePaths.length) continue;
+      final src = widget.imagePaths[idx];
+      if (_isWebDavSource(src)) {
+        unawaited(_webdavFutureFor(src));
+      } else if (_isEmbySource(src)) {
+        unawaited(_embyFutureFor(src));
+      }
+    }
+    _warmStripDecodeAround(centerIndex, direction: direction);
+  }
+
+  void _warmStripDecodeAround(int centerIndex, {required int direction}) {
+    _preloadGeneration++;
+    final gen = _preloadGeneration;
+    final plan = <int>[centerIndex];
+    if (direction >= 0) {
+      for (int i = 1; i <= _kStripDecodeWarmForward; i++) {
+        plan.add(centerIndex + i);
+      }
+      for (int i = 1; i <= _kStripDecodeWarmBackward; i++) {
+        plan.add(centerIndex - i);
+      }
+    } else {
+      for (int i = 1; i <= _kStripDecodeWarmForward; i++) {
+        plan.add(centerIndex - i);
+      }
+      for (int i = 1; i <= _kStripDecodeWarmBackward; i++) {
+        plan.add(centerIndex + i);
+      }
+    }
+    for (final idx in plan) {
+      unawaited(_precacheIndex(idx, generation: gen));
     }
   }
 
@@ -756,29 +978,40 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
             return const Center(
                 child: Text('无法解析', style: TextStyle(color: Colors.white54)));
           }
-          return Image(
-            image: _SharedImageProviderCache.network(
-              resolved.url,
-              headers: resolved.headers,
-              width: _targetCacheWidth(),
-              height: _targetCacheHeight(),
+          // 宽度占满屏幕，高度按比例自动调整
+          final screenSize = MediaQuery.of(context).size;
+          final screenWidth = screenSize.width;
+          double imageHeight = screenSize.height; // 默认高度
+          if (resolved.aspectRatio != null && resolved.aspectRatio! > 0) {
+            imageHeight = screenWidth / resolved.aspectRatio!;
+          }
+          return SizedBox(
+            width: screenWidth,
+            height: imageHeight,
+            child: Image(
+              image: _SharedImageProviderCache.network(
+                resolved.url,
+                headers: resolved.headers,
+                width: _targetCacheWidth(),
+                height: _targetCacheHeight(),
+              ),
+              fit: BoxFit.fill,
+              filterQuality: FilterQuality.medium,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => const Center(
+                child: Icon(Icons.broken_image, color: Colors.white54),
+              ),
+              loadingBuilder: (ctx, child, loading) {
+                if (loading == null) return child;
+                final expected = loading.expectedTotalBytes;
+                final loaded = loading.cumulativeBytesLoaded;
+                final p = (expected != null && expected > 0)
+                    ? (loaded / expected).clamp(0.0, 1.0)
+                    : null;
+                return Center(
+                    child: _LoadingThumb(progress: p, lightText: !isLightBg));
+              },
             ),
-            fit: BoxFit.contain,
-            filterQuality: FilterQuality.medium,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => const Center(
-              child: Icon(Icons.broken_image, color: Colors.white54),
-            ),
-            loadingBuilder: (ctx, child, loading) {
-              if (loading == null) return child;
-              final expected = loading.expectedTotalBytes;
-              final loaded = loading.cumulativeBytesLoaded;
-              final p = (expected != null && expected > 0)
-                  ? (loaded / expected).clamp(0.0, 1.0)
-                  : null;
-              return Center(
-                  child: _LoadingThumb(progress: p, lightText: !isLightBg));
-            },
           );
         },
       );
@@ -837,12 +1070,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         transformationController: TransformationController(),
         minScale: 1.0,
         maxScale: 5.0,
-        child: Container(
-          width: double.infinity,
-          height: double.infinity,
-          alignment: Alignment.center,
-          child: imageWidget,
-        ),
+        child: Center(child: imageWidget),
       ),
     );
 
@@ -855,6 +1083,9 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   Future<void> _loadViewerPrefs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      _StripImageItemState.restoreRatioCacheFromJson(
+        prefs.getString(_kRatioCacheKey),
+      );
       final sm = prefs.getBool(_kStripModeKey);
       final ss = prefs.getDouble(_kStripScaleKey);
       final ib = prefs.getBool(_kIndexBadgeKey); // ✅ 角标
@@ -924,6 +1155,18 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     } catch (_) {}
   }
 
+  Future<void> _persistRatioCache() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = _StripImageItemState.exportRatioCacheJson(maxEntries: 400);
+      if (raw.isEmpty) {
+        await prefs.remove(_kRatioCacheKey);
+      } else {
+        await prefs.setString(_kRatioCacheKey, raw);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _applyImmersiveAndOrientation({required bool landscape}) async {
     if (!_isMobile) return;
     try {
@@ -977,6 +1220,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
     _index = newIndex;
     _indexVN = ValueNotifier<int>(_index);
+    _stripActiveRadiusVN = ValueNotifier<int>(_stripActiveRadiusCurrent);
     _controller = PageController(initialPage: _index);
 
     _stripKeys =
@@ -1038,6 +1282,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(_persistRatioCache());
     _removeContextMenu();
     _restoreSystemUI();
     _hardwareKeySub?.cancel();
@@ -1045,6 +1290,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _controller.dispose();
     _stripController.dispose();
     _indexVN.dispose();
+    _stripActiveRadiusVN.dispose();
     _keyFocusNode.dispose();
     super.dispose();
   }
@@ -1343,7 +1589,11 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                             ? Icons.view_stream
                             : Icons.view_carousel,
                         onTap: () {
+                          final wasStripMode = _stripMode;
                           setState(() => _stripMode = !_stripMode);
+                          if (wasStripMode && _controller.hasClients) {
+                            _controller.jumpToPage(_index);
+                          }
                           _saveViewerPrefs();
                         },
                       ),
@@ -1545,26 +1795,28 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                                             () => _uiVisible = !_uiVisible);
                                       },
                                       child: Center(
-                                        child: ValueListenableBuilder<int>(
-                                          valueListenable: _indexVN,
-                                          builder: (_, center, __) {
-                                            final eagerLoad =
-                                                (i - center).abs() <=
-                                                    _kStripActiveRadius;
-                                            return StripImageItem(
-                                              source: path,
-                                              targetW: targetW,
-                                              bg: _bg,
-                                              showIndexBadge: _showIndexBadge,
-                                              index: i,
-                                              isWebDavSource: _isWebDavSource,
-                                              webdavFutureFor: _webdavFutureFor,
-                                              isEmbySource: _isEmbySource,
-                                              embyFutureFor: _embyFutureFor,
-                                              eagerLoad: eagerLoad,
-                                              placeholderH: 220, // ✅ 你要的“默认高度”
-                                            );
-                                          },
+                                        child: StripImageItem(
+                                          source: path,
+                                          targetW: targetW,
+                                          bg: _bg,
+                                          showIndexBadge: _showIndexBadge,
+                                          index: i,
+                                          initialRatio: (widget
+                                                          .sourceAspectRatios !=
+                                                      null &&
+                                                  i <
+                                                      widget.sourceAspectRatios!
+                                                          .length)
+                                              ? widget.sourceAspectRatios![i]
+                                              : null,
+                                          isWebDavSource: _isWebDavSource,
+                                          webdavFutureFor: _webdavFutureFor,
+                                          isEmbySource: _isEmbySource,
+                                          embyFutureFor: _embyFutureFor,
+                                          centerListenable: _indexVN,
+                                          activeRadiusListenable:
+                                              _stripActiveRadiusVN,
+                                          placeholderH: 220, // ✅ 你要的“默认高度”
                                         ),
                                       ),
                                     ),
@@ -1755,15 +2007,18 @@ class StripImageItem extends StatefulWidget {
   final Color bg;
   final bool showIndexBadge;
   final int index;
+  final double? initialRatio;
   final double placeholderH;
 
   final Future<({String url, Map<String, String> headers})?> Function(String)
       webdavFutureFor;
-  final Future<({String url, Map<String, String> headers})?> Function(String)
-      embyFutureFor;
+  final Future<
+          ({String url, Map<String, String> headers, double? aspectRatio})?>
+      Function(String) embyFutureFor;
   final bool Function(String) isWebDavSource;
   final bool Function(String) isEmbySource;
-  final bool eagerLoad;
+  final ValueListenable<int> centerListenable;
+  final ValueListenable<int> activeRadiusListenable;
 
   const StripImageItem({
     super.key,
@@ -1772,11 +2027,13 @@ class StripImageItem extends StatefulWidget {
     required this.bg,
     required this.showIndexBadge,
     required this.index,
+    this.initialRatio,
     required this.webdavFutureFor,
     required this.embyFutureFor,
     required this.isWebDavSource,
     required this.isEmbySource,
-    this.eagerLoad = true,
+    required this.centerListenable,
+    required this.activeRadiusListenable,
     this.placeholderH = 220,
   });
 
@@ -1790,11 +2047,50 @@ class _StripImageItemState extends State<StripImageItem>
       LinkedHashMap<String, double>();
   static const int _kRatioCacheCap = 800;
 
+  static String exportRatioCacheJson({int maxEntries = 400}) {
+    if (_ratioCache.isEmpty || maxEntries <= 0) return '';
+    final entries = _ratioCache.entries.toList();
+    final start = entries.length > maxEntries ? entries.length - maxEntries : 0;
+    final map = <String, double>{};
+    for (final entry in entries.sublist(start)) {
+      final v = entry.value;
+      if (v > 0 && v.isFinite) {
+        map[entry.key] = v;
+      }
+    }
+    if (map.isEmpty) return '';
+    return jsonEncode(map);
+  }
+
+  static void restoreRatioCacheFromJson(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      for (final entry in decoded.entries) {
+        final key = entry.key.toString().trim();
+        if (key.isEmpty) continue;
+        final value = entry.value;
+        final ratio =
+            value is num ? value.toDouble() : double.tryParse('$value');
+        if (ratio == null || ratio <= 0 || !ratio.isFinite) continue;
+        _ratioCache.remove(key);
+        _ratioCache[key] = ratio;
+      }
+      while (_ratioCache.length > _kRatioCacheCap) {
+        _ratioCache.remove(_ratioCache.keys.first);
+      }
+    } catch (_) {}
+  }
+
   double? _ratio; // w/h
   bool _listening = false;
   bool _hasEverLoaded = false;
+  bool _ratioProbeStarted = false;
+  late bool _eagerLoad;
   Future<({String url, Map<String, String> headers})?>? _webdavFuture;
-  Future<({String url, Map<String, String> headers})?>? _embyFuture;
+  Future<({String url, Map<String, String> headers, double? aspectRatio})?>?
+      _embyFuture;
 
   String get _sourceKey => widget.source.trim();
 
@@ -1804,7 +2100,9 @@ class _StripImageItemState extends State<StripImageItem>
   double get _currentHeight {
     if (_ratio == null || _ratio! <= 0) return widget.placeholderH;
     final h = widget.targetW / _ratio!;
-    return h.clamp(80.0, 20000.0);
+    // 限制最大高度为屏幕高度的 2 倍，避免超宽图片占满屏幕
+    final maxH = MediaQuery.of(context).size.height * 2;
+    return h.clamp(80.0, maxH);
   }
 
   int _decodeWidth() {
@@ -1835,22 +2133,93 @@ class _StripImageItemState extends State<StripImageItem>
     return true;
   }
 
+  bool _computeEagerLoad() {
+    return (widget.index - widget.centerListenable.value).abs() <=
+        widget.activeRadiusListenable.value;
+  }
+
+  void _handleEagerInputsChanged() {
+    final next = _computeEagerLoad();
+    if (next == _eagerLoad) return;
+    _eagerLoad = next;
+    if (_eagerLoad) {
+      _ensureRatioProbeStarted();
+    }
+    updateKeepAlive();
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
+    _eagerLoad = _computeEagerLoad();
     super.initState();
+    widget.centerListenable.addListener(_handleEagerInputsChanged);
+    widget.activeRadiusListenable.addListener(_handleEagerInputsChanged);
+    final seeded = widget.initialRatio;
+    if (seeded != null && seeded > 0 && seeded.isFinite) {
+      _ratio = seeded;
+      _rememberRatio(seeded);
+    }
     _applyCachedRatio();
+    // 如果没有 cached ratio 且是 Emby source，尝试从 item 元数据获取 aspectRatio
+    if (_ratio == null && widget.isEmbySource(widget.source)) {
+      _fetchEmbyAspectRatio();
+    }
+    if (_eagerLoad) {
+      _ensureRatioProbeStarted();
+    }
+  }
+
+  Future<void> _fetchEmbyAspectRatio() async {
+    try {
+      final result = await widget.embyFutureFor(widget.source);
+      if (result != null &&
+          result.aspectRatio != null &&
+          result.aspectRatio! > 0 &&
+          result.aspectRatio!.isFinite) {
+        if (mounted) {
+          setState(() {
+            _ratio = result.aspectRatio;
+            _rememberRatio(result.aspectRatio!);
+          });
+        }
+      }
+    } catch (_) {}
   }
 
   @override
   void didUpdateWidget(covariant StripImageItem oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.centerListenable != widget.centerListenable) {
+      oldWidget.centerListenable.removeListener(_handleEagerInputsChanged);
+      widget.centerListenable.addListener(_handleEagerInputsChanged);
+    }
+    if (oldWidget.activeRadiusListenable != widget.activeRadiusListenable) {
+      oldWidget.activeRadiusListenable
+          .removeListener(_handleEagerInputsChanged);
+      widget.activeRadiusListenable.addListener(_handleEagerInputsChanged);
+    }
+    _handleEagerInputsChanged();
     if (oldWidget.source != widget.source) {
       _ratio = null;
       _listening = false;
       _hasEverLoaded = false;
+      _ratioProbeStarted = false;
       _webdavFuture = null;
       _embyFuture = null;
+      final seeded = widget.initialRatio;
+      if (seeded != null && seeded > 0 && seeded.isFinite) {
+        _ratio = seeded;
+        _rememberRatio(seeded);
+      }
       _applyCachedRatio();
+      // 如果没有 cached ratio 且是 Emby source，尝试获取 aspect ratio
+      if (_ratio == null && widget.isEmbySource(widget.source)) {
+        _fetchEmbyAspectRatio();
+      }
+      if (_eagerLoad) {
+        _ensureRatioProbeStarted();
+      }
     }
   }
 
@@ -1905,6 +2274,41 @@ class _StripImageItemState extends State<StripImageItem>
     stream.addListener(listener);
   }
 
+  void _ensureRatioProbeStarted() {
+    if (_ratio != null && _ratio! > 0) return;
+    if (_applyCachedRatio()) return;
+    if (_ratioProbeStarted) return;
+    _ratioProbeStarted = true;
+    unawaited(_probeRatioAsync());
+  }
+
+  Future<void> _probeRatioAsync() async {
+    try {
+      final src = widget.source;
+      if (widget.isWebDavSource(src)) {
+        final future = _webdavFuture ??= widget.webdavFutureFor(src);
+        final resolved = await future;
+        if (!mounted || resolved == null) return;
+        _resolveSizeOnce(NetworkImage(resolved.url, headers: resolved.headers));
+        return;
+      }
+      if (widget.isEmbySource(src)) {
+        final future = _embyFuture ??= widget.embyFutureFor(src);
+        final resolved = await future;
+        if (!mounted || resolved == null) return;
+        _resolveSizeOnce(NetworkImage(resolved.url, headers: resolved.headers));
+        return;
+      }
+      if (src.startsWith('http://') || src.startsWith('https://')) {
+        _resolveSizeOnce(NetworkImage(src));
+        return;
+      }
+      _resolveSizeOnce(FileImage(File(src)));
+    } catch (_) {
+      _ratioProbeStarted = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -1923,11 +2327,15 @@ class _StripImageItemState extends State<StripImageItem>
   }
 
   @override
-  bool get wantKeepAlive => true;
+  bool get wantKeepAlive => _eagerLoad;
 
   Widget _buildImage() {
-    if (!widget.eagerLoad && !_hasEverLoaded) {
+    if (!_eagerLoad && !_hasEverLoaded) {
       return _LoadingThumb(progress: null, lightText: _lightText);
+    }
+
+    if (_eagerLoad) {
+      _ensureRatioProbeStarted();
     }
 
     final src = widget.source;
@@ -1956,8 +2364,6 @@ class _StripImageItemState extends State<StripImageItem>
             width: decodeW,
             height: decodeH,
           );
-          _resolveSizeOnce(
-              NetworkImage(resolved.url, headers: resolved.headers));
           if (_ratio == null) {
             return _LoadingThumb(progress: null, lightText: _lightText);
           }
@@ -2005,8 +2411,6 @@ class _StripImageItemState extends State<StripImageItem>
             width: decodeW,
             height: decodeH,
           );
-          _resolveSizeOnce(
-              NetworkImage(resolved.url, headers: resolved.headers));
           if (_ratio == null) {
             return _LoadingThumb(progress: null, lightText: _lightText);
           }
@@ -2040,7 +2444,6 @@ class _StripImageItemState extends State<StripImageItem>
         width: decodeW,
         height: decodeH,
       );
-      _resolveSizeOnce(NetworkImage(src));
       if (_ratio == null) {
         return _LoadingThumb(progress: null, lightText: _lightText);
       }
@@ -2071,7 +2474,6 @@ class _StripImageItemState extends State<StripImageItem>
       width: decodeW,
       height: decodeH,
     );
-    _resolveSizeOnce(FileImage(File(src)));
     if (_ratio == null) {
       return _LoadingThumb(progress: null, lightText: _lightText);
     }
@@ -2088,6 +2490,13 @@ class _StripImageItemState extends State<StripImageItem>
         return _LoadingThumb(progress: null, lightText: _lightText);
       },
     );
+  }
+
+  @override
+  void dispose() {
+    widget.centerListenable.removeListener(_handleEagerInputsChanged);
+    widget.activeRadiusListenable.removeListener(_handleEagerInputsChanged);
+    super.dispose();
   }
 }
 

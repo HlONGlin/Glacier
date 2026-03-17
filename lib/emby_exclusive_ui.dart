@@ -9,6 +9,7 @@ import 'emby.dart';
 import 'emby_native_logic.dart';
 import 'emby_read_scheme.dart';
 import 'image.dart';
+import 'source_refs.dart';
 import 'ui_kit.dart';
 import 'utils.dart';
 import 'video.dart';
@@ -269,7 +270,13 @@ String _videoPathFor(_UiItem it) {
 }
 
 String _imageSourceKeyFor(_UiItem it) {
-  return 'emby://${it.account.id}/item:${it.item.id}';
+  return buildEmbySource(it.account.id, 'item:${it.item.id}');
+}
+
+double? _imageAspectRatioFor(_UiItem it) {
+  final ratio = it.item.primaryImageAspectRatio;
+  if (ratio == null || ratio <= 0 || !ratio.isFinite) return null;
+  return ratio;
 }
 
 String _preferOriginalUrl(String url) {
@@ -1042,14 +1049,6 @@ class _EmbyExclusiveFavoritesPageState
     return _accountName(selected);
   }
 
-  String _imageUrlFor(_UiItem it) {
-    final preferred = _preferOriginalUrl(it.coverUrl).trim();
-    if (preferred.isNotEmpty) return preferred;
-    final client = _clients[it.account.id];
-    if (client == null) return '';
-    return client.originalImageUrl(it.item.id).trim();
-  }
-
   Route _embyAccountsRouteWithUi() {
     return EmbyPage.routeNoAnim(
       openExclusiveUi: (ctx, {Set<String>? scopedAccountIds}) {
@@ -1265,15 +1264,17 @@ class _EmbyExclusiveFavoritesPageState
       final images = (pool ?? <_UiItem>[item])
           .where((x) => x.account.id == item.account.id && x.isImage)
           .toList(growable: false);
-      final urls = <String>[];
+      final imageSources = <String>[];
       final sourceKeys = <String>[];
+      final aspectRatios = <double?>[];
       for (final x in images) {
-        final url = _imageUrlFor(x).trim();
-        if (url.isEmpty) continue;
-        urls.add(url);
-        sourceKeys.add(_imageSourceKeyFor(x));
+        final source = _imageSourceKeyFor(x).trim();
+        if (source.isEmpty) continue;
+        imageSources.add(source);
+        sourceKeys.add(source);
+        aspectRatios.add(_imageAspectRatioFor(x));
       }
-      if (urls.isEmpty) return;
+      if (imageSources.isEmpty) return;
       var idx = sourceKeys.indexOf(_imageSourceKeyFor(item));
       if (idx < 0) idx = 0;
       if (!mounted) return;
@@ -1281,9 +1282,10 @@ class _EmbyExclusiveFavoritesPageState
         context,
         MaterialPageRoute(
           builder: (_) => ImageViewerPage(
-            imagePaths: urls,
+            imagePaths: imageSources,
             initialIndex: idx,
             sourceKeys: sourceKeys,
+            sourceAspectRatios: aspectRatios,
           ),
         ),
       );
@@ -4409,24 +4411,30 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     if (item.isImage) {
       final imageItems =
           activePool.where((x) => x.isImage).toList(growable: false);
-      final urls = <String>[];
+      final imageSources = <String>[];
+      final sourceKeys = <String>[];
+      final aspectRatios = <double?>[];
       var initialIndex = 0;
       for (final x in imageItems) {
-        final url = _preferOriginalUrl(x.coverUrl).trim();
-        if (url.isEmpty) continue;
+        final source = _imageSourceKeyFor(x).trim();
+        if (source.isEmpty) continue;
         if (x.item.id == item.item.id) {
-          initialIndex = urls.length;
+          initialIndex = imageSources.length;
         }
-        urls.add(url);
+        imageSources.add(source);
+        sourceKeys.add(source);
+        aspectRatios.add(_imageAspectRatioFor(x));
       }
-      if (urls.isEmpty) return;
+      if (imageSources.isEmpty) return;
       if (!mounted) return;
       await Navigator.push(
         context,
         MaterialPageRoute(
           builder: (_) => ImageViewerPage(
-            imagePaths: urls,
-            initialIndex: initialIndex.clamp(0, urls.length - 1),
+            imagePaths: imageSources,
+            initialIndex: initialIndex.clamp(0, imageSources.length - 1),
+            sourceKeys: sourceKeys,
+            sourceAspectRatios: aspectRatios,
           ),
         ),
       );
