@@ -7635,12 +7635,12 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
               quality: 85,
               fallbackToVideo: true,
             );
-            // ⚠️ 注意：e.embyCoverUrl 可能是目录自身 Primary（无 tag）——这类 URL 在“自动生成封面目录”上经常 404。
-            // 因此只有当原 URL 明确带 tag（或你确认它可用）时才回落使用。
+            // 普通媒体库里的 Emby 目录封面很多是稳定可用的 Cover/Thumb URL，
+            // 不一定显式带 `tag=`。这里优先使用自动封面兜底，但只要原始封面 URL 非空，
+            // 就继续保留为次选，避免把本来能显示的库封面过滤掉。
             final fallback = (e.embyCoverUrl ?? '').trim();
-            final safeFallback = fallback.contains('tag=') ? fallback : '';
             final useUrl =
-                (auto ?? '').trim().isNotEmpty ? auto!.trim() : safeFallback;
+                (auto ?? '').trim().isNotEmpty ? auto!.trim() : fallback;
             if (useUrl.isNotEmpty) {
               info = _CoverInfo.emby(
                   embyAccountId: e.embyAccountId ?? '', embyCoverUrl: useUrl);
@@ -7648,14 +7648,14 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
           } catch (_) {
             // 忽略网络/权限错误，回落到原有 url
             final url = (e.embyCoverUrl ?? '').trim();
-            if (url.isNotEmpty && url.contains('tag=')) {
+            if (url.isNotEmpty) {
               info = _CoverInfo.emby(
                   embyAccountId: e.embyAccountId ?? '', embyCoverUrl: url);
             }
           }
         } else {
           final url = (e.embyCoverUrl ?? '').trim();
-          if (url.isNotEmpty && url.contains('tag=')) {
+          if (url.isNotEmpty) {
             info = _CoverInfo.emby(
                 embyAccountId: e.embyAccountId ?? '', embyCoverUrl: url);
           }
