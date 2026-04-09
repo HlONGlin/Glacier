@@ -4,10 +4,12 @@ import 'package:media_kit/media_kit.dart';
 
 import 'pages.dart';
 import 'ui_kit.dart';
+import 'utils.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  await AppSettings.instance.init();
 
   await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(

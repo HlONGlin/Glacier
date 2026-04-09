@@ -251,8 +251,8 @@ class _SharedImageProviderCacheEntry {
 class _SharedImageProviderCache {
   static final LinkedHashMap<String, _SharedImageProviderCacheEntry> _cache =
       LinkedHashMap<String, _SharedImageProviderCacheEntry>();
-  static const int _kCap = 1024;
-  static const int _kMaxCost = 72 * 1000 * 1000;
+  static const int _kCap = 512;
+  static const int _kMaxCost = 48 * 1000 * 1000;
   static int _totalCost = 0;
   static int _hitCount = 0;
   static int _missCount = 0;

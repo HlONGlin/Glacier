@@ -18,8 +18,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 1) “最小改动”地补齐播放器/收藏夹的关键设置项；
 /// 2) 统一用 SharedPreferences 持久化，避免引入复杂依赖；
 /// 3) 所有 key 均带前缀，降低未来冲突风险。
-class AppSettings {
+class AppSettings extends ChangeNotifier {
   AppSettings._();
+
+  static final AppSettings instance = AppSettings._();
+
+  SharedPreferences? _prefs;
+  bool _initialized = false;
+  Future<void>? _initFuture;
 
   static const String _kPrefix = 'glacier_settings_';
 
@@ -102,244 +108,273 @@ class AppSettings {
   static const String _kFolderSearchSingleCollectionId =
       '${_kPrefix}folder_search_single_collection_id';
 
-  static Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
+  static Future<SharedPreferences> _sp() async {
+    await instance.init();
+    return instance._prefs!;
+  }
+
+  Future<void> init() {
+    final pending = _initFuture;
+    if (pending != null) return pending;
+    final future = () async {
+      _prefs ??= await SharedPreferences.getInstance();
+      _initialized = true;
+    }();
+    _initFuture = future;
+    return future;
+  }
+
+  bool get isInitialized => _initialized;
+
+  Future<T> _read<T>(T Function(SharedPreferences sp) reader) async {
+    final sp = await _sp();
+    return reader(sp);
+  }
+
+  static Future<void> _writeAndNotify(
+    Future<void> Function(SharedPreferences sp) writer,
+  ) async {
+    final sp = await _sp();
+    await writer(sp);
+    instance.notifyListeners();
+  }
 
   /// 字幕字号（默认 22）。
   static Future<double> getSubtitleFontSize() async {
-    final sp = await _sp();
-    return sp.getDouble(_kSubtitleFontSize) ?? 22.0;
+    return instance._read((sp) => sp.getDouble(_kSubtitleFontSize) ?? 22.0);
   }
 
   static Future<void> setSubtitleFontSize(double v) async {
-    final sp = await _sp();
-    await sp.setDouble(_kSubtitleFontSize, v.clamp(12.0, 48.0));
+    await _writeAndNotify(
+      (sp) => sp.setDouble(_kSubtitleFontSize, v.clamp(12.0, 48.0)),
+    );
   }
 
   /// 字幕距底部偏移（默认 36）。
   static Future<double> getSubtitleBottomOffset() async {
-    final sp = await _sp();
-    return sp.getDouble(_kSubtitleBottomOffset) ?? 36.0;
+    return instance._read((sp) => sp.getDouble(_kSubtitleBottomOffset) ?? 36.0);
   }
 
   static Future<void> setSubtitleBottomOffset(double v) async {
-    final sp = await _sp();
-    await sp.setDouble(_kSubtitleBottomOffset, v.clamp(0.0, 200.0));
+    await _writeAndNotify(
+      (sp) => sp.setDouble(_kSubtitleBottomOffset, v.clamp(0.0, 200.0)),
+    );
   }
 
   /// 双击快进/快退秒数（默认 10）。
   static Future<int> getDoubleTapSeekSeconds() async {
-    final sp = await _sp();
-    return sp.getInt(_kDoubleTapSeekSeconds) ?? 10;
+    return instance._read((sp) => sp.getInt(_kDoubleTapSeekSeconds) ?? 10);
   }
 
   static Future<void> setDoubleTapSeekSeconds(int v) async {
-    final sp = await _sp();
-    await sp.setInt(_kDoubleTapSeekSeconds, v.clamp(5, 60));
+    await _writeAndNotify(
+      (sp) => sp.setInt(_kDoubleTapSeekSeconds, v.clamp(5, 60)),
+    );
   }
 
   /// 长按倍速开关（默认开启）。
   static Future<bool> getLongPressSpeedEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kLongPressSpeedEnabled) ?? true;
+    return instance._read((sp) => sp.getBool(_kLongPressSpeedEnabled) ?? true);
   }
 
   static Future<void> setLongPressSpeedEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kLongPressSpeedEnabled, v);
+    await _writeAndNotify((sp) => sp.setBool(_kLongPressSpeedEnabled, v));
   }
 
   /// 长按倍速乘数（默认 2.0）。
   static Future<double> getLongPressSpeedMultiplier() async {
-    final sp = await _sp();
-    return sp.getDouble(_kLongPressSpeedMultiplier) ?? 2.0;
+    return instance
+        ._read((sp) => sp.getDouble(_kLongPressSpeedMultiplier) ?? 2.0);
   }
 
   static Future<void> setLongPressSpeedMultiplier(double v) async {
-    final sp = await _sp();
-    await sp.setDouble(_kLongPressSpeedMultiplier, v.clamp(1.25, 4.0));
+    await _writeAndNotify(
+      (sp) => sp.setDouble(_kLongPressSpeedMultiplier, v.clamp(1.25, 4.0)),
+    );
   }
 
   /// 播放结束行为：是否“自动下一集”（默认 false：播放完暂停）。
   static Future<bool> getVideoAutoNextAfterEnd() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoAutoNextAfterEnd) ?? false;
+    return instance._read((sp) => sp.getBool(_kVideoAutoNextAfterEnd) ?? false);
   }
 
   static Future<void> setVideoAutoNextAfterEnd(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoAutoNextAfterEnd, v);
+    await _writeAndNotify((sp) => sp.setBool(_kVideoAutoNextAfterEnd, v));
   }
 
   /// 控制栏隐藏时，是否显示底部细进度条（默认 true）。
   static Future<bool> getVideoMiniProgressWhenHidden() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoMiniProgressWhenHidden) ?? true;
+    return instance
+        ._read((sp) => sp.getBool(_kVideoMiniProgressWhenHidden) ?? true);
   }
 
   static Future<void> setVideoMiniProgressWhenHidden(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoMiniProgressWhenHidden, v);
+    await _writeAndNotify(
+      (sp) => sp.setBool(_kVideoMiniProgressWhenHidden, v),
+    );
   }
 
   /// 播放器目录功能开关（默认 true）。
   static Future<bool> getVideoCatalogEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoCatalogEnabled) ?? true;
+    return instance._read((sp) => sp.getBool(_kVideoCatalogEnabled) ?? true);
   }
 
   static Future<void> setVideoCatalogEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoCatalogEnabled, v);
+    await _writeAndNotify((sp) => sp.setBool(_kVideoCatalogEnabled, v));
   }
 
   /// 播放器“上下集”按钮开关（默认 true）。
   static Future<bool> getVideoEpisodeNavButtonsEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoEpisodeNavButtonsEnabled) ?? true;
+    return instance
+        ._read((sp) => sp.getBool(_kVideoEpisodeNavButtonsEnabled) ?? true);
   }
 
   static Future<void> setVideoEpisodeNavButtonsEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoEpisodeNavButtonsEnabled, v);
+    await _writeAndNotify(
+      (sp) => sp.setBool(_kVideoEpisodeNavButtonsEnabled, v),
+    );
   }
 
   /// 锁定后是否仍允许“暂停 + 进度条拖动”（默认 true）。
   static Future<bool> getVideoLockPauseSeekEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoLockPauseSeekEnabled) ?? true;
+    return instance
+        ._read((sp) => sp.getBool(_kVideoLockPauseSeekEnabled) ?? true);
   }
 
   static Future<void> setVideoLockPauseSeekEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoLockPauseSeekEnabled, v);
+    await _writeAndNotify(
+      (sp) => sp.setBool(_kVideoLockPauseSeekEnabled, v),
+    );
   }
 
   /// 目录打开时是否自动定位当前播放项（默认 true）。
   static Future<bool> getVideoCatalogLocateCurrentOnOpen() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoCatalogLocateCurrentOnOpen) ?? true;
+    return instance._read(
+      (sp) => sp.getBool(_kVideoCatalogLocateCurrentOnOpen) ?? true,
+    );
   }
 
   static Future<void> setVideoCatalogLocateCurrentOnOpen(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoCatalogLocateCurrentOnOpen, v);
+    await _writeAndNotify(
+      (sp) => sp.setBool(_kVideoCatalogLocateCurrentOnOpen, v),
+    );
   }
 
   /// Emby 混合库里“图片主导”判定阈值（默认 67）。
   /// - 取值范围：50~90（越高越不容易触发图片主导）。
   static Future<int> getEmbyImageDominantThresholdPercent() async {
-    final sp = await _sp();
-    final raw = sp.getInt(_kEmbyImageDominantThresholdPercent) ?? 67;
-    return raw.clamp(50, 90);
+    return instance._read((sp) {
+      final raw = sp.getInt(_kEmbyImageDominantThresholdPercent) ?? 67;
+      return raw.clamp(50, 90);
+    });
   }
 
   static Future<void> setEmbyImageDominantThresholdPercent(int v) async {
-    final sp = await _sp();
-    await sp.setInt(_kEmbyImageDominantThresholdPercent, v.clamp(50, 90));
+    await _writeAndNotify(
+      (sp) => sp.setInt(_kEmbyImageDominantThresholdPercent, v.clamp(50, 90)),
+    );
   }
 
   /// Emby 图片库简化模式（默认 true）。
   static Future<bool> getEmbyImageLibrarySimpleModeEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kEmbyImageLibrarySimpleModeEnabled) ?? true;
+    return instance._read(
+      (sp) => sp.getBool(_kEmbyImageLibrarySimpleModeEnabled) ?? true,
+    );
   }
 
   static Future<void> setEmbyImageLibrarySimpleModeEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kEmbyImageLibrarySimpleModeEnabled, v);
+    await _writeAndNotify(
+      (sp) => sp.setBool(_kEmbyImageLibrarySimpleModeEnabled, v),
+    );
   }
 
   /// 是否自动从历史进度续播（默认 true）。
   static Future<bool> getVideoResumeEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoResumeEnabled) ?? true;
+    return instance._read((sp) => sp.getBool(_kVideoResumeEnabled) ?? true);
   }
 
   static Future<void> setVideoResumeEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoResumeEnabled, v);
+    await _writeAndNotify((sp) => sp.setBool(_kVideoResumeEnabled, v));
   }
 
   /// 断点续播提示开关（默认 true）。
   static Future<bool> getVideoResumeHintEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kVideoResumeHintEnabled) ?? true;
+    return instance._read((sp) => sp.getBool(_kVideoResumeHintEnabled) ?? true);
   }
 
   static Future<void> setVideoResumeHintEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kVideoResumeHintEnabled, v);
+    await _writeAndNotify((sp) => sp.setBool(_kVideoResumeHintEnabled, v));
   }
 
   /// 图片查看器：是否启用“音量键翻页”（默认关闭）。
   static Future<bool> getImageVolumeKeyPaging() async {
-    final sp = await _sp();
-    return sp.getBool(_kImageVolumeKeyPaging) ?? false;
+    return instance._read((sp) => sp.getBool(_kImageVolumeKeyPaging) ?? false);
   }
 
   static Future<void> setImageVolumeKeyPaging(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kImageVolumeKeyPaging, v);
+    await _writeAndNotify((sp) => sp.setBool(_kImageVolumeKeyPaging, v));
   }
 
   /// 图片查看器：退出后是否自动定位到最后浏览图片（默认开启）。
   static Future<bool> getImageExitLocateEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kImageExitLocateEnabled) ?? true;
+    return instance._read((sp) => sp.getBool(_kImageExitLocateEnabled) ?? true);
   }
 
   static Future<void> setImageExitLocateEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kImageExitLocateEnabled, v);
+    await _writeAndNotify((sp) => sp.setBool(_kImageExitLocateEnabled, v));
   }
 
   /// 是否自动进入上次选择的收藏夹（默认关闭）。
   static Future<bool> getAutoEnterLastFavorite() async {
-    final sp = await _sp();
-    return sp.getBool(_kAutoEnterLastFavorite) ?? false;
+    return instance._read((sp) => sp.getBool(_kAutoEnterLastFavorite) ?? false);
   }
 
   static Future<void> setAutoEnterLastFavorite(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kAutoEnterLastFavorite, v);
+    await _writeAndNotify((sp) => sp.setBool(_kAutoEnterLastFavorite, v));
   }
 
   static Future<bool> getEmbyExclusiveFavoritesUiEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kEmbyExclusiveFavoritesUiEnabled) ?? false;
+    return instance._read(
+      (sp) => sp.getBool(_kEmbyExclusiveFavoritesUiEnabled) ?? false,
+    );
   }
 
   static Future<void> setEmbyExclusiveFavoritesUiEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kEmbyExclusiveFavoritesUiEnabled, v);
+    await _writeAndNotify(
+      (sp) => sp.setBool(_kEmbyExclusiveFavoritesUiEnabled, v),
+    );
   }
 
   static Future<String?> getLastFavoriteId() async {
-    final sp = await _sp();
-    final v = sp.getString(_kLastFavoriteId);
-    if (v == null || v.trim().isEmpty) return null;
-    return v;
+    return instance._read((sp) {
+      final v = sp.getString(_kLastFavoriteId);
+      if (v == null || v.trim().isEmpty) return null;
+      return v;
+    });
   }
 
   static Future<void> setLastFavoriteId(String? id) async {
-    final sp = await _sp();
-    if (id == null || id.trim().isEmpty) {
-      await sp.remove(_kLastFavoriteId);
-      return;
-    }
-    await sp.setString(_kLastFavoriteId, id.trim());
+    await _writeAndNotify((sp) async {
+      if (id == null || id.trim().isEmpty) {
+        await sp.remove(_kLastFavoriteId);
+        return;
+      }
+      await sp.setString(_kLastFavoriteId, id.trim());
+    });
   }
 
   /// 收藏夹：每个目录独立记忆视图/排序/升降序（默认关闭）。
   static Future<bool> getFavoritePerDirectoryDisplaySettingsEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kFavoritePerDirectoryDisplaySettingsEnabled) ?? false;
+    return instance._read(
+      (sp) => sp.getBool(_kFavoritePerDirectoryDisplaySettingsEnabled) ?? false,
+    );
   }
 
   static Future<void> setFavoritePerDirectoryDisplaySettingsEnabled(
       bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kFavoritePerDirectoryDisplaySettingsEnabled, v);
+    await _writeAndNotify(
+      (sp) => sp.setBool(_kFavoritePerDirectoryDisplaySettingsEnabled, v),
+    );
   }
 
   /// 收藏夹目录显示状态（按目录记忆的视图/排序/升降序）。
@@ -347,94 +382,96 @@ class AppSettings {
   /// - value: LayerSettings 的 json（v/s/a）
   static Future<Map<String, dynamic>>
       getFavoritePerDirectoryDisplaySettingsState() async {
-    final sp = await _sp();
-    final raw = sp.getString(_kFavoritePerDirectoryDisplaySettingsState);
-    if (raw == null || raw.trim().isEmpty) return <String, dynamic>{};
-    try {
-      final j = jsonDecode(raw);
-      if (j is! Map) return <String, dynamic>{};
-      return j.cast<String, dynamic>();
-    } catch (_) {
-      return <String, dynamic>{};
-    }
+    return instance._read((sp) {
+      final raw = sp.getString(_kFavoritePerDirectoryDisplaySettingsState);
+      if (raw == null || raw.trim().isEmpty) return <String, dynamic>{};
+      try {
+        final j = jsonDecode(raw);
+        if (j is! Map) return <String, dynamic>{};
+        return j.cast<String, dynamic>();
+      } catch (_) {
+        return <String, dynamic>{};
+      }
+    });
   }
 
   static Future<void> setFavoritePerDirectoryDisplaySettingsState(
       Map<String, dynamic> data) async {
-    final sp = await _sp();
-    if (data.isEmpty) {
-      await sp.remove(_kFavoritePerDirectoryDisplaySettingsState);
-      return;
-    }
-    await sp.setString(
-      _kFavoritePerDirectoryDisplaySettingsState,
-      jsonEncode(data),
-    );
+    await _writeAndNotify((sp) async {
+      if (data.isEmpty) {
+        await sp.remove(_kFavoritePerDirectoryDisplaySettingsState);
+        return;
+      }
+      await sp.setString(
+        _kFavoritePerDirectoryDisplaySettingsState,
+        jsonEncode(data),
+      );
+    });
   }
 
   /// 历史记录开关（默认开启）。
   static Future<bool> getHistoryEnabled() async {
-    final sp = await _sp();
-    return sp.getBool(_kHistoryEnabled) ?? true;
+    return instance._read((sp) => sp.getBool(_kHistoryEnabled) ?? true);
   }
 
   // ⚠️ 已移除：get/setHistoryRecordFolderOnImageOpen
 
   static Future<void> setHistoryEnabled(bool v) async {
-    final sp = await _sp();
-    await sp.setBool(_kHistoryEnabled, v);
+    await _writeAndNotify((sp) => sp.setBool(_kHistoryEnabled, v));
   }
 
   static Future<bool> getTagEnabled() async {
-    final sp = await SharedPreferences.getInstance();
-    return sp.getBool(_kTagEnabled) ?? true;
+    return instance._read((sp) => sp.getBool(_kTagEnabled) ?? true);
   }
 
   static Future<void> setTagEnabled(bool v) async {
-    final sp = await SharedPreferences.getInstance();
-    await sp.setBool(_kTagEnabled, v);
+    await _writeAndNotify((sp) => sp.setBool(_kTagEnabled, v));
   }
 
   static Future<String> getFolderSearchScope() async {
-    final sp = await SharedPreferences.getInstance();
-    final raw = (sp.getString(_kFolderSearchScope) ?? '').trim();
-    const allowed = <String>{
-      'currentDirectory',
-      'currentCollection',
-      'allCollections',
-      'singleCollection',
-    };
-    if (!allowed.contains(raw)) return 'currentCollection';
-    return raw;
+    return instance._read((sp) {
+      final raw = (sp.getString(_kFolderSearchScope) ?? '').trim();
+      const allowed = <String>{
+        'currentDirectory',
+        'currentCollection',
+        'allCollections',
+        'singleCollection',
+      };
+      if (!allowed.contains(raw)) return 'currentCollection';
+      return raw;
+    });
   }
 
   static Future<void> setFolderSearchScope(String value) async {
-    final sp = await SharedPreferences.getInstance();
-    const allowed = <String>{
-      'currentDirectory',
-      'currentCollection',
-      'allCollections',
-      'singleCollection',
-    };
-    final v = allowed.contains(value) ? value : 'currentCollection';
-    await sp.setString(_kFolderSearchScope, v);
+    await _writeAndNotify((sp) {
+      const allowed = <String>{
+        'currentDirectory',
+        'currentCollection',
+        'allCollections',
+        'singleCollection',
+      };
+      final v = allowed.contains(value) ? value : 'currentCollection';
+      return sp.setString(_kFolderSearchScope, v);
+    });
   }
 
   static Future<String?> getFolderSearchSingleCollectionId() async {
-    final sp = await SharedPreferences.getInstance();
-    final v = (sp.getString(_kFolderSearchSingleCollectionId) ?? '').trim();
-    if (v.isEmpty) return null;
-    return v;
+    return instance._read((sp) {
+      final v = (sp.getString(_kFolderSearchSingleCollectionId) ?? '').trim();
+      if (v.isEmpty) return null;
+      return v;
+    });
   }
 
   static Future<void> setFolderSearchSingleCollectionId(String? id) async {
-    final sp = await SharedPreferences.getInstance();
-    final v = (id ?? '').trim();
-    if (v.isEmpty) {
-      await sp.remove(_kFolderSearchSingleCollectionId);
-      return;
-    }
-    await sp.setString(_kFolderSearchSingleCollectionId, v);
+    await _writeAndNotify((sp) async {
+      final v = (id ?? '').trim();
+      if (v.isEmpty) {
+        await sp.remove(_kFolderSearchSingleCollectionId);
+        return;
+      }
+      await sp.setString(_kFolderSearchSingleCollectionId, v);
+    });
   }
 }
 

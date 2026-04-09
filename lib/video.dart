@@ -21,6 +21,13 @@ import 'dart:math';
 import 'package:native_device_orientation/native_device_orientation.dart';
 import 'package:collection/collection.dart';
 
+part 'player/video_state_groups.dart';
+part 'player/mobile_controls_overlay.dart';
+part 'player/mobile_reporter_subtitle_orientation.dart';
+part 'player/desktop_reporter_subtitle_orientation.dart';
+part 'player/player_gesture_handlers.dart';
+part 'player/player_catalog_and_expansion.dart';
+
 const SystemUiOverlayStyle _kLightStatusBarStyle = SystemUiOverlayStyle(
   statusBarColor: Colors.transparent,
   statusBarIconBrightness: Brightness.light,
@@ -58,37 +65,6 @@ const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
 /// L / Ctrl+L：打开目录
 /// Esc：退出全屏 或 关闭目录/菜单
 /// ===============================
-
-/// 播放器内“目录/同文件夹播放列表”按需扩容结果。
-///
-/// - sources：扩容后的 sources 列表
-/// - index：当前播放条目在扩容列表中的索引
-class _ExpandedPlaylist {
-  final List<String> sources;
-  final int index;
-  const _ExpandedPlaylist({required this.sources, required this.index});
-}
-
-class _WebDavRef {
-  final String accountId;
-  final String relPath; // decoded (no leading slash)
-  const _WebDavRef({required this.accountId, required this.relPath});
-}
-
-class _WebDavListItem {
-  final String name;
-  final String relPath; // decoded (no leading slash)
-  final bool isDir;
-  final int size;
-  final DateTime? modified;
-  const _WebDavListItem({
-    required this.name,
-    required this.relPath,
-    required this.isDir,
-    required this.size,
-    required this.modified,
-  });
-}
 
 class _EmbyRef {
   final String accountId;
@@ -211,33 +187,51 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   // ============================
   // Emby 播放上报（Playback Check-ins）
   // ============================
-  _EmbyPlaybackSession? _embyPlayback;
-  Timer? _embyProgressTimer;
+  final _DesktopReporterState _reporterState = _DesktopReporterState();
 
   /// 发送上报的串行队列（避免并发多次 POST 导致顺序错乱）。
-  Future<void> _embyReportQueue = Future.value();
+  Future<void> get _embyReportQueue => _reporterState.embyReportQueue;
+  set _embyReportQueue(Future<void> value) =>
+      _reporterState.embyReportQueue = value;
 
   /// 降噪：记录最近一次主动上报时间，用于避免用户频繁操作时“刷爆服务端”。
-  DateTime _embyLastInteractiveReportAt =
-      DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime get _embyLastInteractiveReportAt =>
+      _reporterState.embyLastInteractiveReportAt;
+  set _embyLastInteractiveReportAt(DateTime value) =>
+      _reporterState.embyLastInteractiveReportAt = value;
 
   /// 播放器目录：WebDAV 视频 → 同目录“侧边封面图”（若存在）
   /// - key: 视频 source（webdav://...）
   /// - value: 图片 source（webdav://... 指向 jpg/png/webp）
   final Map<String, String> _webDavSidecarCoverByVideoSource =
       <String, String>{};
+  static const int _kMaxWebDavSidecarCoverEntries = 300;
 
   /// WebDAV：目录缩略图生成（前缀下载 + 抽帧）Future 缓存
   final Map<String, Future<File?>> _webDavVideoThumbFutureCache =
       <String, Future<File?>>{};
+  static const int _kMaxWebDavVideoThumbFutureEntries = 160;
 
   /// WebDAV：source → (url, headers) 解析 Future 缓存
   final Map<String, Future<({String url, Map<String, String> headers})?>>
       _webDavResolveFutureCache =
       <String, Future<({String url, Map<String, String> headers})?>>{};
+  static const int _kMaxWebDavResolveEntries = 200;
 
   /// 目录缩略图任务并发控制（移动端：避免边播边疯狂拉封面导致卡顿）
   final AsyncSemaphore _catalogThumbSemaphore = AsyncSemaphore(1);
+
+  void _trimStringCache(Map<String, String> cache, int maxEntries) {
+    while (cache.length > maxEntries) {
+      cache.remove(cache.keys.first);
+    }
+  }
+
+  void _trimFutureCache<T>(Map<String, Future<T>> cache, int maxEntries) {
+    while (cache.length > maxEntries) {
+      cache.remove(cache.keys.first);
+    }
+  }
 
   // 播放器参数
   double _rate = 1.0;
@@ -257,10 +251,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   bool _cursorHidden = false;
   Timer? _uiHideTimer;
   Timer? _cursorHideTimer;
-  bool _isFullscreen = false; // 仅桌面端使用逻辑，移动端主要靠重力感应
-
-  // ✅ 新增：屏幕方向锁定状态
-  bool _isScreenLocked = false;
+  final _DesktopOrientationState _orientationState = _DesktopOrientationState();
 
   // ✅ 新增：传感器驱动的“画面旋转 + 原生强制旋转”
   // 说明：
@@ -270,24 +261,12 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   //    - 原生强制旋转：通过 MainActivity 的 MethodChannel 请求 requestedOrientation，尽量让屏幕也跟着转。
   final MethodChannel _oriChannel = const MethodChannel('glacier/orientation');
   StreamSubscription<NativeDeviceOrientation>? _nativeOriSub;
-  NativeDeviceOrientation _appliedNativeOri = NativeDeviceOrientation.unknown;
-  NativeDeviceOrientation? _lastOriCandidate;
-  int _oriStableCount = 0;
-  DateTime _lastOriApplyAt = DateTime.fromMillisecondsSinceEpoch(0);
-  int _videoQuarterTurns = 0;
-  bool _autoRotateEnabled = true;
 
   // ✅ 新增：外部字幕（SRT）支持
-  List<String> _srtCandidates = <String>[];
-  String? _srtSelected;
-  bool _srtEnabled = false;
+  final _DesktopSubtitleState _subtitleState = _DesktopSubtitleState();
 
   // ✅ 新增：Emby 字幕轨道（通过 Emby API 获取）
-  List<EmbySubtitleTrack> _embySubtitleCandidates = <EmbySubtitleTrack>[];
-  EmbySubtitleTrack? _embySubtitleSelected;
-
   // ✅ 新增：Emby 字幕自动选择（仅在未手动选择时触发）
-  String? _lastAutoSubtitleItemId;
   StreamSubscription<Playlist>? _playlistSub;
 
   // 检查器
@@ -317,10 +296,11 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   Timer? _catalogHotspotTimer;
 
   // 手势控制相关状态
-  bool _gestureActive = false;
-  String _gestureType = ''; // 'seek', 'volume', 'brightness'
-  String _gestureText = '';
-  IconData? _gestureIcon;
+  final _DesktopGestureState _gestureState = _DesktopGestureState();
+  final ValueNotifier<_DesktopGestureOverlayViewData>
+      _desktopGestureOverlayNotifier =
+      ValueNotifier<_DesktopGestureOverlayViewData>(
+          const _DesktopGestureOverlayViewData.inactive());
 
   // ===== 新增：设置相关缓存（避免每次 build 都 await） =====
   double _subtitleFontSize = 22.0;
@@ -361,9 +341,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   double? _rateBeforeLongPress;
 
   // 拖动进度相关
-  Duration _dragStartPos = Duration.zero;
-  Duration _dragTargetPos = Duration.zero;
-
   // Getters
   bool get _hasPlaylist => _sources.isNotEmpty;
   bool get _isDesktop => !kIsWeb && !Platform.isAndroid && !Platform.isIOS;
@@ -373,6 +350,91 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
 
   static const _hideDelay = Duration(seconds: 5);
   static const _cursorDelay = Duration(milliseconds: 1600);
+
+  _EmbyPlaybackSession? get _embyPlayback => _reporterState.embyPlayback;
+  set _embyPlayback(_EmbyPlaybackSession? value) =>
+      _reporterState.embyPlayback = value;
+
+  Timer? get _embyProgressTimer => _reporterState.embyProgressTimer;
+  set _embyProgressTimer(Timer? value) =>
+      _reporterState.embyProgressTimer = value;
+
+  bool get _isFullscreen => _orientationState.isFullscreen;
+  set _isFullscreen(bool value) => _orientationState.isFullscreen = value;
+
+  bool get _isScreenLocked => _orientationState.isScreenLocked;
+  set _isScreenLocked(bool value) => _orientationState.isScreenLocked = value;
+
+  NativeDeviceOrientation get _appliedNativeOri =>
+      _orientationState.appliedNativeOri;
+  set _appliedNativeOri(NativeDeviceOrientation value) =>
+      _orientationState.appliedNativeOri = value;
+
+  NativeDeviceOrientation? get _lastOriCandidate =>
+      _orientationState.lastOriCandidate;
+  set _lastOriCandidate(NativeDeviceOrientation? value) =>
+      _orientationState.lastOriCandidate = value;
+
+  int get _oriStableCount => _orientationState.oriStableCount;
+  set _oriStableCount(int value) => _orientationState.oriStableCount = value;
+
+  DateTime get _lastOriApplyAt => _orientationState.lastOriApplyAt;
+  set _lastOriApplyAt(DateTime value) =>
+      _orientationState.lastOriApplyAt = value;
+
+  int get _videoQuarterTurns => _orientationState.videoQuarterTurns;
+  set _videoQuarterTurns(int value) =>
+      _orientationState.videoQuarterTurns = value;
+
+  bool get _autoRotateEnabled => _orientationState.autoRotateEnabled;
+  set _autoRotateEnabled(bool value) =>
+      _orientationState.autoRotateEnabled = value;
+
+  List<String> get _srtCandidates => _subtitleState.srtCandidates;
+  set _srtCandidates(List<String> value) =>
+      _subtitleState.srtCandidates = value;
+
+  String? get _srtSelected => _subtitleState.srtSelected;
+  set _srtSelected(String? value) => _subtitleState.srtSelected = value;
+
+  bool get _srtEnabled => _subtitleState.srtEnabled;
+  set _srtEnabled(bool value) => _subtitleState.srtEnabled = value;
+
+  List<EmbySubtitleTrack> get _embySubtitleCandidates =>
+      _subtitleState.embySubtitleCandidates;
+  set _embySubtitleCandidates(List<EmbySubtitleTrack> value) =>
+      _subtitleState.embySubtitleCandidates = value;
+
+  EmbySubtitleTrack? get _embySubtitleSelected =>
+      _subtitleState.embySubtitleSelected;
+  set _embySubtitleSelected(EmbySubtitleTrack? value) =>
+      _subtitleState.embySubtitleSelected = value;
+
+  String? get _lastAutoSubtitleItemId => _subtitleState.lastAutoSubtitleItemId;
+  set _lastAutoSubtitleItemId(String? value) =>
+      _subtitleState.lastAutoSubtitleItemId = value;
+
+  bool get _gestureActive => _gestureState.active;
+  set _gestureActive(bool value) => _gestureState.active = value;
+
+  String get _gestureType => _gestureState.type;
+  set _gestureType(String value) => _gestureState.type = value;
+
+  String get _gestureText => _gestureState.text;
+  set _gestureText(String value) => _gestureState.text = value;
+
+  IconData? get _gestureIcon => _gestureState.icon;
+  set _gestureIcon(IconData? value) => _gestureState.icon = value;
+
+  Duration get _dragStartPos => _gestureState.dragStartPos;
+  set _dragStartPos(Duration value) => _gestureState.dragStartPos = value;
+
+  Duration get _dragTargetPos => _gestureState.dragTargetPos;
+  set _dragTargetPos(Duration value) => _gestureState.dragTargetPos = value;
+
+  void _onAppSettingsChanged() {
+    unawaited(_loadSettings());
+  }
 
   // WebDAV Helpers (保持不变)
   Future<Map<String, Map<String, String>>> _loadWebDavAccountCache() async {
@@ -533,14 +595,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     try {
       String accountId = '';
       String relEncoded = '';
-      int? sizeHint;
-      String? contentTypeHint;
 
-      try {
-        final u = Uri.parse(source);
-        sizeHint = int.tryParse(u.queryParameters['size'] ?? '');
-        contentTypeHint = u.queryParameters['ct'];
-      } catch (_) {}
       final ref = parseWebDavSource(source);
       if (ref == null) return null;
       accountId = ref.accountId;
@@ -573,6 +628,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
   @override
   void initState() {
     super.initState();
+    AppSettings.instance.addListener(_onAppSettingsChanged);
 
     // ✅ 初始化内部播放列表（可变）
     _sources = List<String>.from(widget.videoPaths);
@@ -704,7 +760,8 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
       try {
         await _player.stop();
       } catch (_) {}
-      if (mounted) setState(() => _ready = false);
+      _ready = false;
+      if (mounted) setState(() {});
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(redactSensitiveText(e.toString()))),
@@ -842,7 +899,8 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     _player.setRate(_rate);
     _player.setVolume(_volume);
 
-    if (mounted) setState(() => _ready = true);
+    _ready = true;
+    if (mounted) setState(() {});
     // ✅ 写入历史记录：改为“起播后记录”，避免目录播放列表被误批量写入历史。
     // 说明：当播放真正开始且进度达到阈值后，才会写入。
     _armHistoryRecordForCurrent();
@@ -854,161 +912,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     // - 仅拼接 streamUrl 直连播放会绕过 Emby 的会话管理；
     // - 上报是 best-effort，不影响播放主流程，因此这里用 unawaited。
     unawaited(_startEmbyPlaybackCheckInsIfNeeded(reason: 'initOpen'));
-  }
-
-  Future<void> _autoLoadSrtIfAny() async {
-    if (!_hasPlaylist) return;
-    if (_isWebDavSource(_currentPath)) return;
-
-    // ✅ Emby：刷新字幕轨道（不依赖本地同目录文件）。
-    // 这里不强制自动启用，避免误切换；仅用于菜单选择。
-    await _refreshEmbySubtitleCandidatesIfAny();
-
-    await _refreshSrtCandidates();
-    if (_srtCandidates.isEmpty) {
-      // 没有外部字幕：恢复自动(内嵌)选择
-      try {
-        await _player.setSubtitleTrack(SubtitleTrack.auto());
-      } catch (_) {}
-      if (mounted)
-        setState(() {
-          _srtEnabled = false;
-          _srtSelected = null;
-          _embySubtitleSelected = null;
-        });
-      return;
-    }
-    final base = p.basenameWithoutExtension(_currentPath).toLowerCase();
-    String pick = _srtCandidates.first;
-    for (final s in _srtCandidates) {
-      if (p.basenameWithoutExtension(s).toLowerCase() == base) {
-        pick = s;
-        break;
-      }
-    }
-    await _applySrt(pick);
-  }
-
-  Future<void> _refreshSrtCandidates() async {
-    // ✅ 仅对“本地文件路径”做同目录扫描；网络/Emby 播放地址无法可靠映射到本地目录。
-    // 这样做是为了避免在 Emby 播放时误报“同目录未找到 .srt”，同时保持逻辑清晰。
-    try {
-      final p0 = _currentPath.trim();
-      if (p0.isEmpty) return;
-
-      // 通过协议判断：http/https/emby 等一律视为非本地文件
-      final lower = p0.toLowerCase();
-      if (lower.startsWith('http://') ||
-          lower.startsWith('https://') ||
-          lower.startsWith('emby://')) {
-        if (mounted) setState(() => _srtCandidates = <String>[]);
-        return;
-      }
-
-      final f = File(p0);
-      final dir = f.parent;
-      if (!await dir.exists()) return;
-
-      final base = p.basenameWithoutExtension(f.path).toLowerCase();
-      final srts = <String>[];
-      await for (final ent in dir.list(followLinks: false)) {
-        if (ent is File && ent.path.toLowerCase().endsWith('.srt')) {
-          srts.add(ent.path);
-        }
-      }
-
-      // ✅ 优先同名字幕（用户习惯：视频同名 .srt），其余按字母排序
-      srts.sort((a, b) {
-        final aa = p.basenameWithoutExtension(a).toLowerCase();
-        final bb = p.basenameWithoutExtension(b).toLowerCase();
-        final am = (aa == base);
-        final bm = (bb == base);
-        if (am != bm) return am ? -1 : 1;
-        return a.toLowerCase().compareTo(b.toLowerCase());
-      });
-
-      if (mounted) setState(() => _srtCandidates = srts);
-    } catch (_) {}
-  }
-
-  Future<void> _applySrt(String? path) async {
-    try {
-      if (path == null) {
-        await _player.setSubtitleTrack(SubtitleTrack.no());
-        if (mounted)
-          setState(() {
-            _srtEnabled = false;
-            _srtSelected = null;
-            _embySubtitleSelected = null;
-          });
-      } else {
-        await _player.setSubtitleTrack(
-          SubtitleTrack.uri(
-            File(path).uri.toString(),
-            title: p.basename(path),
-          ),
-        );
-        if (mounted)
-          setState(() {
-            _srtEnabled = true;
-            _srtSelected = path;
-            _embySubtitleSelected = null;
-          });
-      }
-    } catch (_) {}
-
-    // ✅ Emby：字幕开关/切换属于交互事件，建议即时上报。
-    // 说明：本地字幕对 Emby 服务端未必可识别，但上报可以让服务端 UI 与“是否开启字幕”更一致。
-    unawaited(_reportEmbyProgress(
-        eventName: 'SubtitleTrackChange', interactive: true));
-    _pokeUI();
-  }
-
-  /// 应用 Emby 字幕轨道（通过 URL 直接交给 media_kit）。
-  Future<void> _applyEmbySubtitle(EmbySubtitleTrack? track) async {
-    try {
-      if (track == null) {
-        await _player.setSubtitleTrack(SubtitleTrack.no());
-        if (mounted)
-          setState(() {
-            _srtEnabled = false;
-            _srtSelected = null;
-            _embySubtitleSelected = null;
-          });
-
-        // ✅ Emby：清空字幕选择
-        if (_embyPlayback != null) {
-          _embyPlayback!.subtitleStreamIndex = null;
-        }
-      } else {
-        final url = await _buildEmbySubtitleUrl(track);
-        if (url == null || url.trim().isEmpty) {
-          if (mounted) {
-            ScaffoldMessenger.of(context)
-                .showSnackBar(const SnackBar(content: Text('无法获取 Emby 字幕地址')));
-          }
-          return;
-        }
-        await _player
-            .setSubtitleTrack(SubtitleTrack.uri(url, title: track.title));
-        if (mounted)
-          setState(() {
-            _srtEnabled = true;
-            _srtSelected = null;
-            _embySubtitleSelected = track;
-          });
-
-        // ✅ Emby：记录当前选择的字幕流 index，便于后续进度上报。
-        if (_embyPlayback != null) {
-          _embyPlayback!.subtitleStreamIndex = track.index;
-        }
-      }
-    } catch (_) {}
-
-    // ✅ Emby：字幕切换属于交互事件，按官方事件名上报。
-    unawaited(_reportEmbyProgress(
-        eventName: 'SubtitleTrackChange', interactive: true));
-    _pokeUI();
   }
 
   EmbySubtitleTrack? _pickBestEmbySubtitle(List<EmbySubtitleTrack> tracks) {
@@ -1091,42 +994,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     return null;
   }
 
-  Future<void> _refreshEmbySubtitleCandidatesIfAny() async {
-    final np = await _resolveEmbyNowPlaying(_currentPath);
-    if (np == null) {
-      if (mounted)
-        setState(() => _embySubtitleCandidates = <EmbySubtitleTrack>[]);
-      return;
-    }
-
-    try {
-      final client = EmbyClient(np.account);
-      final tracks = await client.listSubtitleTracks(np.itemId);
-      if (mounted) setState(() => _embySubtitleCandidates = tracks);
-
-      // ✅ Emby 外部字幕自动启用（你希望不点图标也能自动加载）
-      // 触发条件：
-      // - 当前是 Emby 播放源
-      // - 当前没有启用任何字幕（本地 SRT/Emby 都没有选中）
-      // - 同一个 itemId 只自动一次，避免用户手动切换后被覆盖
-      if (!_srtEnabled &&
-          _srtSelected == null &&
-          _embySubtitleSelected == null) {
-        final itemId = np.itemId;
-        if (_lastAutoSubtitleItemId != itemId) {
-          final pick = _pickBestEmbySubtitle(tracks);
-          if (pick != null) {
-            _lastAutoSubtitleItemId = itemId;
-            await _applyEmbySubtitle(pick);
-          }
-        }
-      }
-    } catch (_) {
-      if (mounted)
-        setState(() => _embySubtitleCandidates = <EmbySubtitleTrack>[]);
-    }
-  }
-
   Future<String?> _buildEmbySubtitleUrl(EmbySubtitleTrack track) async {
     final np = await _resolveEmbyNowPlaying(_currentPath);
     if (np == null) return null;
@@ -1175,362 +1042,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     } catch (_) {
       return null;
     }
-  }
-
-  // ============================
-  // Emby 播放上报：开始/进度/停止
-  // ============================
-
-  /// 将 Dart Duration 转为 Emby 需要的 ticks（1 tick = 100ns）。
-  int _toEmbyTicks(Duration d) {
-    // 1 微秒 = 10 * 100ns
-    final us = d.inMicroseconds;
-    if (us <= 0) return 0;
-    return us * 10;
-  }
-
-  Map<String, dynamic> _buildEmbyCheckInBody(
-    _EmbyPlaybackSession s, {
-    String? eventName,
-    bool? isPaused,
-  }) {
-    final paused = isPaused ?? !_player.state.playing;
-    final pos = _player.state.position;
-
-    final body = <String, dynamic>{
-      'QueueableMediaTypes': const ['Video'],
-      'CanSeek': true,
-      'ItemId': s.itemId,
-      'MediaSourceId': s.mediaSourceId,
-      if (s.audioStreamIndex != null) 'AudioStreamIndex': s.audioStreamIndex,
-      if (s.subtitleStreamIndex != null)
-        'SubtitleStreamIndex': s.subtitleStreamIndex,
-      'IsPaused': paused,
-      'IsMuted': _volume <= 0,
-      'PositionTicks': _toEmbyTicks(pos),
-      'VolumeLevel': _volume.round().clamp(0, 100),
-      // ✅ 这里按“直连播放”上报；如果未来引入转码/HLS，可改为 Transcode/DirectPlay。
-      'PlayMethod': 'DirectStream',
-      'PlaySessionId': s.playSessionId,
-      'PlaylistIndex': _index,
-      'PlaylistLength': max(1, _sources.length),
-      'PlaybackRate': _rate,
-    };
-    if (eventName != null && eventName.trim().isNotEmpty) {
-      body['EventName'] = eventName.trim();
-    }
-    return body;
-  }
-
-  Future<void> _enqueueEmbyReport(Future<void> Function() job) {
-    // ✅ 串行化所有上报请求，避免并发导致服务端看到的状态乱序。
-    _embyReportQueue = _embyReportQueue.then((_) => job()).catchError((e) {
-      debugPrint('Emby 播放上报失败：${redactSensitiveText(e.toString())}');
-    });
-    return _embyReportQueue;
-  }
-
-  void _ensureEmbyProgressTimer() {
-    if (_embyPlayback == null) return;
-    _embyProgressTimer ??= Timer.periodic(const Duration(seconds: 10), (_) {
-      // ✅ Emby 官方建议：至少每 10 秒上报一次 TimeUpdate。
-      // 这里用 best-effort，不影响播放主流程。
-      unawaited(_reportEmbyProgress(eventName: 'TimeUpdate'));
-    });
-  }
-
-  /// 尝试开启 Emby 播放上报（仅 Emby 源生效）。
-  Future<void> _startEmbyPlaybackCheckInsIfNeeded({String reason = ''}) async {
-    final np = await _resolveEmbyNowPlaying(_currentPath);
-    if (np == null) {
-      await _stopEmbyPlaybackCheckIns(reason: '非 Emby 源');
-      return;
-    }
-
-    // 同一个 itemId 不重复创建会话
-    final cur = _embyPlayback;
-    if (cur != null &&
-        cur.account.id == np.account.id &&
-        cur.itemId == np.itemId) {
-      _ensureEmbyProgressTimer();
-      return;
-    }
-
-    // 切换条目：先停止旧会话，再建立新会话
-    await _stopEmbyPlaybackCheckIns(reason: '切换条目');
-
-    try {
-      final client = EmbyClient(np.account);
-      final pb = await client.playbackInfo(np.itemId);
-      if (pb == null) return;
-
-      final session = _EmbyPlaybackSession(
-        account: np.account,
-        itemId: np.itemId,
-        mediaSourceId: pb.mediaSourceId,
-        playSessionId: pb.playSessionId,
-        audioStreamIndex: pb.audioStreamIndex,
-        subtitleStreamIndex: pb.subtitleStreamIndex,
-      );
-      _embyPlayback = session;
-
-      // ✅ 上报“开始播放”
-      await _enqueueEmbyReport(() async {
-        await client.reportPlaybackStarted(
-            _buildEmbyCheckInBody(session, isPaused: !_player.state.playing));
-      });
-
-      _ensureEmbyProgressTimer();
-    } catch (e) {
-      debugPrint('Emby 会话创建失败：${redactSensitiveText(e.toString())}');
-    }
-  }
-
-  Future<void> _reportEmbyProgress(
-      {required String eventName, bool interactive = false}) async {
-    final s = _embyPlayback;
-    if (s == null) return;
-
-    if (interactive) {
-      final now = DateTime.now();
-      if (now.difference(_embyLastInteractiveReportAt).inMilliseconds < 650) {
-        // ✅ 降噪：短时间内连续手势/按钮操作只保留一次上报。
-        return;
-      }
-      _embyLastInteractiveReportAt = now;
-    }
-
-    final client = EmbyClient(s.account);
-    final body = _buildEmbyCheckInBody(s, eventName: eventName);
-    await _enqueueEmbyReport(() async {
-      await client.reportPlaybackProgress(body);
-    });
-  }
-
-  Future<void> _stopEmbyPlaybackCheckIns({String reason = ''}) async {
-    _embyProgressTimer?.cancel();
-    _embyProgressTimer = null;
-
-    final s = _embyPlayback;
-    _embyPlayback = null;
-    if (s == null) return;
-
-    try {
-      final client = EmbyClient(s.account);
-      await _enqueueEmbyReport(() async {
-        await client
-            .reportPlaybackStopped(_buildEmbyCheckInBody(s, isPaused: true));
-      });
-    } catch (e) {
-      debugPrint('Emby 停止上报失败：${redactSensitiveText(e.toString())}');
-    }
-  }
-
-  Future<void> _showSrtMenu() async {
-    _pokeUI();
-    await _refreshEmbySubtitleCandidatesIfAny();
-    await _refreshSrtCandidates();
-    if (!mounted) return;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      builder: (ctx) {
-        final items = <Widget>[];
-        items.add(ListTile(
-          title: const Text('关闭字幕', style: TextStyle(color: Colors.white)),
-          trailing: (!_srtEnabled &&
-                  _srtSelected == null &&
-                  _embySubtitleSelected == null)
-              ? const Icon(Icons.check, color: Colors.white)
-              : null,
-          onTap: () {
-            Navigator.pop(ctx);
-            _applySrt(null);
-          },
-        ));
-        items.add(ListTile(
-          title:
-              const Text('自动选择 (内嵌/默认)', style: TextStyle(color: Colors.white)),
-          trailing:
-              (_srtEnabled == false && _srtSelected == null) ? null : null,
-          onTap: () async {
-            Navigator.pop(ctx);
-            try {
-              await _player.setSubtitleTrack(SubtitleTrack.auto());
-            } catch (_) {}
-            if (mounted)
-              setState(() {
-                _srtEnabled = false;
-                _srtSelected = null;
-                _embySubtitleSelected = null;
-              });
-            _pokeUI();
-          },
-        ));
-        if (_srtCandidates.isNotEmpty) {
-          items.add(const Padding(
-            padding: EdgeInsets.fromLTRB(16, 10, 16, 6),
-            child: Text('同目录 SRT',
-                style: TextStyle(color: Colors.white70, fontSize: 12)),
-          ));
-          for (final s in _srtCandidates) {
-            final selected = (_srtSelected == s);
-            items.add(ListTile(
-              title: Text(p.basename(s),
-                  style: const TextStyle(color: Colors.white)),
-              trailing: selected
-                  ? const Icon(Icons.check, color: Colors.white)
-                  : null,
-              onTap: () {
-                Navigator.pop(ctx);
-                _applySrt(s);
-              },
-            ));
-          }
-        } else {
-          // ⚠️ 这里不能用 const：提示文案依赖运行时的当前播放地址
-          final tip = _currentPath.toLowerCase().startsWith('http')
-              ? '当前来源为网络播放，无法扫描同目录 .srt（请使用 Emby 字幕轨道）'
-              : '当前目录未找到 .srt';
-          items.add(Padding(
-            padding: const EdgeInsets.all(12),
-            child: Text(tip, style: const TextStyle(color: Colors.white70)),
-          ));
-        }
-
-        // ✅ Emby 字幕轨道
-        if (_embySubtitleCandidates.isNotEmpty) {
-          items.add(const Padding(
-            padding: EdgeInsets.fromLTRB(16, 10, 16, 6),
-            child: Text('Emby 字幕',
-                style: TextStyle(color: Colors.white70, fontSize: 12)),
-          ));
-          for (final t in _embySubtitleCandidates) {
-            final selected = (_embySubtitleSelected?.index == t.index) &&
-                (_embySubtitleSelected?.mediaSourceId == t.mediaSourceId);
-            items.add(ListTile(
-              title: Text(t.title, style: const TextStyle(color: Colors.white)),
-              trailing: selected
-                  ? const Icon(Icons.check, color: Colors.white)
-                  : null,
-              onTap: () {
-                Navigator.pop(ctx);
-                _applyEmbySubtitle(t);
-              },
-            ));
-          }
-        }
-        return SafeArea(child: ListView(shrinkWrap: true, children: items));
-      },
-    );
-  }
-
-  // ============================
-  // 自动旋转：传感器驱动（画面旋转 + 原生强制旋转）
-  // ============================
-  void _startAutoRotateIfMobile() {
-    if (!_isMobile) return;
-
-    // ✅ 允许所有方向：这是“正常旋转”的基础；即便系统旋转锁开启，后面还会有原生兜底。
-    try {
-      SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-      // ✅ 启动传感器驱动自动旋转：不依赖系统自动旋转开关。
-    } catch (_) {}
-
-    _nativeOriSub?.cancel();
-    _nativeOriSub = NativeDeviceOrientationCommunicator()
-        .onOrientationChanged(useSensor: true)
-        .listen((ori) {
-      if (!_autoRotateEnabled) return;
-
-      // ✅ 当前版本枚举不包含 faceUp/faceDown，平放时通常会给 unknown；忽略 unknown 避免抖动。
-      if (ori == NativeDeviceOrientation.unknown) return;
-
-      // ✅ 稳定判定：同一方向连续出现 2 次才应用，避免传感器抖动频繁切换。
-      if (_lastOriCandidate == ori) {
-        _oriStableCount += 1;
-      } else {
-        _lastOriCandidate = ori;
-        _oriStableCount = 1;
-      }
-      if (_oriStableCount < 2) return;
-
-      // ✅ 降频：至少间隔 450ms 且方向真的变化才应用（避免连续 setOrientation 造成卡顿/闪屏）。
-      final now = DateTime.now();
-      if (now.difference(_lastOriApplyAt).inMilliseconds < 450) return;
-      if (_appliedNativeOri == ori) return;
-
-      _appliedNativeOri = ori;
-      _lastOriApplyAt = now;
-
-      // 1) 先旋转画面（必定生效：即便系统旋转锁开启，也能看到横竖变化）
-      _applyVideoQuarterTurnsByNativeOri(ori);
-
-      // 2) 再尝试原生强制旋转（尽量让屏幕也旋转）
-      _applyNativeOrientationByChannel(ori);
-    });
-  }
-
-  void _stopAutoRotateIfAny() {
-    _nativeOriSub?.cancel();
-    _nativeOriSub = null;
-  }
-
-  void _applyVideoQuarterTurnsByNativeOri(NativeDeviceOrientation ori) {
-    // ✅ 说明：这里做的是“画面旋转”，不依赖系统是否真的旋转屏幕。
-    // portraitUp -> 0
-    // landscapeLeft -> 1 (90°)
-    // portraitDown -> 2 (180°)
-    // landscapeRight -> 3 (270°)
-    int turns = 0;
-    switch (ori) {
-      case NativeDeviceOrientation.landscapeLeft:
-        turns = 1;
-        break;
-      case NativeDeviceOrientation.landscapeRight:
-        turns = 3;
-        break;
-      case NativeDeviceOrientation.portraitDown:
-        turns = 2;
-        break;
-      case NativeDeviceOrientation.portraitUp:
-      default:
-        turns = 0;
-        break;
-    }
-    if (turns != _videoQuarterTurns && mounted) {
-      setState(() => _videoQuarterTurns = turns);
-    }
-  }
-
-  Future<void> _applyNativeOrientationByChannel(
-      NativeDeviceOrientation ori) async {
-    // ✅ 说明：在系统旋转锁开启时，Flutter 侧 setPreferredOrientations 可能被降级为“建议旋转按钮”。
-    // 通过原生 requestedOrientation 兜底，尽量直接切换屏幕方向。
-    try {
-      switch (ori) {
-        case NativeDeviceOrientation.landscapeLeft:
-        case NativeDeviceOrientation.landscapeRight:
-          await _oriChannel.invokeMethod('lockLandscape');
-          break;
-        case NativeDeviceOrientation.portraitDown:
-          await _oriChannel.invokeMethod('lockPortraitUpsideDown');
-          break;
-        case NativeDeviceOrientation.portraitUp:
-        default:
-          await _oriChannel.invokeMethod('lockPortrait');
-          break;
-      }
-    } catch (e) {
-      // ✅ 原生兜底失败也不影响播放：至少画面旋转已经生效。
-      debugPrint('原生强制旋转失败：$e');
-    }
-  }
-
-  Future<void> _unlockNativeOrientation() async {
-    try {
-      await _oriChannel.invokeMethod('unlock');
-    } catch (_) {}
   }
 
   Widget _buildRotatedVideo(Widget video) {
@@ -1595,6 +1106,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     _uiHideTimer?.cancel();
     _cursorHideTimer?.cancel();
     _catalogHotspotTimer?.cancel();
+    AppSettings.instance.removeListener(_onAppSettingsChanged);
 
     // 恢复默认状态
     // ✅ 不再强制回到竖屏：
@@ -1607,6 +1119,7 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(_kDarkStatusBarStyle);
 
+    _desktopGestureOverlayNotifier.dispose();
     _player.dispose();
     super.dispose();
   }
@@ -1641,6 +1154,28 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     } catch (_) {
       // 某些情况下（如 context 不在 Scaffold 树下）SnackBar 会失败，这里静默忽略即可。
     }
+  }
+
+  void _refreshDesktopState() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  void _refreshDesktopGestureState() {
+    if (!mounted) return;
+    _desktopGestureOverlayNotifier.value =
+        _gestureActive && _gestureIcon != null
+            ? _DesktopGestureOverlayViewData(
+                active: true,
+                text: _gestureText,
+                icon: _gestureIcon,
+              )
+            : const _DesktopGestureOverlayViewData.inactive();
+  }
+
+  void _refreshCatalogExpansionState() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _showTitleHint() {
@@ -2175,19 +1710,23 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
                                       : IconButton(
                                           tooltip: '清空',
                                           icon: const Icon(Icons.close),
-                                          onPressed: () =>
-                                              setState2(() => q = ''),
+                                          onPressed: () {
+                                            setState2(() => q = '');
+                                          },
                                         ),
                                   border: OutlineInputBorder(
                                     borderRadius: BorderRadius.circular(12),
                                   ),
                                 ),
-                                onChanged: (v) => setState2(() => q = v),
+                                onChanged: (v) {
+                                  setState2(() => q = v);
+                                },
                               ),
                             ),
                           const Divider(height: 1),
                           Expanded(
                             child: ListView.builder(
+                              itemExtent: 56.0,
                               itemCount: indices.length,
                               itemBuilder: (_, k) {
                                 final i = indices[k];
@@ -2230,276 +1769,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     );
   }
 
-  // ============================
-  // 目录封面/缩略图（WebDAV/Emby/本地）
-  // ============================
-
-  static const Set<String> _imgExts = <String>{
-    'jpg',
-    'jpeg',
-    'png',
-    'webp',
-    'gif',
-    'bmp',
-  };
-
-  bool _looksLikeImageFile(String name) {
-    final ext = p.extension(name).toLowerCase().replaceFirst('.', '');
-    if (ext.isEmpty) return false;
-    return _imgExts.contains(ext);
-  }
-
-  /// 目录列表里的封面统一入口。
-  ///
-  /// ✅ 设计目标：
-  /// - Emby：使用 Emby 的 Primary/Thumb 海报（最快、最稳定）
-  /// - WebDAV：优先同目录“侧边海报图”（如同名 jpg / poster.jpg 等），否则走“前缀下载 + 抽帧缩略图”
-  /// - 本地：复用 VideoThumbImage
-  Widget _buildCatalogThumb(String source, {int cacheWidth = 320}) {
-    // Emby
-    if (_isEmbySource(source)) {
-      final ref = _parseEmbySourceRef(source);
-      if (ref == null) return _catalogThumbPlaceholder();
-      _embyAccountMapFuture ??= _loadEmbyAccountMap();
-      return FutureBuilder<Map<String, EmbyAccount>>(
-        future: _embyAccountMapFuture,
-        builder: (ctx, snap) {
-          final m = snap.data;
-          final acc = (m == null) ? null : m[ref.accountId];
-          if (acc == null) return _catalogThumbPlaceholder();
-          final client = EmbyClient(acc);
-          final url = client.coverUrl(ref.itemId,
-              type: 'Primary', maxWidth: cacheWidth, quality: 85);
-          return Image.network(
-            url,
-            headers: client.imageHeaders(),
-            fit: BoxFit.cover,
-            cacheWidth: cacheWidth,
-            errorBuilder: (_, __, ___) => _catalogThumbPlaceholder(),
-          );
-        },
-      );
-    }
-
-    // WebDAV
-    if (_isWebDavSource(source)) {
-      // 1) 优先：同目录海报图（由 _expandPlaylistFromWebDavDir 构建映射）
-      final cover = _webDavSidecarCoverByVideoSource[source];
-      if (cover != null && cover.trim().isNotEmpty) {
-        return _buildWebDavImageThumb(cover, cacheWidth: cacheWidth);
-      }
-      // 2) 否则：视频前缀抽帧（较慢，但对“纯视频目录”也能有封面）
-      return _buildWebDavVideoThumb(source, cacheWidth: cacheWidth);
-    }
-
-    // Local
-    return VideoThumbImage(videoPath: source, cacheOnly: false);
-  }
-
-  Widget _catalogThumbPlaceholder() {
-    return Container(
-      color: Colors.black12,
-      child: const Center(
-        child: Icon(Icons.movie_outlined, size: 20, color: Colors.white54),
-      ),
-    );
-  }
-
-  Future<({String url, Map<String, String> headers})?> _resolveWebDavHttp(
-      String source) {
-    return _webDavResolveFutureCache.putIfAbsent(source, () async {
-      final ref = _parseWebDavSourceForListing(source);
-      if (ref == null) return null;
-      final accountId = ref.accountId;
-      final relDecoded = ref.relPath;
-      if (accountId.isEmpty || relDecoded.isEmpty) return null;
-
-      final accs =
-          await (_webDavAccountCacheFuture ?? _loadWebDavAccountCache());
-      final acc = accs[accountId];
-      if (acc == null) return null;
-      final baseUrl = (acc['baseUrl'] ?? '').trim();
-      final username = (acc['username'] ?? '').toString();
-      final password = (acc['password'] ?? '').toString();
-      if (baseUrl.isEmpty) return null;
-
-      final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
-      final relEncoded = encodePathPreserveSlash(relDecoded);
-      final url = Uri.parse(base).resolve(relEncoded).toString();
-      final token = base64Encode(utf8.encode('$username:$password'));
-      return (
-        url: url,
-        headers: <String, String>{
-          HttpHeaders.authorizationHeader: 'Basic $token'
-        },
-      );
-    });
-  }
-
-  Widget _buildWebDavImageThumb(String source, {int cacheWidth = 320}) {
-    return FutureBuilder<({String url, Map<String, String> headers})?>(
-      future: _resolveWebDavHttp(source),
-      builder: (ctx, snap) {
-        final r = snap.data;
-        if (r == null) return _catalogThumbPlaceholder();
-        return Image.network(
-          r.url,
-          headers: r.headers,
-          fit: BoxFit.cover,
-          cacheWidth: cacheWidth,
-          errorBuilder: (_, __, ___) => _catalogThumbPlaceholder(),
-        );
-      },
-    );
-  }
-
-  Widget _buildWebDavVideoThumb(String source, {int cacheWidth = 320}) {
-    final fut = _webDavVideoThumbFutureCache.putIfAbsent(
-        source, () => _getOrCreateWebDavVideoThumb(source));
-    return FutureBuilder<File?>(
-      future: fut,
-      builder: (ctx, snap) {
-        final f = snap.data;
-        if (f != null && f.existsSync() && f.lengthSync() > 0) {
-          return Image.file(
-            f,
-            fit: BoxFit.cover,
-            filterQuality: FilterQuality.medium,
-            gaplessPlayback: true,
-          );
-        }
-        return _catalogThumbPlaceholder();
-      },
-    );
-  }
-
-  Future<File?> _getOrCreateWebDavVideoThumb(String source) async {
-    // ✅ 目录缩略图：对 WebDAV 视频做“前缀下载 + 抽帧”。
-    // - 并发限制为 1（见 _catalogThumbSemaphore），避免占用播放带宽
-    // - 失败则返回 null（UI 降级占位）
-    return _catalogThumbSemaphore.withPermit(() async {
-      try {
-        final ref = _parseWebDavSourceForListing(source);
-        final relExt = ref == null ? '' : p.extension(ref.relPath);
-        final resolved = await _resolveWebDavHttp(source);
-        if (resolved == null) return null;
-
-        // 生成稳定的前缀缓存文件路径
-        final key = PersistentStore.instance
-            .makeKey('webdav_prefix|${resolved.url}|6mb');
-        final ext = relExt.isNotEmpty ? relExt : '.mp4';
-        final part = await PersistentStore.instance.getFile(key, 'media', ext);
-
-        // ✅ 先看“缩略图缓存”是否已存在：
-        // 这样即使我们后面删掉前缀文件，也不影响后续直接展示封面。
-        final cached = await ThumbCache.getCachedVideoThumb(part.path);
-        if (cached != null) return cached;
-
-        if (!await part.exists() || await part.length() <= 0) {
-          await _downloadWebDavPrefixToFile(
-            resolved.url,
-            resolved.headers,
-            part,
-            maxBytes: 6 * 1024 * 1024,
-          );
-        }
-
-        if (!await part.exists() || await part.length() <= 0) return null;
-        // 抽帧 → 生成永久 thumb
-        final thumb = await ThumbCache.getOrCreateVideoPreviewFrame(
-            part.path, Duration.zero);
-
-        // ✅ 省空间：前缀文件只用于抽帧，成功后可删除。
-        // 说明：缩略图已写入 PersistentStore/thumbnails，后续展示不再依赖前缀。
-        if (thumb != null) {
-          try {
-            if (await part.exists()) await part.delete();
-          } catch (_) {}
-        }
-        return thumb;
-      } catch (_) {
-        return null;
-      }
-    });
-  }
-
-  Future<void> _downloadWebDavPrefixToFile(
-    String url,
-    Map<String, String> headers,
-    File out, {
-    required int maxBytes,
-  }) async {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 15);
-    try {
-      final uri = Uri.parse(url);
-      final req = await client.getUrl(uri);
-      headers.forEach((k, v) => req.headers.set(k, v));
-      req.headers.set('Accept', '*/*');
-      // Range 优先：尽量只拉前缀
-      req.headers.set('Range', 'bytes=0-${maxBytes - 1}');
-      final res = await req.close();
-
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        throw HttpException('GET failed: ${res.statusCode}', uri: uri);
-      }
-
-      final tmp = File('${out.path}.download');
-      if (await tmp.exists()) {
-        try {
-          await tmp.delete();
-        } catch (_) {}
-      }
-      await tmp.create(recursive: true);
-      final sink = tmp.openWrite();
-
-      int received = 0;
-      await for (final chunk in res) {
-        if (received >= maxBytes) break;
-        final remain = maxBytes - received;
-        if (chunk.length <= remain) {
-          sink.add(chunk);
-          received += chunk.length;
-        } else {
-          sink.add(chunk.sublist(0, remain));
-          received += remain;
-          break;
-        }
-      }
-      await sink.flush();
-      await sink.close();
-
-      if (await out.exists()) {
-        try {
-          await out.delete();
-        } catch (_) {}
-      }
-      await tmp.rename(out.path);
-    } finally {
-      try {
-        client.close(force: true);
-      } catch (_) {}
-    }
-  }
-
-  void _prefetchCatalogThumbsAround(int index) {
-    // 仅预热可见范围，避免移动端压力过大。
-    if (!_hasPlaylist) return;
-    final start = max(0, index - 2);
-    final end = min(_sources.length - 1, index + 2);
-    for (int i = start; i <= end; i++) {
-      final src = _sources[i];
-      // 触发 Future 缓存
-      if (_isWebDavSource(src)) {
-        // sidecar cover 不需要预热；视频抽帧可以预热
-        if ((_webDavSidecarCoverByVideoSource[src] ?? '').trim().isEmpty) {
-          _webDavVideoThumbFutureCache.putIfAbsent(
-              src, () => _getOrCreateWebDavVideoThumb(src));
-        }
-      }
-    }
-  }
-
   Future<void> _togglePlayPause() async {
     final playing = _player.state.playing;
     playing ? await _player.pause() : await _player.play();
@@ -2514,13 +1783,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     // ✅ Emby：拖动/快进快退属于“用户交互”，需要立即上报一次。
     unawaited(_reportEmbyProgress(eventName: 'TimeUpdate', interactive: true));
     _uiVisible ? _pokeUI() : null;
-  }
-
-  Future<void> _adjustVolume(double delta) async {
-    _volume = (_volume + delta).clamp(0, 100);
-    _player.setVolume(_volume);
-    _pokeUI();
-    setState(() {});
   }
 
   Future<void> _runWithBusyDialog(Future<void> Function() job,
@@ -2575,464 +1837,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
         nav.pop();
       }
     }
-  }
-
-  Future<_ExpandedPlaylist?> _expandPlaylistFromLocalDir(
-      String currentPath) async {
-    try {
-      final f = File(currentPath);
-      if (!await f.exists()) return null;
-      final dir = f.parent;
-      final entries = await dir
-          .list(followLinks: false)
-          .where((e) => e is File)
-          .cast<File>()
-          .toList();
-
-      final vids = <File>[];
-      for (final it in entries) {
-        final name = p.basename(it.path);
-        if (_looksLikeVideoFile(name)) vids.add(it);
-      }
-      if (vids.length <= 1) return null;
-
-      vids.sort((a, b) => _naturalCompare(
-          p.basename(a.path).toLowerCase(), p.basename(b.path).toLowerCase()));
-      final srcs = vids.map((e) => e.path).toList();
-      final idx = srcs.indexWhere((s) => p.equals(s, currentPath));
-      return _ExpandedPlaylist(sources: srcs, index: idx >= 0 ? idx : 0);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<_ExpandedPlaylist?> _expandPlaylistFromWebDavDir(
-      String currentSource) async {
-    // ✅ 目录补全（WebDAV）：通过 PROPFIND(Depth=1) 拉取同目录文件。
-    // 注意：视频页会 pauseHard WebDavBackgroundGate，因此不能依赖 WebDavClient.list（会等待 gate），
-    // 这里用独立 HTTP 请求绕过 gate，避免死等。
-
-    final parsed = _parseWebDavSourceForListing(currentSource);
-    if (parsed == null) return null;
-    final accountId = parsed.accountId;
-    final relPath = parsed.relPath;
-    if (accountId.isEmpty || relPath.isEmpty) return null;
-
-    final parentRel = _parentRelPath(relPath);
-    final accountCache = await (_webDavAccountCacheFuture ??
-        Future.value(<String, Map<String, String>>{}));
-    final acc = accountCache[accountId];
-    if (acc == null) return null;
-
-    final baseUrl = acc['baseUrl'] ?? '';
-    final username = acc['username'] ?? '';
-    final password = acc['password'] ?? '';
-    if (baseUrl.trim().isEmpty) return null;
-
-    final list = await _webDavPropfindList(
-      baseUrl: baseUrl,
-      username: username,
-      password: password,
-      relFolder: parentRel,
-    );
-    if (list.isEmpty) return null;
-
-    // ✅ 目录封面（WebDAV）：同目录“侧边海报图”探测
-    // 设计：
-    // - 优先同名图片：video.mp4 ↔ video.jpg
-    // - 其次常见文件名：poster/cover/folder/thumb
-    // - 若目录只有 1 张图，则作为兜底
-    final imgItems =
-        list.where((e) => !e.isDir && _looksLikeImageFile(e.name)).toList();
-    final Map<String, _WebDavListItem> imgByBaseLower =
-        <String, _WebDavListItem>{};
-    for (final it in imgItems) {
-      final base = p.basenameWithoutExtension(it.name).toLowerCase();
-      // 保留第一个（按 PROPFIND 返回顺序即可），避免抖动
-      imgByBaseLower.putIfAbsent(base, () => it);
-    }
-
-    _WebDavListItem? commonCover;
-    if (imgItems.isNotEmpty) {
-      const commonNames = <String>{
-        'poster',
-        'cover',
-        'folder',
-        'thumb',
-        'fanart'
-      };
-      for (final it in imgItems) {
-        final b = p.basenameWithoutExtension(it.name).toLowerCase();
-        if (commonNames.contains(b)) {
-          commonCover = it;
-          break;
-        }
-      }
-    }
-    final singleCover = imgItems.length == 1 ? imgItems.first : null;
-
-    // 过滤为视频文件
-    final items =
-        list.where((e) => !e.isDir && _looksLikeVideoFile(e.name)).toList();
-    if (items.length <= 1) return null;
-
-    items.sort(
-        (a, b) => _naturalCompare(a.name.toLowerCase(), b.name.toLowerCase()));
-
-    // 重新构建“视频->封面图”的映射（仅限当前目录），避免旧数据污染。
-    final newCoverMap = <String, String>{};
-
-    final srcs = <String>[];
-    int idx = 0;
-    for (int i = 0; i < items.length; i++) {
-      final it = items[i];
-      final src = (it.relPath == relPath)
-          ? currentSource
-          : _buildWebDavSource(accountId, it.relPath);
-      srcs.add(src);
-      if (it.relPath == relPath) idx = i;
-
-      // ✅ 封面优先级：同名图片 > commonCover > 单图兜底
-      final baseLower = p.basenameWithoutExtension(it.name).toLowerCase();
-      final img = imgByBaseLower[baseLower] ?? commonCover ?? singleCover;
-      if (img != null && img.relPath.trim().isNotEmpty) {
-        final coverSrc = _buildWebDavSource(accountId, img.relPath);
-        newCoverMap[src] = coverSrc;
-      }
-    }
-
-    // 替换映射（仅当当前目录确实存在图片/映射时）；避免把空 map 覆盖掉其它播放列表的结果。
-    if (newCoverMap.isNotEmpty) {
-      _webDavSidecarCoverByVideoSource
-        ..removeWhere((k, v) => srcs.contains(k))
-        ..addAll(newCoverMap);
-    }
-    return _ExpandedPlaylist(sources: srcs, index: idx);
-  }
-
-  Future<_ExpandedPlaylist?> _expandPlaylistFromEmbyDir(
-      String currentSource) async {
-    final ref = _parseEmbySourceRef(currentSource);
-    if (ref == null) return null;
-    final accId = ref.accountId;
-    final itemId = ref.itemId;
-    if (accId.isEmpty || itemId.isEmpty) return null;
-
-    final accs = await EmbyStore.load();
-    EmbyAccount? acc;
-    for (final a in accs) {
-      if (a.id == accId) {
-        acc = a;
-        break;
-      }
-    }
-    if (acc == null) return null;
-    final client = EmbyClient(acc);
-
-    final parentId = await client.getItemParentId(itemId).timeout(
-          const Duration(seconds: 6),
-          onTimeout: () => null,
-        );
-    if (parentId == null || parentId.trim().isEmpty) return null;
-
-    final children = await client.listChildren(parentId: parentId).timeout(
-          const Duration(seconds: 10),
-          onTimeout: () => <EmbyItem>[],
-        );
-    if (children.isEmpty) return null;
-
-    bool isPlayableVideo(EmbyItem it) {
-      final mt = (it.mediaType ?? '').toLowerCase();
-      if (mt == 'video') return true;
-      final t = it.type.toLowerCase();
-      return t == 'movie' || t == 'episode' || t == 'video';
-    }
-
-    final vids =
-        children.where((e) => !e.isFolder && isPlayableVideo(e)).toList();
-    if (vids.length <= 1) return null;
-
-    vids.sort(
-        (a, b) => _naturalCompare(a.name.toLowerCase(), b.name.toLowerCase()));
-
-    final srcs = <String>[];
-    int idx = 0;
-    for (int i = 0; i < vids.length; i++) {
-      final it = vids[i];
-      final nm = it.name.trim();
-      final src = (it.id == itemId)
-          ? currentSource
-          : (nm.isEmpty
-              ? 'emby://$accId/item:${it.id}'
-              : 'emby://$accId/item:${it.id}?name=${Uri.encodeComponent(nm)}');
-      srcs.add(src);
-      if (it.id == itemId) idx = i;
-    }
-    return _ExpandedPlaylist(sources: srcs, index: idx);
-  }
-
-  Future<void> _ensureCatalogSourcesReady({bool force = false}) async {
-    if (!_hasPlaylist) return;
-    if (_sourcesExpanding) return;
-    if (!force && (_sources.length > 1 || _sourcesExpandedOnce)) return;
-
-    _sourcesExpanding = true;
-    try {
-      final cur = _currentPath;
-
-      _ExpandedPlaylist? expanded;
-      if (_isWebDavSource(cur)) {
-        expanded = await _expandPlaylistFromWebDavDir(cur);
-      } else if (_isEmbySource(cur)) {
-        expanded = await _expandPlaylistFromEmbyDir(cur);
-      } else {
-        expanded = await _expandPlaylistFromLocalDir(cur);
-      }
-
-      if (expanded == null || expanded.sources.length <= 1) {
-        _sourcesExpandedOnce = true;
-      } else {
-        final oldPos = _player.state.position;
-        final wasPlaying = _player.state.playing;
-
-        setState(() {
-          _sources = expanded!.sources;
-          _index = expanded.index.clamp(0, _sources.length - 1);
-        });
-
-        // ✅ 关键：扩容后必须重建播放器 playlist，否则目录里点选会 jump 失败。
-        final medias = await _buildMedias();
-        await _player.open(Playlist(medias, index: _index), play: wasPlaying);
-        _player.setRate(_rate);
-        _player.setVolume(_volume);
-        if (oldPos > Duration.zero) {
-          await _player.seek(oldPos);
-        }
-        _autoLoadSrtIfAny();
-        _armHistoryRecordForCurrent();
-        _sourcesExpandedOnce = true;
-      }
-    } catch (e) {
-      _sourcesExpandedOnce = true;
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('目录加载失败：${redactSensitiveText(e.toString())}')),
-      );
-    } finally {
-      _sourcesExpanding = false;
-    }
-  }
-
-  // -------- WebDAV listing helpers (minimal, bypass background gate) --------
-
-  static const Set<String> _videoExts = <String>{
-    'mp4',
-    'mkv',
-    'avi',
-    'mov',
-    'wmv',
-    'flv',
-    'webm',
-    'm4v',
-    'mpg',
-    'mpeg',
-    'vob',
-    'ogv',
-    'f4v',
-    'ts',
-    'm2ts',
-    'mts',
-    '3gp',
-    'rm',
-    'rmvb',
-  };
-
-  bool _looksLikeVideoFile(String name) {
-    final ext = p.extension(name).toLowerCase().replaceFirst('.', '');
-    if (ext.isEmpty) return false;
-    return _videoExts.contains(ext);
-  }
-
-  int _naturalCompare(String a, String b) {
-    // 与 Folder 页保持一致的“数字自然排序”逻辑（1,2,3,11,21）。
-    int aIdx = 0, bIdx = 0;
-    final aLen = a.length, bLen = b.length;
-    bool isDigit(String c) =>
-        c.length == 1 && c.codeUnitAt(0) >= 48 && c.codeUnitAt(0) <= 57;
-
-    while (aIdx < aLen && bIdx < bLen) {
-      final aChar = a[aIdx];
-      final bChar = b[bIdx];
-
-      if (isDigit(aChar) && isDigit(bChar)) {
-        String aNum = '', bNum = '';
-        while (aIdx < aLen && isDigit(a[aIdx])) aNum += a[aIdx++];
-        while (bIdx < bLen && isDigit(b[bIdx])) bNum += b[bIdx++];
-        final aVal = int.tryParse(aNum) ?? 0;
-        final bVal = int.tryParse(bNum) ?? 0;
-        if (aVal != bVal) return aVal.compareTo(bVal);
-        final z = aNum.length.compareTo(bNum.length);
-        if (z != 0) return z;
-      } else {
-        if (aChar != bChar) return aChar.compareTo(bChar);
-        aIdx++;
-        bIdx++;
-      }
-    }
-    return (aLen - aIdx).compareTo(bLen - bIdx);
-  }
-
-  String _parentRelPath(String relPath) {
-    final s = relPath.trim();
-    final idx = s.lastIndexOf('/');
-    if (idx <= 0) return '';
-    return s.substring(0, idx + 1);
-  }
-
-  String _buildWebDavSource(String accountId, String relDecoded) {
-    return buildWebDavSource(accountId, relDecoded);
-  }
-
-  _WebDavRef? _parseWebDavSourceForListing(String source) {
-    final parsed = parseWebDavSource(source);
-    if (parsed == null) return null;
-    return _WebDavRef(accountId: parsed.accountId, relPath: parsed.relPath);
-  }
-
-  Future<List<_WebDavListItem>> _webDavPropfindList({
-    required String baseUrl,
-    required String username,
-    required String password,
-    required String relFolder,
-  }) async {
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 15);
-    try {
-      final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
-      final folderEncoded = encodePathPreserveSlash(relFolder);
-      final url =
-          Uri.parse(base).resolve(folderEncoded.isEmpty ? '' : folderEncoded);
-
-      final token = base64Encode(utf8.encode('$username:$password'));
-      final req = await client.openUrl('PROPFIND', url);
-      req.followRedirects = true;
-      req.headers.set('Depth', '1');
-      req.headers.set(HttpHeaders.authorizationHeader, 'Basic $token');
-      req.headers.set(
-          HttpHeaders.contentTypeHeader, 'application/xml; charset="utf-8"');
-
-      const body = '''<?xml version="1.0" encoding="utf-8" ?>
-<D:propfind xmlns:D="DAV:">
-  <D:prop>
-    <D:resourcetype />
-    <D:displayname />
-    <D:getcontentlength />
-    <D:getlastmodified />
-  </D:prop>
-</D:propfind>
-''';
-      req.add(utf8.encode(body));
-      final resp = await req.close();
-      final text = await utf8.decodeStream(resp);
-      if (resp.statusCode != 207 && resp.statusCode != 200) {
-        throw Exception('WebDAV PROPFIND 失败：HTTP ${resp.statusCode}');
-      }
-
-      final basePath = () {
-        final p0 = Uri.parse(base).path;
-        if (p0.isEmpty) return '/';
-        return p0.endsWith('/') ? p0 : '$p0/';
-      }();
-
-      return _parseWebDavPropfind(text, basePath: basePath);
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  List<_WebDavListItem> _parseWebDavPropfind(String xmlText,
-      {required String basePath}) {
-    // 复用 webdav.dart 的解析思想（正则提取），但做最小实现。
-    final items = <_WebDavListItem>[];
-    final respRe = RegExp(r'<[^>]*:response\b[\s\S]*?<\/[^>]*:response>',
-        caseSensitive: false);
-    final hrefRe =
-        RegExp(r'<[^>]*:href>([\s\S]*?)<\/[^>]*:href>', caseSensitive: false);
-    final displayRe = RegExp(
-        r'<[^>]*:displayname>([\s\S]*?)<\/[^>]*:displayname>',
-        caseSensitive: false);
-    final lenRe = RegExp(
-        r'<[^>]*:getcontentlength>([0-9]+)<\/[^>]*:getcontentlength>',
-        caseSensitive: false);
-    final lmRe = RegExp(
-        r'<[^>]*:getlastmodified>([\s\S]*?)<\/[^>]*:getlastmodified>',
-        caseSensitive: false);
-    final collRe = RegExp(r'<[^>]*:collection\s*\/?>', caseSensitive: false);
-
-    for (final m in respRe.allMatches(xmlText)) {
-      final block = m.group(0) ?? '';
-      final href = hrefRe.firstMatch(block)?.group(1)?.trim();
-      if (href == null || href.isEmpty) continue;
-
-      // href 可能是绝对/相对，统一解析为 path。
-      Uri hrefUri;
-      try {
-        hrefUri = Uri.parse(href);
-      } catch (_) {
-        continue;
-      }
-      final path = hrefUri.path;
-      if (path.isEmpty) continue;
-      if (!path.startsWith(basePath)) continue;
-      var rel = path.substring(basePath.length);
-      // 忽略当前目录自身那条 response（通常 rel 为空）。
-      if (rel.isEmpty) continue;
-      if (rel.startsWith('/')) rel = rel.substring(1);
-      // href 中的 path 往往是 percent-encoded；这里把 rel 统一解码成“decoded 形式”。
-      try {
-        rel = Uri.decodeFull(rel);
-      } catch (_) {
-        // ignore
-      }
-      final isDir = path.endsWith('/') || collRe.hasMatch(block);
-
-      final dispRaw = displayRe.firstMatch(block)?.group(1)?.trim() ?? '';
-      var name = dispRaw;
-      if (name.isEmpty) {
-        final segs = path.split('/').where((s) => s.isNotEmpty).toList();
-        name = segs.isEmpty ? rel : segs.last;
-      }
-      try {
-        name = Uri.decodeFull(name);
-      } catch (_) {}
-
-      final sizeStr = lenRe.firstMatch(block)?.group(1);
-      final sz = int.tryParse(sizeStr ?? '') ?? 0;
-      DateTime? lm;
-      final lmStr = lmRe.firstMatch(block)?.group(1)?.trim();
-      if (lmStr != null && lmStr.isNotEmpty) {
-        try {
-          lm = HttpDate.parse(lmStr);
-        } catch (_) {}
-      }
-
-      items.add(_WebDavListItem(
-        name: name,
-        relPath: rel,
-        isDir: isDir,
-        size: sz,
-        modified: lm,
-      ));
-    }
-    return items;
-  }
-
-  // -------- Emby source parsing helper --------
-
-  _EmbyRef? _parseEmbySourceRef(String source) {
-    final parsed = parseEmbySourceRef(source);
-    if (parsed == null) return null;
-    return _EmbyRef(accountId: parsed.accountId, itemId: parsed.itemId);
   }
 
   Future<void> _showRateSubMenu(
@@ -3160,101 +1964,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
     final s = total % 60;
     String two(int x) => x.toString().padLeft(2, '0');
     return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
-  }
-
-  void _onHorizontalDragStart(DragStartDetails details) {
-    if (!_ready) return;
-    _gestureActive = true;
-    _gestureType = 'seek';
-    _dragStartPos = _player.state.position;
-    _dragTargetPos = _dragStartPos;
-    setState(() {});
-  }
-
-  void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    if (!_PlayerInteractionPolicy.canUseSeekGestures(
-      isScreenLocked: _isScreenLocked,
-      lockPauseSeekEnabled: false,
-    )) {
-      return;
-    }
-    if (!_ready) return;
-    final deltaMs = (details.delta.dx * 600).toInt();
-    final duration = _player.state.duration;
-
-    var newPosMs = _dragTargetPos.inMilliseconds + deltaMs;
-    newPosMs = newPosMs.clamp(0, duration.inMilliseconds);
-    _dragTargetPos = Duration(milliseconds: newPosMs);
-
-    final diff = _dragTargetPos - _dragStartPos;
-    final sign = diff.isNegative ? '-' : '+';
-    final diffSec = diff.inSeconds.abs();
-
-    _gestureIcon = diff.isNegative ? Icons.fast_rewind : Icons.fast_forward;
-    _gestureText = '${_fmt(_dragTargetPos)}\n($sign${diffSec}s)';
-    setState(() {});
-  }
-
-  void _onHorizontalDragEnd(DragEndDetails details) {
-    if (!_ready) return;
-    _player.seek(_dragTargetPos);
-    // ✅ Emby：手势拖动进度条属于交互行为，立即上报一次。
-    unawaited(_reportEmbyProgress(eventName: 'TimeUpdate', interactive: true));
-    Timer(const Duration(milliseconds: 300), () {
-      if (mounted) setState(() => _gestureActive = false);
-    });
-    _uiVisible ? _pokeUI() : null;
-  }
-
-  void _onVerticalDragStart(DragStartDetails details) {
-    if (!_PlayerInteractionPolicy.canUseVerticalGestures(
-      isScreenLocked: _isScreenLocked,
-    )) {
-      return;
-    }
-    if (!_ready) return;
-    final width = MediaQuery.of(context).size.width;
-    _gestureActive = true;
-
-    if (details.globalPosition.dx > width / 2) {
-      _gestureType = 'volume';
-      _gestureIcon = Icons.volume_up;
-    } else {
-      _gestureType = 'brightness';
-      _gestureIcon = Icons.brightness_6;
-    }
-    setState(() {});
-  }
-
-  void _onVerticalDragUpdate(DragUpdateDetails details) {
-    if (_isScreenLocked) return;
-    if (!_ready) return;
-    final delta = -details.delta.dy;
-
-    if (_gestureType == 'volume') {
-      final step = delta * 0.5;
-      _volume = (_volume + step).clamp(0.0, 100.0);
-      _player.setVolume(_volume);
-      _gestureText = '${_volume.toInt()}%';
-      if (_volume == 0)
-        _gestureIcon = Icons.volume_mute;
-      else if (_volume < 50)
-        _gestureIcon = Icons.volume_down;
-      else
-        _gestureIcon = Icons.volume_up;
-    } else {
-      final step = delta / 200.0;
-      _brightness = (_brightness + step).clamp(0.0, 1.0);
-      _gestureText = '${(_brightness * 100).toInt()}%';
-    }
-    setState(() {});
-  }
-
-  void _onVerticalDragEnd(DragEndDetails details) {
-    Timer(const Duration(milliseconds: 300), () {
-      if (mounted) setState(() => _gestureActive = false);
-    });
-    _uiVisible ? _pokeUI() : null;
   }
 
   @override
@@ -3411,8 +2120,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
                     child: _ready
                         ? _buildRotatedVideo(Video(
                             controller: _controller,
-                            // ✅ 字幕设置：支持“字号 + 位置(距底部偏移)”调整。
-                            // 设计原因：用户的关注点是“看得清 + 不挡画面关键区域”，用配置完成即可，避免重写字幕渲染。
                             subtitleViewConfiguration:
                                 SubtitleViewConfiguration(
                               style: TextStyle(
@@ -3614,33 +2321,39 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
                     ),
                   ),
 
-                  // 手势操作反馈 UI
-                  if (_gestureActive)
-                    Center(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.circular(16),
+                  ValueListenableBuilder<_DesktopGestureOverlayViewData>(
+                    valueListenable: _desktopGestureOverlayNotifier,
+                    builder: (_, overlay, __) {
+                      if (!overlay.active || overlay.icon == null) {
+                        return const SizedBox.shrink();
+                      }
+                      return Center(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 24, vertical: 20),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(overlay.icon, color: Colors.white, size: 32),
+                              const SizedBox(height: 8),
+                              Text(
+                                overlay.text,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold),
+                              ),
+                            ],
+                          ),
                         ),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 24, vertical: 20),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(_gestureIcon, color: Colors.white, size: 32),
-                            const SizedBox(height: 8),
-                            Text(
-                              _gestureText,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+                      );
+                    },
+                  ),
 
                   if (_inspectorOpen)
                     PlaybackInspectorOverlay(onClose: () {
@@ -3652,378 +2365,6 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// ===============================
-/// Controls overlay（只负责“显示/隐藏”与 seekbar 预览）
-/// ===============================
-
-// ✅ 仅支持安卓手机：已移除桌面端控制层实现，避免无用代码引入编译问题。
-class _MobileControlsOverlay extends StatefulWidget {
-  final VideoState state;
-  final Player player;
-  final String currentVideoPath;
-
-  final bool uiVisible;
-  final VoidCallback onUserInteract;
-
-  final double volume;
-  final double rate;
-  final bool isFullscreen;
-  final bool isScreenLocked;
-
-  /// 是否已启用字幕（用于按钮图标状态）
-  final bool subtitlesEnabled;
-
-  /// 播放结束行为：是否自动下一集。
-  final bool autoNextAfterEnd;
-
-  /// 控制栏隐藏时，是否显示底部细进度条。
-  final bool showMiniProgressWhenHidden;
-
-  /// 播放列表/目录
-  final bool catalogEnabled;
-  final int playlistCount;
-  final int playlistIndex;
-  final Future<void> Function() onShowCatalog;
-
-  final Future<void> Function() onTogglePlayPause;
-  final Future<void> Function() onToggleEndBehavior;
-  final Future<void> Function() onShowSubtitles;
-  final Future<void> Function(BuildContext buttonContext) onShowRate;
-
-  const _MobileControlsOverlay({
-    required this.state,
-    required this.player,
-    required this.currentVideoPath,
-    required this.uiVisible,
-    required this.onUserInteract,
-    required this.volume,
-    required this.rate,
-    required this.isFullscreen,
-    required this.isScreenLocked,
-    required this.subtitlesEnabled,
-    required this.autoNextAfterEnd,
-    required this.showMiniProgressWhenHidden,
-    required this.catalogEnabled,
-    required this.playlistCount,
-    required this.playlistIndex,
-    required this.onShowCatalog,
-    required this.onTogglePlayPause,
-    required this.onToggleEndBehavior,
-    required this.onShowSubtitles,
-    required this.onShowRate,
-  });
-
-  @override
-  State<_MobileControlsOverlay> createState() => _MobileControlsOverlayState();
-}
-
-class _MobileControlsOverlayState extends State<_MobileControlsOverlay> {
-  Duration _position = Duration.zero;
-  Duration _duration = Duration.zero;
-  Duration _buffer = Duration.zero;
-  bool _playing = false;
-  bool _dragging = false; // 是否正在拖动进度条
-
-  final _subs = <StreamSubscription>[];
-
-  @override
-  void initState() {
-    super.initState();
-    // 监听播放器状态流
-    _subs.add(widget.player.stream.position.listen((v) {
-      if (!_dragging) {
-        if (mounted) setState(() => _position = v);
-      }
-    }));
-    _subs.add(widget.player.stream.duration.listen((v) {
-      if (mounted) setState(() => _duration = v);
-    }));
-    _subs.add(widget.player.stream.buffer.listen((v) {
-      // ✅ 缓冲进度：用于显示“已加载长度”。
-      if (mounted) setState(() => _buffer = v);
-    }));
-    _subs.add(widget.player.stream.playing.listen((v) {
-      if (mounted) setState(() => _playing = v);
-    }));
-  }
-
-  @override
-  void dispose() {
-    for (final s in _subs) s.cancel();
-    super.dispose();
-  }
-
-  String _fmt(Duration d) {
-    final total = d.inSeconds;
-    final h = total ~/ 3600;
-    final m = (total % 3600) ~/ 60;
-    final s = total % 60;
-    String two(int x) => x.toString().padLeft(2, '0');
-    return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // ✅ 锁定屏幕后：隐藏所有控制层，避免误触。
-    // 解锁入口放在播放器外层（右侧锁按钮）。
-    if (widget.isScreenLocked) return const SizedBox.shrink();
-
-    final showControls = widget.uiVisible;
-
-    // 进度：叠加“已缓冲长度”（底层）+ “已播放进度”（上层 Slider）
-    final durationMs = _duration.inMilliseconds;
-    final posMs = _position.inMilliseconds.clamp(0, max(0, durationMs));
-    final bufMs = _buffer.inMilliseconds.clamp(0, max(0, durationMs));
-    final bufferedValue = (durationMs > 0) ? (bufMs / durationMs) : 0.0;
-    final playedValue = (durationMs > 0) ? (posMs / durationMs) : 0.0;
-
-    final bottomBar = showControls
-        ? Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [Colors.transparent, Colors.black87],
-              ),
-            ),
-            padding: const EdgeInsets.fromLTRB(16, 18, 16, 14),
-            child: SafeArea(
-              top: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // 进度条与时间
-                  Row(
-                    children: [
-                      Text(_fmt(_position),
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 12)),
-                      Expanded(
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            // 缓冲条（已加载长度）
-                            SizedBox(
-                              height: 2,
-                              child: LinearProgressIndicator(
-                                value: bufferedValue.clamp(0.0, 1.0),
-                                backgroundColor: Colors.white12,
-                                valueColor: const AlwaysStoppedAnimation<Color>(
-                                    Colors.white24),
-                              ),
-                            ),
-                            SliderTheme(
-                              data: SliderTheme.of(context).copyWith(
-                                activeTrackColor: Colors.redAccent,
-                                inactiveTrackColor: Colors.transparent,
-                                thumbColor: Colors.redAccent,
-                                thumbShape: const RoundSliderThumbShape(
-                                    enabledThumbRadius: 6),
-                                trackShape: const _FullWidthSliderTrackShape(),
-                                trackHeight: 2,
-                                overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 14),
-                              ),
-                              child: Slider(
-                                value: posMs
-                                    .toDouble()
-                                    .clamp(0, durationMs.toDouble()),
-                                min: 0,
-                                max: durationMs > 0
-                                    ? durationMs.toDouble()
-                                    : 1.0,
-                                onChangeStart: (_) {
-                                  widget.onUserInteract();
-                                  setState(() => _dragging = true);
-                                },
-                                onChanged: (v) {
-                                  widget.onUserInteract();
-                                  setState(() => _position =
-                                      Duration(milliseconds: v.toInt()));
-                                },
-                                onChangeEnd: (v) {
-                                  widget.onUserInteract();
-                                  setState(() => _dragging = false);
-                                  widget.player
-                                      .seek(Duration(milliseconds: v.toInt()));
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Text(_fmt(_duration),
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 12)),
-                    ],
-                  ),
-
-                  // 功能按钮行（尽量精简，贴近手机播放器习惯）
-                  Row(
-                    children: [
-                      IconButton(
-                        iconSize: 22,
-                        padding: EdgeInsets.zero,
-                        constraints:
-                            const BoxConstraints(minWidth: 36, minHeight: 36),
-                        icon: Icon(
-                          _playing ? Icons.pause : Icons.play_arrow,
-                          color: Colors.white,
-                        ),
-                        onPressed: () {
-                          widget.onUserInteract();
-                          widget.onTogglePlayPause();
-                        },
-                      ),
-                      const SizedBox(width: 6),
-                      Builder(
-                        builder: (ctx) {
-                          return InkWell(
-                            borderRadius: BorderRadius.circular(6),
-                            onTap: () {
-                              widget.onUserInteract();
-                              widget.onShowRate(ctx);
-                            },
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 6),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.speed,
-                                      color: Colors.white70, size: 18),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    '${widget.rate}x',
-                                    style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.bold),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                      const SizedBox(width: 6),
-                      if (widget.catalogEnabled)
-                        InkWell(
-                          borderRadius: BorderRadius.circular(6),
-                          onTap: () {
-                            widget.onUserInteract();
-                            widget.onShowCatalog();
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 6),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.list_alt,
-                                    color: Colors.white70, size: 18),
-                                const SizedBox(width: 4),
-                                Text(
-                                  '${(widget.playlistIndex + 1).clamp(1, widget.playlistCount)}/${widget.playlistCount}',
-                                  style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      const Spacer(),
-                      IconButton(
-                        iconSize: 20,
-                        padding: EdgeInsets.zero,
-                        constraints:
-                            const BoxConstraints(minWidth: 36, minHeight: 36),
-                        icon: Icon(
-                          widget.autoNextAfterEnd
-                              ? Icons.skip_next
-                              : Icons.pause_circle_outline,
-                          color: Colors.white,
-                          size: 20,
-                        ),
-                        onPressed: () {
-                          widget.onUserInteract();
-                          widget.onToggleEndBehavior();
-                        },
-                      ),
-                      IconButton(
-                        iconSize: 20,
-                        padding: EdgeInsets.zero,
-                        constraints:
-                            const BoxConstraints(minWidth: 36, minHeight: 36),
-                        icon: Icon(
-                          widget.subtitlesEnabled
-                              ? Icons.subtitles
-                              : Icons.subtitles_outlined,
-                          color: Colors.white,
-                          size: 20,
-                        ),
-                        onPressed: () {
-                          widget.onUserInteract();
-                          widget.onShowSubtitles();
-                        },
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          )
-        : const SizedBox.shrink();
-
-    // 控制栏隐藏时仅保留细进度条，减少遮挡并保留“在播反馈”。
-    final miniProgressBar =
-        (!showControls && widget.showMiniProgressWhenHidden && durationMs > 0)
-            ? Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: SizedBox(
-                  height: 2,
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: Container(color: Colors.white10),
-                      ),
-                      Positioned.fill(
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: FractionallySizedBox(
-                            widthFactor: bufferedValue.clamp(0.0, 1.0),
-                            child: Container(color: Colors.white24),
-                          ),
-                        ),
-                      ),
-                      Positioned.fill(
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: FractionallySizedBox(
-                            widthFactor: playedValue.clamp(0.0, 1.0),
-                            child: Container(color: Colors.redAccent),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              )
-            : const SizedBox.shrink();
-
-    return Stack(
-      children: [
-        miniProgressBar,
-        Positioned(left: 0, right: 0, bottom: 0, child: bottomBar),
-      ],
     );
   }
 }
@@ -4405,29 +2746,19 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   bool _lockPauseSeekEnabled = true;
   bool _catalogLocateCurrentOnOpen = true;
   bool _catalogMenuOpen = false;
-  bool _isScreenLocked = false;
   bool _lockButtonVisible = true;
   double _brightness = 1.0;
-  bool _autoRotateEnabled = true;
   StreamSubscription<NativeDeviceOrientation>? _nativeOriSub;
-  NativeDeviceOrientation _appliedNativeOri = NativeDeviceOrientation.unknown;
-  NativeDeviceOrientation? _lastOriCandidate;
-  int _oriStableCount = 0;
-  DateTime _lastOriApplyAt = DateTime.fromMillisecondsSinceEpoch(0);
   final MethodChannel _mobileOriChannel =
       const MethodChannel('glacier/orientation');
   bool _allowRoutePopOnce = false;
 
-  bool _gestureActive = false;
-  String _gestureType = '';
-  String _gestureText = '';
   bool get _canOpenCatalogMenu => _PlayerInteractionPolicy.canOpenCatalog(
         hasPlaylist: _hasPlaylist,
         isScreenLocked: _isScreenLocked,
         catalogEnabled: _videoCatalogEnabled,
         menuAlreadyOpen: _catalogMenuOpen,
       );
-  IconData? _gestureIcon;
   Timer? _gestureHideTimer;
   Timer? _lockButtonHideTimer;
   Timer? _resumeHintForceHideTimer;
@@ -4435,11 +2766,9 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   bool _resumeHintVisible = false;
   String _resumeHintText = '';
   bool _exitCleanupDone = false;
-  Offset? _lastDoubleTapPos;
-  Duration _dragStartPos = Duration.zero;
-  Duration _dragTargetPos = Duration.zero;
-  double? _rateBeforeLongPress;
   String _openingLabel = '正在准备视频';
+  final ValueNotifier<_MobileHudViewData> _mobileHudNotifier =
+      ValueNotifier<_MobileHudViewData>(const _MobileHudViewData.initial());
 
   static const int _historyMinPlayMs = 800;
   int _historyLastCommitAt = 0;
@@ -4450,26 +2779,119 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
   Map<String, Map<String, String>>? _webDavAccounts;
   Map<String, EmbyAccount>? _embyAccounts;
   Future<Map<String, EmbyAccount>>? _embyAccountMapFuture;
-  _EmbyPlaybackSession? _embyPlayback;
-  Timer? _embyProgressTimer;
-  Future<void> _embyReportQueue = Future.value();
-  DateTime _embyLastInteractiveReportAt =
-      DateTime.fromMillisecondsSinceEpoch(0);
-  List<EmbySubtitleTrack> _embySubtitleCandidates = <EmbySubtitleTrack>[];
-  EmbySubtitleTrack? _embySubtitleSelected;
-  List<String> _localSubtitleCandidates = <String>[];
-  String? _localSubtitleSelected;
-  String? _lastAutoSubtitleKey;
 
   bool get _hasPlaylist => _sources.isNotEmpty;
   String get _currentPath => _hasPlaylist ? _sources[_index] : '';
   bool get _canPrev => _index > 0;
   bool get _canNext => _index < _sources.length - 1;
 
+  final _MobileOrientationState _orientationState = _MobileOrientationState();
+  final _MobileGestureState _gestureState = _MobileGestureState();
+  final ValueNotifier<_MobileGestureOverlayViewData> _gestureOverlayNotifier =
+      ValueNotifier<_MobileGestureOverlayViewData>(
+          const _MobileGestureOverlayViewData.inactive());
+  final _MobileReporterState _reporterState = _MobileReporterState();
+  final _MobileSubtitleState _subtitleState = _MobileSubtitleState();
+
+  bool get _isScreenLocked => _orientationState.isScreenLocked;
+  set _isScreenLocked(bool value) => _orientationState.isScreenLocked = value;
+
+  bool get _autoRotateEnabled => _orientationState.autoRotateEnabled;
+  set _autoRotateEnabled(bool value) =>
+      _orientationState.autoRotateEnabled = value;
+
+  NativeDeviceOrientation get _appliedNativeOri =>
+      _orientationState.appliedNativeOri;
+  set _appliedNativeOri(NativeDeviceOrientation value) =>
+      _orientationState.appliedNativeOri = value;
+
+  NativeDeviceOrientation? get _lastOriCandidate =>
+      _orientationState.lastOriCandidate;
+  set _lastOriCandidate(NativeDeviceOrientation? value) =>
+      _orientationState.lastOriCandidate = value;
+
+  int get _oriStableCount => _orientationState.oriStableCount;
+  set _oriStableCount(int value) => _orientationState.oriStableCount = value;
+
+  DateTime get _lastOriApplyAt => _orientationState.lastOriApplyAt;
+  set _lastOriApplyAt(DateTime value) =>
+      _orientationState.lastOriApplyAt = value;
+
+  bool get _gestureActive => _gestureState.active;
+  set _gestureActive(bool value) => _gestureState.active = value;
+
+  String get _gestureType => _gestureState.type;
+  set _gestureType(String value) => _gestureState.type = value;
+
+  String get _gestureText => _gestureState.text;
+  set _gestureText(String value) => _gestureState.text = value;
+
+  IconData? get _gestureIcon => _gestureState.icon;
+  set _gestureIcon(IconData? value) => _gestureState.icon = value;
+
+  Offset? get _lastDoubleTapPos => _gestureState.lastDoubleTapPos;
+  set _lastDoubleTapPos(Offset? value) =>
+      _gestureState.lastDoubleTapPos = value;
+
+  Duration get _dragStartPos => _gestureState.dragStartPos;
+  set _dragStartPos(Duration value) => _gestureState.dragStartPos = value;
+
+  Duration get _dragTargetPos => _gestureState.dragTargetPos;
+  set _dragTargetPos(Duration value) => _gestureState.dragTargetPos = value;
+
+  double? get _rateBeforeLongPress => _gestureState.rateBeforeLongPress;
+  set _rateBeforeLongPress(double? value) =>
+      _gestureState.rateBeforeLongPress = value;
+
+  _EmbyPlaybackSession? get _embyPlayback => _reporterState.embyPlayback;
+  set _embyPlayback(_EmbyPlaybackSession? value) =>
+      _reporterState.embyPlayback = value;
+
+  Timer? get _embyProgressTimer => _reporterState.embyProgressTimer;
+  set _embyProgressTimer(Timer? value) =>
+      _reporterState.embyProgressTimer = value;
+
+  Future<void> get _embyReportQueue => _reporterState.embyReportQueue;
+  set _embyReportQueue(Future<void> value) =>
+      _reporterState.embyReportQueue = value;
+
+  DateTime get _embyLastInteractiveReportAt =>
+      _reporterState.embyLastInteractiveReportAt;
+  set _embyLastInteractiveReportAt(DateTime value) =>
+      _reporterState.embyLastInteractiveReportAt = value;
+
+  List<EmbySubtitleTrack> get _embySubtitleCandidates =>
+      _subtitleState.embySubtitleCandidates;
+  set _embySubtitleCandidates(List<EmbySubtitleTrack> value) =>
+      _subtitleState.embySubtitleCandidates = value;
+
+  EmbySubtitleTrack? get _embySubtitleSelected =>
+      _subtitleState.embySubtitleSelected;
+  set _embySubtitleSelected(EmbySubtitleTrack? value) =>
+      _subtitleState.embySubtitleSelected = value;
+
+  List<String> get _localSubtitleCandidates =>
+      _subtitleState.localSubtitleCandidates;
+  set _localSubtitleCandidates(List<String> value) =>
+      _subtitleState.localSubtitleCandidates = value;
+
+  String? get _localSubtitleSelected => _subtitleState.localSubtitleSelected;
+  set _localSubtitleSelected(String? value) =>
+      _subtitleState.localSubtitleSelected = value;
+
+  String? get _lastAutoSubtitleKey => _subtitleState.lastAutoSubtitleKey;
+  set _lastAutoSubtitleKey(String? value) =>
+      _subtitleState.lastAutoSubtitleKey = value;
+
+  void _onAppSettingsChanged() {
+    unawaited(_loadMobileSettings());
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    AppSettings.instance.addListener(_onAppSettingsChanged);
     _sources = List<String>.from(widget.videoPaths);
     if (_sources.isNotEmpty) {
       _index = widget.initialIndex.clamp(0, _sources.length - 1);
@@ -4503,6 +2925,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     unawaited(_stopEmbyPlaybackCheckIns(reason: 'mobile dispose'));
     unawaited(_flushHistoryProgress());
     WidgetsBinding.instance.removeObserver(this);
+    AppSettings.instance.removeListener(_onAppSettingsChanged);
     _hideTimer?.cancel();
     _gestureHideTimer?.cancel();
     _lockButtonHideTimer?.cancel();
@@ -4519,6 +2942,8 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(_kDarkStatusBarStyle);
+    _gestureOverlayNotifier.dispose();
+    _mobileHudNotifier.dispose();
     super.dispose();
   }
 
@@ -4647,55 +3072,6 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     }
   }
 
-  void _startAutoRotateIfMobile() {
-    if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
-    _nativeOriSub?.cancel();
-    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
-    unawaited(_syncOrientationFromSensor(force: true));
-    _nativeOriSub = NativeDeviceOrientationCommunicator()
-        .onOrientationChanged(useSensor: true)
-        .listen((ori) {
-      if (!_autoRotateEnabled || _isScreenLocked) return;
-      if (ori == NativeDeviceOrientation.unknown) return;
-
-      if (_lastOriCandidate == ori) {
-        _oriStableCount += 1;
-      } else {
-        _lastOriCandidate = ori;
-        _oriStableCount = 1;
-      }
-      if (_oriStableCount < 1) return;
-
-      final now = DateTime.now();
-      if (now.difference(_lastOriApplyAt).inMilliseconds < 180) return;
-      if (_appliedNativeOri == ori) return;
-      _appliedNativeOri = ori;
-      _lastOriApplyAt = now;
-      unawaited(_applyPreferredOrientationByOri(ori));
-    });
-  }
-
-  Future<void> _syncOrientationFromSensor({bool force = false}) async {
-    if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
-    if (!_autoRotateEnabled || _isScreenLocked) return;
-    try {
-      final ori = await NativeDeviceOrientationCommunicator()
-          .orientation(useSensor: true);
-      if (ori == NativeDeviceOrientation.unknown) return;
-      _lastOriCandidate = ori;
-      _oriStableCount = 2;
-      if (!force && _appliedNativeOri == ori) return;
-      _appliedNativeOri = ori;
-      _lastOriApplyAt = DateTime.now();
-      await _applyPreferredOrientationByOri(ori);
-    } catch (_) {}
-  }
-
-  void _stopAutoRotateIfAny() {
-    _nativeOriSub?.cancel();
-    _nativeOriSub = null;
-  }
-
   Future<void> _beforeRouteExit({String reason = 'mobile pop'}) async {
     if (_exitCleanupDone) return;
     _exitCleanupDone = true;
@@ -4717,44 +3093,6 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     }
     await _flushHistoryProgress();
     unawaited(_stopEmbyPlaybackCheckIns(reason: reason));
-  }
-
-  Future<void> _applyPreferredOrientationByOri(
-    NativeDeviceOrientation ori,
-  ) async {
-    try {
-      switch (ori) {
-        case NativeDeviceOrientation.landscapeLeft:
-        case NativeDeviceOrientation.landscapeRight:
-          try {
-            await _mobileOriChannel.invokeMethod('lockLandscape');
-          } catch (_) {}
-          await SystemChrome.setPreferredOrientations(const [
-            DeviceOrientation.landscapeLeft,
-            DeviceOrientation.landscapeRight,
-          ]);
-          break;
-        case NativeDeviceOrientation.portraitDown:
-          try {
-            await _mobileOriChannel.invokeMethod('lockPortraitUpsideDown');
-          } catch (_) {}
-          await SystemChrome.setPreferredOrientations(const [
-            DeviceOrientation.portraitUp,
-            DeviceOrientation.portraitDown,
-          ]);
-          break;
-        case NativeDeviceOrientation.portraitUp:
-        default:
-          try {
-            await _mobileOriChannel.invokeMethod('lockPortrait');
-          } catch (_) {}
-          await SystemChrome.setPreferredOrientations(const [
-            DeviceOrientation.portraitUp,
-            DeviceOrientation.portraitDown,
-          ]);
-          break;
-      }
-    } catch (_) {}
   }
 
   Future<void> _showResumeHint(int resumedMs, String sourcePath) async {
@@ -5137,187 +3475,49 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     );
   }
 
-  Future<void> _applySubtitleOff({bool report = true}) async {
-    try {
-      await _controller?.setClosedCaptionFile(null);
-    } catch (_) {}
-    _localSubtitleSelected = null;
-    _embySubtitleSelected = null;
-    if (_embyPlayback != null) {
-      _embyPlayback!.subtitleStreamIndex = null;
-    }
-    if (mounted) setState(() {});
-    if (report) {
-      unawaited(
-        _reportEmbyProgress(
-            eventName: 'SubtitleTrackChange', interactive: true),
-      );
-    }
-  }
-
-  Future<void> _applyLocalSubtitle(String path, {bool report = true}) async {
-    try {
-      final bytes = await File(path).readAsBytes();
-      final text = utf8.decode(bytes, allowMalformed: true);
-      final ext = p.extension(path).toLowerCase();
-      final file =
-          (ext == '.vtt') ? WebVTTCaptionFile(text) : SubRipCaptionFile(text);
-      await _controller?.setClosedCaptionFile(Future.value(file));
-      _localSubtitleSelected = path;
-      _embySubtitleSelected = null;
-      if (_embyPlayback != null) {
-        _embyPlayback!.subtitleStreamIndex = null;
-      }
-      if (mounted) setState(() {});
-      if (report) {
-        unawaited(_reportEmbyProgress(
-            eventName: 'SubtitleTrackChange', interactive: true));
-      }
-    } catch (e) {
-      _showSnack('加载字幕失败：${redactSensitiveText(e.toString())}');
-    }
-  }
-
-  Future<void> _applyEmbySubtitle(
-    EmbySubtitleTrack track, {
-    bool report = true,
-  }) async {
-    try {
-      final url = await _buildEmbySubtitleUrl(track);
-      if (url == null || url.trim().isEmpty) {
-        _showSnack('无法获取 Emby 字幕地址');
-        return;
-      }
-      final text = await _downloadText(Uri.parse(url));
-      final file = SubRipCaptionFile(text);
-      await _controller?.setClosedCaptionFile(Future.value(file));
-      _embySubtitleSelected = track;
-      _localSubtitleSelected = null;
-      if (_embyPlayback != null) {
-        _embyPlayback!.subtitleStreamIndex = track.index;
-      }
-      if (mounted) setState(() {});
-      if (report) {
-        unawaited(_reportEmbyProgress(
-            eventName: 'SubtitleTrackChange', interactive: true));
-      }
-    } catch (e) {
-      _showSnack('加载 Emby 字幕失败：${redactSensitiveText(e.toString())}');
-    }
-  }
-
-  Future<void> _prepareSubtitleForCurrent() async {
-    await _refreshSubtitleCandidates();
+  void _refreshMobileState() {
     if (!mounted) return;
-    final key = await (() async {
-      final np = await _resolveEmbyNowPlaying(_currentPath);
-      if (np != null) return 'emby:${np.account.id}:${np.itemId}';
-      return 'path:${_currentPath}';
-    })();
-    if (_lastAutoSubtitleKey == key) return;
-
-    if (_embySubtitleCandidates.isNotEmpty && _embySubtitleSelected == null) {
-      final pick = _pickBestEmbySubtitle(_embySubtitleCandidates);
-      if (pick != null) {
-        _lastAutoSubtitleKey = key;
-        await _applyEmbySubtitle(pick, report: false);
-        return;
-      }
-    }
-
-    if (_localSubtitleCandidates.isNotEmpty && _localSubtitleSelected == null) {
-      String pick = _localSubtitleCandidates.first;
-      final base = p.basenameWithoutExtension(_currentPath).toLowerCase();
-      for (final s in _localSubtitleCandidates) {
-        if (p.basenameWithoutExtension(s).toLowerCase() == base) {
-          pick = s;
-          break;
-        }
-      }
-      _lastAutoSubtitleKey = key;
-      await _applyLocalSubtitle(pick, report: false);
-    }
+    setState(() {});
   }
 
-  Future<void> _showSubtitleMenu() async {
-    await _refreshSubtitleCandidates();
+  void _setMobileGestureOverlay({
+    required bool active,
+    String? text,
+    IconData? icon,
+  }) {
     if (!mounted) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      builder: (ctx) {
-        final items = <Widget>[
-          ListTile(
-            title: const Text('关闭字幕', style: TextStyle(color: Colors.white)),
-            trailing: (_localSubtitleSelected == null &&
-                    _embySubtitleSelected == null)
-                ? const Icon(Icons.check, color: Colors.white)
-                : null,
-            onTap: () {
-              Navigator.pop(ctx);
-              unawaited(_applySubtitleOff());
-            },
-          ),
-        ];
+    _gestureActive = active;
+    if (text != null) _gestureText = text;
+    if (icon != null || !active) _gestureIcon = icon;
+    _gestureOverlayNotifier.value = active
+        ? _MobileGestureOverlayViewData(
+            active: true,
+            text: _gestureText,
+            icon: _gestureIcon,
+          )
+        : const _MobileGestureOverlayViewData.inactive();
+  }
 
-        if (_embySubtitleCandidates.isNotEmpty) {
-          items.add(const Padding(
-            padding: EdgeInsets.fromLTRB(16, 10, 16, 6),
-            child: Text('Emby 字幕',
-                style: TextStyle(color: Colors.white70, fontSize: 12)),
-          ));
-          for (final t in _embySubtitleCandidates) {
-            final selected = (_embySubtitleSelected?.index == t.index) &&
-                (_embySubtitleSelected?.mediaSourceId == t.mediaSourceId);
-            items.add(ListTile(
-              title: Text(t.title, style: const TextStyle(color: Colors.white)),
-              trailing: selected
-                  ? const Icon(Icons.check, color: Colors.white)
-                  : null,
-              onTap: () {
-                Navigator.pop(ctx);
-                unawaited(_applyEmbySubtitle(t));
-              },
-            ));
-          }
-        }
-
-        if (_localSubtitleCandidates.isNotEmpty) {
-          items.add(const Padding(
-            padding: EdgeInsets.fromLTRB(16, 10, 16, 6),
-            child: Text('本地字幕',
-                style: TextStyle(color: Colors.white70, fontSize: 12)),
-          ));
-          for (final pth in _localSubtitleCandidates) {
-            final selected = (_localSubtitleSelected == pth);
-            items.add(ListTile(
-              title: Text(
-                p.basename(pth),
-                style: const TextStyle(color: Colors.white),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: selected
-                  ? const Icon(Icons.check, color: Colors.white)
-                  : null,
-              onTap: () {
-                Navigator.pop(ctx);
-                unawaited(_applyLocalSubtitle(pth));
-              },
-            ));
-          }
-        }
-
-        if (_embySubtitleCandidates.isEmpty &&
-            _localSubtitleCandidates.isEmpty) {
-          items.add(const Padding(
-            padding: EdgeInsets.all(12),
-            child: Text('未找到可用字幕', style: TextStyle(color: Colors.white70)),
-          ));
-        }
-        return SafeArea(child: ListView(shrinkWrap: true, children: items));
-      },
+  void _publishMobileHudIfChanged({
+    required bool ready,
+    required bool opening,
+    required bool buffering,
+    required String? error,
+  }) {
+    final next = _MobileHudViewData(
+      ready: ready,
+      opening: opening,
+      buffering: buffering,
+      error: error,
     );
+    final cur = _mobileHudNotifier.value;
+    if (cur.ready == next.ready &&
+        cur.opening == next.opening &&
+        cur.buffering == next.buffering &&
+        cur.error == next.error) {
+      return;
+    }
+    _mobileHudNotifier.value = next;
   }
 
   Future<void> _showCatalogMenu() async {
@@ -5343,6 +3543,7 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
               height: min(MediaQuery.of(ctx).size.height * 0.78, 540),
               child: ListView.builder(
                 controller: controller,
+                itemExtent: itemExtent,
                 itemCount: _sources.length,
                 itemBuilder: (_, i) {
                   final selected = i == _index;
@@ -5484,444 +3685,6 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
     return _mobileCatalogCoverPlaceholder();
   }
 
-  int _toEmbyTicks(Duration d) {
-    final us = d.inMicroseconds;
-    if (us <= 0) return 0;
-    return us * 10;
-  }
-
-  Map<String, dynamic> _buildEmbyCheckInBody(
-    _EmbyPlaybackSession s, {
-    String? eventName,
-    bool? isPaused,
-  }) {
-    final c = _controller;
-    final v = c?.value;
-    final paused = isPaused ?? !(v?.isPlaying ?? false);
-    final pos = v?.position ?? Duration.zero;
-
-    final body = <String, dynamic>{
-      'QueueableMediaTypes': const ['Video'],
-      'CanSeek': true,
-      'ItemId': s.itemId,
-      'MediaSourceId': s.mediaSourceId,
-      if (s.audioStreamIndex != null) 'AudioStreamIndex': s.audioStreamIndex,
-      if (s.subtitleStreamIndex != null)
-        'SubtitleStreamIndex': s.subtitleStreamIndex,
-      'IsPaused': paused,
-      'IsMuted': _volume <= 0,
-      'PositionTicks': _toEmbyTicks(pos),
-      'VolumeLevel': _volume.round().clamp(0, 100),
-      'PlayMethod': 'DirectStream',
-      'PlaySessionId': s.playSessionId,
-      'PlaylistIndex': _index,
-      'PlaylistLength': max(1, _sources.length),
-      'PlaybackRate': _rate,
-    };
-    if (eventName != null && eventName.trim().isNotEmpty) {
-      body['EventName'] = eventName.trim();
-    }
-    return body;
-  }
-
-  Future<void> _enqueueEmbyReport(Future<void> Function() job) {
-    _embyReportQueue = _embyReportQueue.then((_) => job()).catchError((e) {
-      debugPrint(
-          'Mobile Emby report failed: ${redactSensitiveText(e.toString())}');
-    });
-    return _embyReportQueue;
-  }
-
-  void _ensureEmbyProgressTimer() {
-    if (_embyPlayback == null) return;
-    _embyProgressTimer ??= Timer.periodic(const Duration(seconds: 10), (_) {
-      unawaited(_reportEmbyProgress(eventName: 'TimeUpdate'));
-    });
-  }
-
-  Future<void> _startEmbyPlaybackCheckInsIfNeeded({String reason = ''}) async {
-    final np = await _resolveEmbyNowPlaying(_currentPath);
-    if (np == null) {
-      await _stopEmbyPlaybackCheckIns(reason: 'non emby source');
-      return;
-    }
-
-    final cur = _embyPlayback;
-    if (cur != null &&
-        cur.account.id == np.account.id &&
-        cur.itemId == np.itemId) {
-      _ensureEmbyProgressTimer();
-      return;
-    }
-
-    await _stopEmbyPlaybackCheckIns(reason: 'switch item');
-
-    try {
-      final client = EmbyClient(np.account);
-      final pb = await client.playbackInfo(np.itemId);
-      if (pb == null) return;
-
-      final session = _EmbyPlaybackSession(
-        account: np.account,
-        itemId: np.itemId,
-        mediaSourceId: pb.mediaSourceId,
-        playSessionId: pb.playSessionId,
-        audioStreamIndex: pb.audioStreamIndex,
-        subtitleStreamIndex: pb.subtitleStreamIndex,
-      );
-      _embyPlayback = session;
-
-      await _enqueueEmbyReport(() async {
-        await client.reportPlaybackStarted(
-          _buildEmbyCheckInBody(
-            session,
-            isPaused: !(_controller?.value.isPlaying ?? false),
-          ),
-        );
-      });
-
-      _ensureEmbyProgressTimer();
-    } catch (e) {
-      debugPrint(
-        'Mobile Emby session start failed: ${redactSensitiveText(e.toString())}',
-      );
-    }
-  }
-
-  Future<void> _reportEmbyProgress({
-    required String eventName,
-    bool interactive = false,
-  }) async {
-    final s = _embyPlayback;
-    if (s == null) return;
-
-    if (interactive) {
-      final now = DateTime.now();
-      if (now.difference(_embyLastInteractiveReportAt).inMilliseconds < 650) {
-        return;
-      }
-      _embyLastInteractiveReportAt = now;
-    }
-
-    final client = EmbyClient(s.account);
-    final body = _buildEmbyCheckInBody(s, eventName: eventName);
-    await _enqueueEmbyReport(() async {
-      await client.reportPlaybackProgress(body);
-    });
-  }
-
-  Future<void> _stopEmbyPlaybackCheckIns({String reason = ''}) async {
-    _embyProgressTimer?.cancel();
-    _embyProgressTimer = null;
-
-    final s = _embyPlayback;
-    _embyPlayback = null;
-    if (s == null) return;
-
-    try {
-      final client = EmbyClient(s.account);
-      await _enqueueEmbyReport(() async {
-        await client.reportPlaybackStopped(
-          _buildEmbyCheckInBody(s, isPaused: true),
-        );
-      });
-    } catch (e) {
-      debugPrint(
-        'Mobile Emby session stop failed: ${redactSensitiveText(e.toString())}',
-      );
-    }
-  }
-
-  void _showGestureOverlay(
-    String text,
-    IconData icon, {
-    Duration ttl = const Duration(milliseconds: 650),
-  }) {
-    _gestureHideTimer?.cancel();
-    if (!mounted) return;
-    setState(() {
-      _gestureActive = true;
-      _gestureText = text;
-      _gestureIcon = icon;
-    });
-    _gestureHideTimer = Timer(ttl, () {
-      if (!mounted) return;
-      setState(() => _gestureActive = false);
-    });
-  }
-
-  void _beginGestureOverlay(String text, IconData icon) {
-    _gestureHideTimer?.cancel();
-    if (!mounted) return;
-    setState(() {
-      _gestureActive = true;
-      _gestureText = text;
-      _gestureIcon = icon;
-    });
-  }
-
-  void _endGestureOverlay() {
-    _gestureHideTimer?.cancel();
-    _gestureHideTimer = Timer(const Duration(milliseconds: 500), () {
-      if (!mounted) return;
-      setState(() => _gestureActive = false);
-    });
-  }
-
-  void _onDoubleTapDown(TapDownDetails details) {
-    _lastDoubleTapPos = details.localPosition;
-  }
-
-  Future<void> _onDoubleTap() async {
-    if (!_PlayerInteractionPolicy.canUseSeekGestures(
-      isScreenLocked: _isScreenLocked,
-      lockPauseSeekEnabled: _lockPauseSeekEnabled,
-    )) {
-      return;
-    }
-    final pos = _lastDoubleTapPos;
-    final box = context.findRenderObject();
-    if (pos != null && box is RenderBox) {
-      final w = box.size.width;
-      final x = pos.dx;
-      final secs = _doubleTapSeekSeconds.clamp(5, 60);
-      if (x < w * 0.33) {
-        await _seekRelative(-secs);
-        _showGestureOverlay('-${secs}s', Icons.fast_rewind);
-        return;
-      }
-      if (x > w * 0.67) {
-        await _seekRelative(secs);
-        _showGestureOverlay('+${secs}s', Icons.fast_forward);
-        return;
-      }
-    }
-    await _togglePlayPause();
-  }
-
-  void _onHorizontalDragStart(DragStartDetails details) {
-    if (!_PlayerInteractionPolicy.canUseSeekGestures(
-      isScreenLocked: _isScreenLocked,
-      lockPauseSeekEnabled: _lockPauseSeekEnabled,
-    )) {
-      return;
-    }
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
-    _gestureType = 'seek';
-    _dragStartPos = c.value.position;
-    _dragTargetPos = _dragStartPos;
-    _beginGestureOverlay(_fmt(_dragTargetPos), Icons.fast_forward);
-  }
-
-  void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    if (_gestureType != 'seek') return;
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
-    final duration = c.value.duration;
-    final width = max(1.0, MediaQuery.of(context).size.width);
-    const maxJumpMs = 180000.0; // one full-screen drag maps to 3 minutes
-    final deltaMs = (details.delta.dx / width * maxJumpMs).round();
-    var target = _dragTargetPos + Duration(milliseconds: deltaMs);
-    if (target < Duration.zero) target = Duration.zero;
-    if (duration > Duration.zero && target > duration) target = duration;
-    _dragTargetPos = target;
-    final diffSec = (_dragTargetPos - _dragStartPos).inSeconds;
-    final sign = diffSec >= 0 ? '+' : '';
-    final icon = diffSec >= 0 ? Icons.fast_forward : Icons.fast_rewind;
-    _beginGestureOverlay('${_fmt(_dragTargetPos)}\n($sign${diffSec}s)', icon);
-  }
-
-  Future<void> _onHorizontalDragEnd(DragEndDetails details) async {
-    if (_gestureType != 'seek') return;
-    _gestureType = '';
-    final c = _controller;
-    if (c != null && c.value.isInitialized) {
-      try {
-        await c.seekTo(_dragTargetPos);
-        unawaited(
-          _reportEmbyProgress(eventName: 'TimeUpdate', interactive: true),
-        );
-      } catch (_) {}
-    }
-    _scheduleAutoHide();
-    _endGestureOverlay();
-  }
-
-  void _onVerticalDragStart(DragStartDetails details) {
-    if (!_PlayerInteractionPolicy.canUseVerticalGestures(
-      isScreenLocked: _isScreenLocked,
-    )) {
-      return;
-    }
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
-    final width = MediaQuery.of(context).size.width;
-    final onRight = details.localPosition.dx >= width * 0.5;
-    _gestureType = onRight ? 'volume' : 'brightness';
-    if (onRight) {
-      _beginGestureOverlay('${_volume.round()}%', Icons.volume_up);
-    } else {
-      _beginGestureOverlay(
-        '${(_brightness * 100).round()}%',
-        Icons.brightness_6,
-      );
-    }
-  }
-
-  void _onVerticalDragUpdate(DragUpdateDetails details) {
-    if (_gestureType != 'volume' && _gestureType != 'brightness') return;
-    final h = max(1.0, MediaQuery.of(context).size.height);
-    final ratio = -details.delta.dy / h;
-    if (_gestureType == 'volume') {
-      _volume = (_volume + ratio * 140).clamp(0.0, 100.0);
-      final c = _controller;
-      if (c != null && c.value.isInitialized) {
-        unawaited(c.setVolume((_volume / 100).clamp(0, 1).toDouble()));
-      }
-      final icon = _volume == 0
-          ? Icons.volume_mute
-          : (_volume < 50 ? Icons.volume_down : Icons.volume_up);
-      _beginGestureOverlay('${_volume.round()}%', icon);
-      return;
-    }
-    _brightness = (_brightness + ratio * 1.2).clamp(0.0, 1.0);
-    _beginGestureOverlay('${(_brightness * 100).round()}%', Icons.brightness_6);
-  }
-
-  void _onVerticalDragEnd(DragEndDetails details) {
-    final wasVolume = _gestureType == 'volume';
-    _gestureType = '';
-    if (mounted) setState(() {});
-    _endGestureOverlay();
-    if (wasVolume) {
-      unawaited(
-        _reportEmbyProgress(eventName: 'TimeUpdate', interactive: true),
-      );
-    }
-  }
-
-  Future<void> _onLongPressStart(LongPressStartDetails details) async {
-    if (!_PlayerInteractionPolicy.canUseLongPressSpeed(
-      isScreenLocked: _isScreenLocked,
-      longPressSpeedEnabled: _longPressSpeedEnabled,
-    )) {
-      return;
-    }
-    if (_rateBeforeLongPress != null) return;
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
-    _rateBeforeLongPress = _rate;
-    final boosted = (_rate * _longPressSpeedMultiplier).clamp(0.25, 3.0);
-    await _setPlaybackRate(boosted);
-    _beginGestureOverlay(
-      '${boosted.toStringAsFixed((boosted % 1) == 0 ? 0 : 2)}x',
-      Icons.speed,
-    );
-  }
-
-  Future<void> _onLongPressEnd(LongPressEndDetails details) async {
-    final prev = _rateBeforeLongPress;
-    _rateBeforeLongPress = null;
-    if (prev == null) return;
-    await _setPlaybackRate(prev);
-    _endGestureOverlay();
-  }
-
-  void _scheduleLockButtonAutoHide() {
-    _lockButtonHideTimer?.cancel();
-    if (!_isScreenLocked || !_lockButtonVisible) return;
-    _lockButtonHideTimer = Timer(const Duration(seconds: 2), () {
-      if (!mounted || !_isScreenLocked) return;
-      setState(() => _lockButtonVisible = false);
-    });
-  }
-
-  void _toggleScreenLock() {
-    if (!mounted) return;
-    final nextLocked = !_isScreenLocked;
-    setState(() {
-      _isScreenLocked = nextLocked;
-      _lockButtonVisible = true;
-      if (nextLocked) {
-        _controlsVisible = false;
-      }
-    });
-    if (_isScreenLocked) {
-      _hideTimer?.cancel();
-      _autoRotateEnabled = false;
-      _stopAutoRotateIfAny();
-      final isLandscape =
-          MediaQuery.of(context).orientation == Orientation.landscape;
-      unawaited(
-        () async {
-          if (isLandscape) {
-            try {
-              await _mobileOriChannel.invokeMethod('lockLandscape');
-            } catch (_) {}
-            await SystemChrome.setPreferredOrientations(const [
-              DeviceOrientation.landscapeLeft,
-              DeviceOrientation.landscapeRight,
-            ]);
-          } else {
-            try {
-              await _mobileOriChannel.invokeMethod('lockPortrait');
-            } catch (_) {}
-            await SystemChrome.setPreferredOrientations(const [
-              DeviceOrientation.portraitUp,
-              DeviceOrientation.portraitDown,
-            ]);
-          }
-        }(),
-      );
-      _scheduleLockButtonAutoHide();
-      _showGestureOverlay('方向已锁定', Icons.screen_lock_rotation);
-      return;
-    }
-
-    _lockButtonHideTimer?.cancel();
-    _autoRotateEnabled = true;
-    _lastOriCandidate = null;
-    _oriStableCount = 0;
-    _lastOriApplyAt = DateTime.fromMillisecondsSinceEpoch(0);
-    _appliedNativeOri = NativeDeviceOrientation.unknown;
-    unawaited(() async {
-      try {
-        await _mobileOriChannel.invokeMethod('unlock');
-      } catch (_) {}
-      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-    }());
-    Future<void>.delayed(const Duration(milliseconds: 220), () async {
-      if (!mounted || _isScreenLocked) return;
-      _startAutoRotateIfMobile();
-      await _syncOrientationFromSensor(force: true);
-    });
-    _showGestureOverlay('方向已解锁', Icons.screen_rotation);
-    _scheduleAutoHide();
-  }
-
-  void _scheduleAutoHide() {
-    _hideTimer?.cancel();
-    if (_isScreenLocked) return;
-    if (!_controlsVisible) return;
-    final c = _controller;
-    if (c == null || !c.value.isPlaying) return;
-    _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (!mounted) return;
-      setState(() => _controlsVisible = false);
-    });
-  }
-
-  void _toggleControls() {
-    if (_isScreenLocked) {
-      setState(() => _lockButtonVisible = !_lockButtonVisible);
-      _scheduleLockButtonAutoHide();
-      return;
-    }
-    setState(() => _controlsVisible = !_controlsVisible);
-    _scheduleAutoHide();
-  }
-
   void _onControllerTick() {
     final c = _controller;
     if (c == null) return;
@@ -5959,7 +3722,14 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
 
   Future<void> _openCurrent({required bool autoPlay}) async {
     if (!_hasPlaylist) {
-      if (mounted) setState(() => _error = '没有可播放视频');
+      _error = '没有可播放视频';
+      _publishMobileHudIfChanged(
+        ready: false,
+        opening: false,
+        buffering: false,
+        error: _error,
+      );
+      if (mounted) setState(() {});
       return;
     }
 
@@ -5973,7 +3743,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       _draggingSeek = false;
       _dragSeekMs = 0;
     });
-
+    _publishMobileHudIfChanged(
+      ready: false,
+      opening: true,
+      buffering: false,
+      error: null,
+    );
     VideoPlayerController? nextController;
     try {
       final source = _currentPath;
@@ -6027,6 +3802,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
       _controller = nextController;
       _endHandled = false;
       _opening = false;
+      _publishMobileHudIfChanged(
+        ready: true,
+        opening: false,
+        buffering: _controller?.value.isBuffering ?? false,
+        error: null,
+      );
       if (mounted) setState(() {});
 
       if (autoPlay) {
@@ -6055,6 +3836,12 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
         _opening = false;
         _error = redactSensitiveText(e.toString());
       });
+      _publishMobileHudIfChanged(
+        ready: false,
+        opening: false,
+        buffering: false,
+        error: _error,
+      );
     }
   }
 
@@ -6666,39 +4453,46 @@ class _MobileVideoPlayerPageState extends State<VideoPlayerPage>
                     ),
                   ),
                 ),
-              if (_gestureActive && (_gestureIcon != null))
-                Center(
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.65),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 12,
+              ValueListenableBuilder<_MobileGestureOverlayViewData>(
+                valueListenable: _gestureOverlayNotifier,
+                builder: (_, overlay, __) {
+                  if (!overlay.active || overlay.icon == null) {
+                    return const SizedBox.shrink();
+                  }
+                  return Center(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.65),
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(_gestureIcon, color: Colors.white, size: 30),
-                            const SizedBox(height: 8),
-                            Text(
-                              _gestureText,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                height: 1.25,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 12,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(overlay.icon, color: Colors.white, size: 30),
+                              const SizedBox(height: 8),
+                              Text(
+                                overlay.text,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  height: 1.25,
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
+                  );
+                },
+              ),
               if (_resumeHintVisible && _resumeHintText.trim().isNotEmpty)
                 Positioned(
                   left: 16,

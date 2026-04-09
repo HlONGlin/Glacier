@@ -6,8 +6,10 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'emby.dart';
+import 'emby_cover_layout.dart';
 import 'emby_native_logic.dart';
 import 'emby_read_scheme.dart';
+import 'emby_url_utils.dart';
 import 'image.dart';
 import 'source_refs.dart';
 import 'ui_kit.dart';
@@ -280,21 +282,7 @@ double? _imageAspectRatioFor(_UiItem it) {
 }
 
 String _preferOriginalUrl(String url) {
-  final raw = url.trim();
-  if (raw.isEmpty) return '';
-  try {
-    final u = Uri.parse(raw);
-    final qp = Map<String, String>.from(u.queryParameters);
-    qp.removeWhere((k, _) {
-      final lk = k.toLowerCase();
-      return lk == 'maxwidth' || lk == 'maxheight' || lk == 'quality';
-    });
-    return qp.isEmpty
-        ? u.replace(query: '').toString()
-        : u.replace(queryParameters: qp).toString();
-  } catch (_) {
-    return raw;
-  }
+  return preferOriginalEmbyUrl(url);
 }
 
 class EmbyExclusiveFavoritesPage extends StatefulWidget {
@@ -1379,99 +1367,34 @@ class _EmbyExclusiveFavoritesPageState
     );
   }
 
-  double _estimateCoverAspect(_UiItem item) {
-    final ratio = item.item.primaryImageAspectRatio;
-    if (ratio != null && ratio.isFinite && ratio >= 0.45 && ratio <= 2.4) {
-      return ratio;
-    }
-    if (item.isImage) return 1.5;
-    if (item.isDir) return 0.67;
-    final type = item.item.type.trim().toLowerCase();
-    if (type.contains('episode') ||
-        type.contains('video') ||
-        type.contains('trailer')) {
-      return 1.78;
-    }
-    if (type.contains('photo') ||
-        type.contains('image') ||
-        type.contains('picture')) {
-      return 1.5;
-    }
-    return 0.67;
-  }
-
-  int _aspectBucket(double ratio) {
-    if (ratio < 0.9) return 0;
-    if (ratio <= 1.25) return 1;
-    return 2;
-  }
+  double _estimateCoverAspect(_UiItem item) => EmbyCoverLayout.estimateAspect(
+        primaryAspectRatio: item.item.primaryImageAspectRatio,
+        isImage: item.isImage,
+        isDir: item.isDir,
+        itemType: item.item.type,
+      );
 
   double _dominantHomeCoverAspect(List<_UiItem> items) {
-    if (items.isEmpty) return 0.67;
-    final values = <int, List<double>>{
-      0: <double>[],
-      1: <double>[],
-      2: <double>[],
-    };
-    var imageCount = 0;
-    for (final item in items) {
-      final ratio = _estimateCoverAspect(item);
-      values[_aspectBucket(ratio)]!.add(ratio);
-      if (item.isImage) imageCount++;
-    }
-    final preferLandscape = imageCount * 2 >= items.length;
-
-    var winner = preferLandscape ? 2 : 0;
-    var winnerCount = values[winner]!.length;
-    for (var bucket = 0; bucket < 3; bucket++) {
-      final count = values[bucket]!.length;
-      if (count > winnerCount) {
-        winner = bucket;
-        winnerCount = count;
-        continue;
-      }
-      if (count == winnerCount && count > 0) {
-        if (preferLandscape && bucket == 2) winner = bucket;
-        if (!preferLandscape && bucket == 0) winner = bucket;
-      }
-    }
-
-    final selected = values[winner]!;
-    if (selected.isEmpty) return 0.67;
-    var sum = 0.0;
-    for (final v in selected) {
-      sum += v;
-    }
-    final avg = sum / selected.length;
-    if (winner == 0) return avg.clamp(0.56, 0.88).toDouble();
-    if (winner == 1) return avg.clamp(0.9, 1.2).toDouble();
-    return avg.clamp(1.3, 2.0).toDouble();
+    return EmbyCoverLayout.dominantAspect<_UiItem>(
+      items,
+      aspectOf: _estimateCoverAspect,
+      isImage: (item) => item.isImage,
+    );
   }
 
   double _homeGridChildAspectRatio({
     required double maxWidth,
     required int columns,
     required double coverAspectRatio,
-  }) {
-    if (columns <= 0) return 0.95;
-    final safeWidth = maxWidth <= 0 ? 1.0 : maxWidth;
-    const crossSpacing = 10.0;
-    final usableWidth =
-        (safeWidth - crossSpacing * (columns - 1)).clamp(1.0, 100000.0);
-    final tileWidth = usableWidth / columns;
-    const gapCoverTitle = 6.0;
-    const titleHeight = 20.0;
-    final tileHeight =
-        (tileWidth / coverAspectRatio) + gapCoverTitle + titleHeight;
-    final ratio = tileWidth / tileHeight;
-    return ratio.clamp(0.45, 1.45).toDouble();
-  }
+  }) =>
+      EmbyCoverLayout.gridChildAspectRatio(
+        maxWidth: maxWidth,
+        columns: columns,
+        coverAspectRatio: coverAspectRatio,
+      );
 
-  double _shelfCoverHeight(double coverAspectRatio) {
-    if (coverAspectRatio < 0.9) return 132;
-    if (coverAspectRatio > 1.25) return 108;
-    return 118;
-  }
+  double _shelfCoverHeight(double coverAspectRatio) =>
+      EmbyCoverLayout.shelfCoverHeight(coverAspectRatio);
 
   Widget _cover(_UiItem item) {
     final p = _palette;
