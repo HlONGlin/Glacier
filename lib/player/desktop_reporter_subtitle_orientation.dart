@@ -141,7 +141,7 @@ extension _DesktopReporterMethods on _VideoPlayerPageState {
 
   Future<void> _autoLoadSrtIfAny() async {
     if (!_hasPlaylist) return;
-    if (_isWebDavSource(_currentPath)) return;
+    if (isWebDavSource(_currentPath)) return;
 
     await _refreshEmbySubtitleCandidatesIfAny();
     await _refreshSrtCandidates();

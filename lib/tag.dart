@@ -4,188 +4,34 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
+export 'core/network/background_gate.dart'
+    show
+        AsyncSemaphore,
+        WebDavBackgroundGate,
+        WebDavBackgroundHttpPool,
+        WebDavPausedException,
+        webDavBgSemaphore,
+        webDavUiSemaphore;
+import 'core/network/background_gate.dart';
 import 'ui_kit.dart';
 import 'webdav.dart';
 import 'image.dart';
+import 'remote_media_cache.dart';
 import 'source_accounts.dart';
 import 'source_refs.dart';
+import 'tag_interaction_helpers.dart';
+import 'tag_manager_filters.dart';
+import 'tag_models.dart';
+import 'tag_store_algorithms.dart';
+import 'tag_store_persistence.dart';
 import 'package:file_picker/file_picker.dart'; // 用于选择目录/导入文件
+part 'tag_files_tab_view.dart';
+part 'tag_ui_sections.dart';
 // Android 版本不支持桌面端拖拽文件（desktop_drop / XFile）。
 // ===== core_utils.dart (auto-grouped) =====
 
 // --- from utils.dart ---
-
-/// ===============================
-/// WebDAV Background HTTP Pool
-///
-/// A single shared [HttpClient] used by *background* WebDAV tasks (thumbs, covers,
-/// range probes, prefetch...).
-///
-/// Why:
-/// - Background tasks should reuse connections when idle.
-/// - During playback we want to *immediately* give way: force-close sockets and
-///   fail queued background work.
-///
-/// This class enables a "browser-style"抢占: playback can abort all background
-/// IO in one call.
-/// ===============================
-class WebDavBackgroundHttpPool {
-  WebDavBackgroundHttpPool._();
-  static final WebDavBackgroundHttpPool instance = WebDavBackgroundHttpPool._();
-
-  HttpClient? _client;
-  int _generation = 0;
-
-  int get generation => _generation;
-
-  HttpClient get client {
-    final c = _client;
-    if (c != null) return c;
-    final nc = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 20)
-      ..idleTimeout = const Duration(seconds: 10)
-      ..maxConnectionsPerHost = 2; // background: small pool
-    _client = nc;
-    return nc;
-  }
-
-  /// Force-abort all in-flight background requests.
-  ///
-  /// - closes current client with force
-  /// - bumps generation so long loops can detect staleness
-  /// - creates a fresh client lazily on next use
-  void abortAll() {
-    _generation++;
-    try {
-      _client?.close(force: true);
-    } catch (_) {}
-    _client = null;
-  }
-}
-
-/// ===============================
-/// WebDAV Background Gate
-/// - 收藏夹/列表常会并发拉缩略图、PROPFIND 等，容易和播放抢带宽/连接导致卡顿。
-/// - 播放媒体时调用 [pause]，退出时调用 [resume]，WebDAV 的后台任务会自动等待。
-/// ===============================
-class WebDavBackgroundGate {
-  static int _pauseDepth = 0;
-  static Completer<void>? _resumeCompleter;
-  static int _pauseToken = 0;
-
-  static bool get isPaused => _pauseDepth > 0;
-  static int get pauseToken => _pauseToken;
-
-  static void pause() {
-    _pauseDepth++;
-    _pauseToken++;
-    _resumeCompleter ??= Completer<void>();
-  }
-
-  /// Hard pause used for playback.
-  ///
-  /// Compared to [pause], this will:
-  /// - force-close all background WebDAV sockets (so in-flight downloads abort immediately)
-  /// - drop all queued background tasks waiting on [webDavBgSemaphore]
-  ///
-  /// This mimics browser behavior: playback always has absolute priority.
-  static void pauseHard() {
-    pause();
-    // Abort network immediately.
-    WebDavBackgroundHttpPool.instance.abortAll();
-    // Clear queued background tasks (fail-fast).
-    webDavBgSemaphore.cancelWaiters(
-        WebDavPausedException('background tasks aborted by playback'));
-  }
-
-  static void resume() {
-    if (_pauseDepth <= 0) return;
-    _pauseDepth--;
-    if (_pauseDepth == 0 &&
-        _resumeCompleter != null &&
-        !_resumeCompleter!.isCompleted) {
-      _resumeCompleter!.complete();
-      _resumeCompleter = null;
-    }
-  }
-
-  static Future<void> waitIfPaused() async {
-    if (_pauseDepth == 0) return;
-    final c = _resumeCompleter;
-    if (c != null) await c.future;
-  }
-}
-
-/// Thrown when a background WebDAV IO task is aborted due to playback pause.
-class WebDavPausedException implements Exception {
-  final String? message;
-  WebDavPausedException([this.message]);
-  @override
-  String toString() => message == null
-      ? 'WebDavPausedException'
-      : 'WebDavPausedException: $message';
-}
-
-/// 简单信号量：限制并发，避免收藏夹同时起几十个网络/磁盘任务。
-class AsyncSemaphore {
-  final int _max;
-  int _inUse = 0;
-  final List<Completer<void>> _waiters = <Completer<void>>[];
-
-  AsyncSemaphore(this._max);
-
-  Future<T> withPermit<T>(Future<T> Function() action) async {
-    await acquire();
-    try {
-      return await action();
-    } finally {
-      release();
-    }
-  }
-
-  Future<void> acquire() async {
-    if (_inUse < _max) {
-      _inUse++;
-      return;
-    }
-    final c = Completer<void>();
-    _waiters.add(c);
-    await c.future;
-    _inUse++;
-  }
-
-  void release() {
-    if (_inUse > 0) _inUse--;
-    if (_waiters.isNotEmpty) {
-      final c = _waiters.removeAt(0);
-      if (!c.isCompleted) c.complete();
-    }
-  }
-
-  /// Cancel all queued waiters.
-  ///
-  /// Useful when playback starts and we want to *immediately* drop background
-  /// tasks that haven't acquired a permit yet.
-  void cancelWaiters([Exception? error]) {
-    if (_waiters.isEmpty) return;
-    final err = error ?? WebDavPausedException('semaphore waiters cancelled');
-    while (_waiters.isNotEmpty) {
-      final c = _waiters.removeAt(0);
-      if (!c.isCompleted) {
-        c.completeError(err);
-      }
-    }
-  }
-}
-
-/// WebDAV 后台任务默认并发数（可按需调整）
-/// UI关键任务（列表/打开文件等）并发：更高优先级
-final AsyncSemaphore webDavUiSemaphore = AsyncSemaphore(4);
-
-/// 后台任务（封面/缩略图/预热等）并发：更低优先级
-final AsyncSemaphore webDavBgSemaphore = AsyncSemaphore(2);
 
 /// 工具模块：缩略图缓存 / ffmpeg 检查 / Stream 管理
 class TagThumbCache {
@@ -259,6 +105,29 @@ class TagThumbCache {
     required Map<String, String> headers,
     int? rangeEndInclusive,
   }) async {
+    if (rangeEndInclusive != null && rangeEndInclusive > 0) {
+      final token = WebDavBackgroundGate.pauseToken;
+      await RemoteMediaRangeCache.downloadPrefixToFile(
+        uri.toString(),
+        headers,
+        out,
+        maxBytes: rangeEndInclusive + 1,
+        beforeRequest: WebDavBackgroundGate.waitIfPaused,
+        shouldAbort: () =>
+            WebDavBackgroundGate.isPaused &&
+            WebDavBackgroundGate.pauseToken != token,
+        abortError: () =>
+            WebDavPausedException('aborted background download for $uri'),
+      );
+      if (WebDavBackgroundGate.isPaused &&
+          WebDavBackgroundGate.pauseToken != token) {
+        try {
+          if (await out.exists()) await out.delete();
+        } catch (_) {}
+      }
+      return;
+    }
+
     // 与播放器拉流互斥：播放期间暂停所有后台网络下载。
     await WebDavBackgroundGate.waitIfPaused();
     final token = WebDavBackgroundGate.pauseToken;
@@ -278,26 +147,21 @@ class TagThumbCache {
         throw HttpException('GET failed: ${res.statusCode}', uri: uri);
       }
 
-      // ensure folder
       await out.parent.create(recursive: true);
 
       final sink = out.openWrite();
-      int received = 0;
       try {
         await for (final chunk in res) {
-          // If playback starts while we're downloading, abort immediately.
           if (WebDavBackgroundGate.isPaused &&
               WebDavBackgroundGate.pauseToken != token) {
             client.close(force: true);
             throw WebDavPausedException('aborted background download for $uri');
           }
-          received += chunk.length;
           sink.add(chunk);
         }
       } finally {
         await sink.flush();
         await sink.close();
-        // If we got aborted mid-way, remove the partial file to avoid poisoning cache.
         if (WebDavBackgroundGate.isPaused &&
             WebDavBackgroundGate.pauseToken != token) {
           try {
@@ -883,102 +747,6 @@ class StreamGroup<T> {
 /// - 真正“打开图片/视频”的动作需要你在 onOpenItem 回调里复用你现有逻辑。
 /// =========================
 
-/// Item kind
-enum TagKind { image, video, other }
-
-extension TagKindX on TagKind {
-  String get label {
-    switch (this) {
-      case TagKind.image:
-        return '图片';
-      case TagKind.video:
-        return '视频';
-      case TagKind.other:
-        return '文件';
-    }
-  }
-
-  IconData get icon {
-    switch (this) {
-      case TagKind.image:
-        return Icons.image_outlined;
-      case TagKind.video:
-        return Icons.play_circle_outline;
-      case TagKind.other:
-        return Icons.insert_drive_file_outlined;
-    }
-  }
-
-  static TagKind fromFilename(String name) {
-    final n = name.toLowerCase();
-    const img = <String>{'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'};
-    const vid = <String>{
-      '.mp4',
-      '.mkv',
-      '.mov',
-      '.avi',
-      '.wmv',
-      '.flv',
-      '.webm',
-      '.m4v',
-      '.mpg',
-      '.mpeg',
-      '.m2v',
-      '.ts',
-      '.m2ts',
-      '.mts',
-      '.vob',
-      '.3gp',
-      '.rm',
-      '.rmvb',
-      '.iso',
-      '.dat',
-      '.asf',
-      '.f4v',
-      '.divx',
-      '.dv',
-      '.ogv',
-      '.hevc',
-      '.264',
-      '.265',
-    };
-    final dot = n.lastIndexOf('.');
-    final ext = dot >= 0 ? n.substring(dot) : '';
-    if (img.contains(ext)) return TagKind.image;
-    if (vid.contains(ext)) return TagKind.video;
-    return TagKind.other;
-  }
-}
-
-// --- tag.dart ---
-
-class Tag {
-  final String id;
-  String name;
-  final int colorValue;
-  String? localPath; // 新增：绑定的本地物理目录路径
-
-  Tag(
-      {required this.id,
-      required this.name,
-      required this.colorValue,
-      this.localPath});
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'c': colorValue,
-        'lp': localPath // 持久化路径
-      };
-
-  static Tag fromJson(Map<String, dynamic> j) => Tag(
-        id: (j['id'] ?? '') as String,
-        name: (j['name'] ?? '') as String,
-        colorValue: (j['c'] is int) ? j['c'] as int : Colors.blue.value,
-        localPath: j['lp'] as String?, // 读取路径
-      );
-}
-
 extension TagStorePhysicalX on TagStore {
   /// 将文件物理同步（复制）到标签绑定的目录
   Future<void> copyFileToTagDir(TagTargetMeta meta, Tag tag) async {
@@ -1000,7 +768,6 @@ extension TagStorePhysicalX on TagStore {
       return;
     }
 
-    // --- WebDAV 下载逻辑 ---
     if (meta.wdAccountId == null) return;
 
     final acc = WebDavManager.instance.accountsMap[meta.wdAccountId];
@@ -1043,7 +810,6 @@ extension TagStorePhysicalX on TagStore {
       await ensureLoaded();
       bool changed = false;
 
-      // A: 扫描磁盘文件
       final diskFiles = <String>{};
       final entities =
           await dir.list(recursive: false, followLinks: false).toList();
@@ -1075,7 +841,6 @@ extension TagStorePhysicalX on TagStore {
         }
       }
 
-      // B: 清理已删除的文件
       final targetsToCheck = <String>[];
       for (final kv in _targetToTagIds.entries) {
         if (kv.value.contains(tag.id)) targetsToCheck.add(kv.key);
@@ -1107,81 +872,6 @@ extension TagStorePhysicalX on TagStore {
   }
 }
 
-/// Tagged target metadata
-class TagTargetMeta {
-  /// unique key: for local use absolute path; for webdav use `webdav://<accId>/<relPath>`
-  final String key;
-  final String name;
-  final TagKind kind;
-
-  /// if webdav
-  final bool isWebDav;
-  final String? wdAccountId;
-  final String? wdRelPath;
-  final String? wdHref;
-
-  /// if local
-  final String? localPath;
-
-  /// optional metadata used by folder/page flows
-  final bool isDir;
-  final bool isEmby;
-  final String? embyAccountId;
-  final String? embyItemId;
-  final String? embyCoverUrl;
-
-  const TagTargetMeta({
-    required this.key,
-    required this.name,
-    required this.kind,
-    required this.isWebDav,
-    this.wdAccountId,
-    this.wdRelPath,
-    this.wdHref,
-    this.localPath,
-    this.isDir = false,
-    this.isEmby = false,
-    this.embyAccountId,
-    this.embyItemId,
-    this.embyCoverUrl,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'k': key,
-        'n': name,
-        't': kind.index,
-        'w': isWebDav,
-        'wa': wdAccountId,
-        'wr': wdRelPath,
-        'wh': wdHref,
-        'lp': localPath,
-        'd': isDir,
-        'e': isEmby,
-        'ea': embyAccountId,
-        'ei': embyItemId,
-        'ec': embyCoverUrl,
-      };
-
-  static TagTargetMeta fromJson(Map<String, dynamic> j) {
-    return TagTargetMeta(
-      key: (j['k'] ?? '') as String,
-      name: (j['n'] ?? '') as String,
-      kind: TagKind.values[((j['t'] is int) ? j['t'] as int : 2)
-          .clamp(0, TagKind.values.length - 1)],
-      isWebDav: (j['w'] is bool) ? j['w'] as bool : false,
-      wdAccountId: j['wa'] as String?,
-      wdRelPath: j['wr'] as String?,
-      wdHref: j['wh'] as String?,
-      localPath: j['lp'] as String?,
-      isDir: (j['d'] is bool) ? j['d'] as bool : false,
-      isEmby: (j['e'] is bool) ? j['e'] as bool : false,
-      embyAccountId: j['ea'] as String?,
-      embyItemId: j['ei'] as String?,
-      embyCoverUrl: j['ec'] as String?,
-    );
-  }
-}
-
 /// Storage layer
 class TagStore extends ChangeNotifier {
   static TagStore get I => _instance;
@@ -1199,79 +889,6 @@ class TagStore extends ChangeNotifier {
   final Map<String, Set<String>> _targetToTagIds = <String, Set<String>>{};
   final Map<String, TagTargetMeta> _targetsByKey = <String, TagTargetMeta>{};
 
-  Future<File> _storeFile() async {
-    final base = await getApplicationSupportDirectory();
-    final dir = Directory(p.join(base.path, 'tag_store'));
-    if (!await dir.exists()) await dir.create(recursive: true);
-    return File(p.join(dir.path, _kStoreFileName));
-  }
-
-  Future<File> _storeTmpFile() async {
-    final store = await _storeFile();
-    return File('${store.path}.tmp');
-  }
-
-  Future<Map<String, dynamic>?> _readPayloadFromFile(File file) async {
-    try {
-      if (!await file.exists()) return null;
-      final raw = await file.readAsString();
-      if (raw.trim().isEmpty) return null;
-      final payload = jsonDecode(raw);
-      if (payload is Map) return payload.cast<String, dynamic>();
-    } catch (_) {}
-    return null;
-  }
-
-  Future<void> _recoverStoreIfNeeded(File store, File tmp) async {
-    final tmpPayload = await _readPayloadFromFile(tmp);
-    if (tmpPayload == null) return;
-
-    final storePayload = await _readPayloadFromFile(store);
-    if (storePayload == null) {
-      await store.writeAsString(jsonEncode(tmpPayload), flush: true);
-    }
-
-    try {
-      if (await tmp.exists()) {
-        await tmp.delete();
-      }
-    } catch (_) {}
-  }
-
-  void _hydrateFromPayload(Map<String, dynamic> payload) {
-    final rawTags = payload['tags'];
-    if (rawTags is List) {
-      for (final e in rawTags) {
-        if (e is Map) {
-          final t = Tag.fromJson(e.cast<String, dynamic>());
-          if (t.id.isNotEmpty) _tagsById[t.id] = t;
-        }
-      }
-    }
-
-    final rawAss = payload['assignments'];
-    if (rawAss is Map) {
-      for (final kv in rawAss.entries) {
-        final v = kv.value;
-        if (v is List) {
-          _targetToTagIds[kv.key.toString()] =
-              v.map((e) => e.toString()).toSet();
-        }
-      }
-    }
-
-    final rawTargets = payload['targets'];
-    if (rawTargets is Map) {
-      for (final kv in rawTargets.entries) {
-        final v = kv.value;
-        if (v is Map) {
-          _targetsByKey[kv.key.toString()] =
-              TagTargetMeta.fromJson(v.cast<String, dynamic>());
-        }
-      }
-    }
-  }
-
   // Public wrapper so helpers/extensions don't call protected member directly.
   void markChanged() {
     notifyListeners();
@@ -1279,48 +896,33 @@ class TagStore extends ChangeNotifier {
 
   Future<void> ensureLoaded() async {
     if (_loaded) return;
-    final store = await _storeFile();
-    final tmp = await _storeTmpFile();
-    await _recoverStoreIfNeeded(store, tmp);
+    final store = await TagStorePersistence.storeFile(_kStoreFileName);
+    final tmp = await TagStorePersistence.storeTmpFile(_kStoreFileName);
+    await TagStorePersistence.recoverStoreIfNeeded(store, tmp);
     var loadedFromFile = false;
-    final filePayload = await _readPayloadFromFile(store);
+    final filePayload = await TagStorePersistence.readPayloadFromFile(store);
     if (filePayload != null) {
-      _hydrateFromPayload(filePayload);
+      TagStorePersistence.hydrateFromPayload(
+        filePayload,
+        tagsById: _tagsById,
+        targetToTagIds: _targetToTagIds,
+        targetsByKey: _targetsByKey,
+      );
       loadedFromFile = true;
     }
 
     if (!loadedFromFile) {
-      final sp = await SharedPreferences.getInstance();
-      final payload = <String, dynamic>{
-        'tags': const <dynamic>[],
-        'assignments': const <String, dynamic>{},
-        'targets': const <String, dynamic>{},
-      };
-
-      final rawTags = sp.getString(_kTags);
-      if (rawTags != null && rawTags.trim().isNotEmpty) {
-        try {
-          payload['tags'] = (jsonDecode(rawTags) as List).cast<dynamic>();
-        } catch (_) {}
-      }
-
-      final rawAss = sp.getString(_kAssignments);
-      if (rawAss != null && rawAss.trim().isNotEmpty) {
-        try {
-          payload['assignments'] =
-              (jsonDecode(rawAss) as Map).cast<String, dynamic>();
-        } catch (_) {}
-      }
-
-      final rawTargets = sp.getString(_kTargets);
-      if (rawTargets != null && rawTargets.trim().isNotEmpty) {
-        try {
-          payload['targets'] =
-              (jsonDecode(rawTargets) as Map).cast<String, dynamic>();
-        } catch (_) {}
-      }
-
-      _hydrateFromPayload(payload);
+      final payload = await TagStorePersistence.readLegacyPayload(
+        tagsKey: _kTags,
+        assignmentsKey: _kAssignments,
+        targetsKey: _kTargets,
+      );
+      TagStorePersistence.hydrateFromPayload(
+        payload,
+        tagsById: _tagsById,
+        targetToTagIds: _targetToTagIds,
+        targetsByKey: _targetsByKey,
+      );
       await _persist();
     }
 
@@ -1335,36 +937,31 @@ class TagStore extends ChangeNotifier {
     final targets = <String, dynamic>{
       for (final e in _targetsByKey.entries) e.key: e.value.toJson(),
     };
-    final store = await _storeFile();
-    final tmp = await _storeTmpFile();
     final payload = <String, dynamic>{
       'tags': tags,
       'assignments': assigns,
       'targets': targets,
     };
-    await tmp.writeAsString(jsonEncode(payload), flush: true);
-
-    await store.writeAsString(jsonEncode(payload), flush: true);
-
-    try {
-      if (await tmp.exists()) {
-        await tmp.delete();
-      }
-    } catch (_) {}
+    await TagStorePersistence.persistPayload(
+      payload,
+      fileName: _kStoreFileName,
+    );
   }
 
   @visibleForTesting
   Future<void> debugRecoverStoreForTest() async {
-    final store = await _storeFile();
-    final tmp = await _storeTmpFile();
-    await _recoverStoreIfNeeded(store, tmp);
+    final store = await TagStorePersistence.storeFile(_kStoreFileName);
+    final tmp = await TagStorePersistence.storeTmpFile(_kStoreFileName);
+    await TagStorePersistence.recoverStoreIfNeeded(store, tmp);
   }
 
   @visibleForTesting
-  Future<File> debugStoreFileForTest() => _storeFile();
+  Future<File> debugStoreFileForTest() =>
+      TagStorePersistence.storeFile(_kStoreFileName);
 
   @visibleForTesting
-  Future<File> debugStoreTmpFileForTest() => _storeTmpFile();
+  Future<File> debugStoreTmpFileForTest() =>
+      TagStorePersistence.storeTmpFile(_kStoreFileName);
 
   @visibleForTesting
   void debugResetForTest() {
@@ -1375,9 +972,7 @@ class TagStore extends ChangeNotifier {
   }
 
   List<Tag> get allTags {
-    final list = _tagsById.values.toList();
-    list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    return list;
+    return TagStoreAlgorithms.sortedTags(_tagsById.values);
   }
 
   Tag? tagById(String id) => _tagsById[id];
@@ -1392,22 +987,17 @@ class TagStore extends ChangeNotifier {
       Set<String>.from(_targetToTagIds[targetKey] ?? const <String>{});
 
   List<TagTargetMeta> targetsOfTag(String tagId) {
-    final out = <TagTargetMeta>[];
-    for (final kv in _targetToTagIds.entries) {
-      if (kv.value.contains(tagId)) {
-        final meta = _targetsByKey[kv.key];
-        if (meta != null) out.add(meta);
-      }
-    }
-    // recent first by name (no timestamp stored) - you can adjust if needed
-    out.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    return out;
+    return TagStoreAlgorithms.sortedTargetsForTag(
+      tagId,
+      targetToTagIds: _targetToTagIds,
+      targetsByKey: _targetsByKey,
+    );
   }
 
   Future<Tag> createTag(String name, {Color? color}) async {
     await ensureLoaded();
     final id = DateTime.now().microsecondsSinceEpoch.toString();
-    final c = (color ?? _pickColor(name)).value;
+    final c = (color ?? TagStorePersistence.pickColor(name)).toARGB32();
     final t = Tag(id: id, name: name.trim(), colorValue: c);
     _tagsById[id] = t;
     await _persist();
@@ -1426,17 +1016,12 @@ class TagStore extends ChangeNotifier {
 
   Future<void> deleteTag(String tagId) async {
     await ensureLoaded();
-    _tagsById.remove(tagId);
-    // remove from assignments
-    final toRemoveTargets = <String>[];
-    for (final kv in _targetToTagIds.entries) {
-      kv.value.remove(tagId);
-      if (kv.value.isEmpty) toRemoveTargets.add(kv.key);
-    }
-    for (final k in toRemoveTargets) {
-      _targetToTagIds.remove(k);
-      _targetsByKey.remove(k);
-    }
+    TagStoreAlgorithms.removeTag(
+      tagId,
+      tagsById: _tagsById,
+      targetToTagIds: _targetToTagIds,
+      targetsByKey: _targetsByKey,
+    );
     await _persist();
     notifyListeners();
   }
@@ -1445,13 +1030,12 @@ class TagStore extends ChangeNotifier {
   Future<void> setTagsForTarget(
       TagTargetMeta target, Set<String> tagIds) async {
     await ensureLoaded();
-    if (tagIds.isEmpty) {
-      _targetToTagIds.remove(target.key);
-      _targetsByKey.remove(target.key);
-    } else {
-      _targetToTagIds[target.key] = Set<String>.from(tagIds);
-      _targetsByKey[target.key] = target;
-    }
+    TagStoreAlgorithms.setTagsForTarget(
+      target,
+      tagIds,
+      targetToTagIds: _targetToTagIds,
+      targetsByKey: _targetsByKey,
+    );
     await _persist();
     notifyListeners();
   }
@@ -1459,33 +1043,8 @@ class TagStore extends ChangeNotifier {
   /// quick helper
   Future<void> toggleTag(TagTargetMeta target, String tagId) async {
     await ensureLoaded();
-    final s = tagsOf(target.key);
-    if (s.contains(tagId)) {
-      s.remove(tagId);
-    } else {
-      s.add(tagId);
-    }
-    await setTagsForTarget(target, s);
-  }
-
-  static Color _pickColor(String seed) {
-    // simple deterministic palette
-    const palette = <Color>[
-      Colors.blue,
-      Colors.green,
-      Colors.orange,
-      Colors.purple,
-      Colors.teal,
-      Colors.red,
-      Colors.indigo,
-      Colors.brown,
-      Colors.pink,
-    ];
-    var h = 0;
-    for (final code in seed.codeUnits) {
-      h = (h * 31 + code) & 0x7fffffff;
-    }
-    return palette[h % palette.length];
+    final next = TagStoreAlgorithms.toggledTags(tagsOf(target.key), tagId);
+    await setTagsForTarget(target, next);
   }
 }
 
@@ -1552,30 +1111,6 @@ class TagUI {
         ],
       ),
     );
-  }
-
-  static Future<bool> _confirm(
-    BuildContext context, {
-    required String title,
-    required String message,
-    String okText = '删除',
-  }) async {
-    final r = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: Text(okText)),
-        ],
-      ),
-    );
-    return r ?? false;
   }
 }
 
@@ -1877,6 +1412,19 @@ enum _TagSortMode {
   tagCount, // 标签数
 }
 
+extension _TagSortModeX on _TagSortMode {
+  TagManagerSortMode get asFilterSortMode {
+    switch (this) {
+      case _TagSortMode.kind:
+        return TagManagerSortMode.kind;
+      case _TagSortMode.name:
+        return TagManagerSortMode.name;
+      case _TagSortMode.tagCount:
+        return TagManagerSortMode.tagCount;
+    }
+  }
+}
+
 enum _TagFilesViewMode {
   grid, // 卡片
   list, // 列表
@@ -1969,72 +1517,30 @@ class _TagManagerPageState extends State<TagManagerPage>
 
   // 1. 标签列表（默认按名称 A-Z）
   List<Tag> _tags() {
-    var tags = TagStore.I.allTags.toList();
-
-    final q = _tagQuery.trim().toLowerCase();
-    if (q.isNotEmpty) {
-      tags = tags.where((t) => t.name.toLowerCase().contains(q)).toList();
-    }
-
-    tags.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    return tags;
+    return TagManagerFilters.filterTags(
+      TagStore.I.allTags,
+      query: _tagQuery,
+    );
   }
 
   // 2. 文件列表（支持多 Tag 过滤）
   List<TagTargetMeta> _targets() {
-    final seen = <String>{};
-    final out = <TagTargetMeta>[];
-
-    if (_selectedTagIds.isEmpty) {
-      for (final t in TagStore.I.allTags) {
-        for (final it in TagStore.I.targetsOfTag(t.id)) {
-          if (seen.add(it.key)) out.add(it);
-        }
-      }
-    } else {
-      for (final tagId in _selectedTagIds) {
-        for (final it in TagStore.I.targetsOfTag(tagId)) {
-          if (seen.add(it.key)) out.add(it);
-        }
-      }
-    }
-
-    var items = out;
-    final q = _query.trim().toLowerCase();
-    if (q.isNotEmpty) {
-      items = items.where((e) => e.name.toLowerCase().contains(q)).toList();
-    }
-
-    items.sort((a, b) {
-      int cmp;
-      switch (_fileSort) {
-        case _TagSortMode.name:
-          cmp = a.name.toLowerCase().compareTo(b.name.toLowerCase());
-          break;
-        case _TagSortMode.tagCount:
-          final ac = TagStore.I.tagsOfTarget(a.key).length;
-          final bc = TagStore.I.tagsOfTarget(b.key).length;
-          final r = ac.compareTo(bc);
-          cmp =
-              r == 0 ? a.name.toLowerCase().compareTo(b.name.toLowerCase()) : r;
-          break;
-        case _TagSortMode.kind:
-          final r = a.kind.index.compareTo(b.kind.index);
-          cmp =
-              r == 0 ? a.name.toLowerCase().compareTo(b.name.toLowerCase()) : r;
-          break;
-      }
-      return _fileSortAsc ? cmp : -cmp;
-    });
-
-    return items;
+    return TagManagerFilters.filterTargets(
+      allTags: TagStore.I.allTags,
+      selectedTagIds: _selectedTagIds,
+      targetsOfTag: TagStore.I.targetsOfTag,
+      tagsOfTarget: TagStore.I.tagsOf,
+      query: _query,
+      sortMode: _fileSort.asFilterSortMode,
+      sortAsc: _fileSortAsc,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     // 给 _FilesTabView 头部筛选条用的标签列表（按名称排）
-    final allTagsForFilter = TagStore.I.allTags.toList()
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final allTagsForFilter =
+        TagManagerFilters.filterTags(TagStore.I.allTags, query: '');
 
     return Scaffold(
       appBar: GlassAppBar(
@@ -2177,1304 +1683,6 @@ class _TagManagerPageState extends State<TagManagerPage>
               child: const Text('确定')),
         ],
       ),
-    );
-  }
-}
-
-class _FilesTabView extends StatefulWidget {
-  final List<Tag> tags;
-  final Set<String> selectedTagIds;
-  final ValueChanged<Set<String>> onSelectedTagIdsChanged;
-
-  final String query;
-  final ValueChanged<String> onQueryChanged;
-  final bool searchExpanded;
-  final ValueChanged<bool> onSearchExpandedChanged;
-
-  final _TagSortMode sort;
-  final bool sortAsc;
-  final ValueChanged<_TagSortMode> onSortChanged;
-  final VoidCallback onToggleSortOrder;
-  final _TagFilesViewMode viewMode;
-  final ValueChanged<_TagFilesViewMode> onViewModeChanged;
-
-  final List<TagTargetMeta> items;
-  final Map<String, Tag> tagsById;
-  final Map<String, WebDavAccount> accountsMap;
-  final Set<String> Function(String targetKey) tagChipsForTarget;
-  final TagItemOpenCallback onTapItem;
-  final TagItemLocateCallback? onLocateItem;
-
-  const _FilesTabView({
-    required this.tags,
-    required this.selectedTagIds,
-    required this.onSelectedTagIdsChanged,
-    required this.query,
-    required this.onQueryChanged,
-    required this.searchExpanded,
-    required this.onSearchExpandedChanged,
-    required this.sort,
-    required this.sortAsc,
-    required this.onSortChanged,
-    required this.onToggleSortOrder,
-    required this.viewMode,
-    required this.onViewModeChanged,
-    required this.items,
-    required this.tagsById,
-    required this.accountsMap,
-    required this.tagChipsForTarget,
-    required this.onTapItem,
-    this.onLocateItem,
-  });
-
-  @override
-  State<_FilesTabView> createState() => _FilesTabViewState();
-}
-
-class _FilesTabViewState extends State<_FilesTabView> {
-  @override
-  void initState() {
-    super.initState();
-    _trySyncCurrentTag();
-  }
-
-  @override
-  void didUpdateWidget(covariant _FilesTabView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // 当用户切换 Tag 过滤时，如果新 Tag 绑定了目录，自动扫描同步
-    if (!_sameTagSelection(widget.selectedTagIds, oldWidget.selectedTagIds)) {
-      _trySyncCurrentTag();
-    }
-  }
-
-  bool _sameTagSelection(Set<String> a, Set<String> b) {
-    if (a.length != b.length) return false;
-    for (final id in a) {
-      if (!b.contains(id)) return false;
-    }
-    return true;
-  }
-
-  void _trySyncCurrentTag() {
-    for (final id in widget.selectedTagIds) {
-      final tag = widget.tagsById[id];
-      if (tag != null && tag.localPath != null) {
-        // 异步执行扫描，不阻塞 UI
-        TagStore.I.syncLocalTagDir(tag);
-      }
-    }
-  }
-
-  /// 编辑/去除当前文件的标签（支持取消选择=移除标签）
-  Future<void> _editTagsForTarget(
-      BuildContext context, TagTargetMeta meta) async {
-    await TagStore.I.ensureLoaded();
-    if (!context.mounted) return;
-    final allTags = widget.tags;
-    if (allTags.isEmpty) return;
-
-    // current selected tag ids
-    final selected = TagStore.I.tagsOfTarget(meta.key).toSet();
-
-    final result = await showDialog<Set<String>>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) {
-        return StatefulBuilder(
-          builder: (ctx, setD) {
-            return AlertDialog(
-              title: Text('编辑标签：${meta.name}'),
-              content: SizedBox(
-                width: 520,
-                child: SingleChildScrollView(
-                  child: Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final t in allTags)
-                        FilterChip(
-                          label: Text(t.name),
-                          selected: selected.contains(t.id),
-                          onSelected: (on) => setD(() {
-                            if (on) {
-                              selected.add(t.id);
-                            } else {
-                              selected.remove(t.id);
-                            }
-                          }),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => setD(() => selected.clear()),
-                  child: const Text('清空'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(null),
-                  child: const Text('取消'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.of(ctx).pop(selected),
-                  child: const Text('确定'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-
-    if (result == null) return;
-
-    // apply
-    await TagStore.I.setTagsForTarget(meta, result);
-    if (!context.mounted) return;
-
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('标签已更新')),
-    );
-  }
-
-  List<Tag> _tagsForTarget(TagTargetMeta it) {
-    final tagIds = widget.tagChipsForTarget(it.key);
-    return tagIds.map((id) => widget.tagsById[id]).whereType<Tag>().toList();
-  }
-
-  Future<void> _showStoreToTagMenu({
-    required BuildContext context,
-    required Offset globalPosition,
-    required TagTargetMeta item,
-    required List<Tag> tagsForItem,
-  }) async {
-    final tagsWithDir =
-        tagsForItem.where((tag) => tag.localPath != null).toList();
-    if (tagsWithDir.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('标签未绑定目录')),
-      );
-      return;
-    }
-
-    final selectedTag = await showMenu<Tag>(
-      context: context,
-      position: RelativeRect.fromLTRB(
-        globalPosition.dx,
-        globalPosition.dy,
-        globalPosition.dx,
-        globalPosition.dy,
-      ),
-      items: tagsWithDir.map((tag) {
-        return PopupMenuItem<Tag>(
-          value: tag,
-          child: Text('存入：${tag.name}'),
-        );
-      }).toList(),
-    );
-
-    if (selectedTag == null) return;
-    await TagStore.I.copyFileToTagDir(item, selectedTag);
-    await TagStore.I.syncLocalTagDir(selectedTag);
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已保存到 ${p.basename(selectedTag.localPath!)}')),
-    );
-  }
-
-  Future<void> _openTagFilterPanel() async {
-    final initial = Set<String>.from(widget.selectedTagIds);
-    final picked = await showModalBottomSheet<Set<String>>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (ctx) {
-        final temp = Set<String>.from(initial);
-        var q = '';
-        return StatefulBuilder(
-          builder: (ctx2, setS) {
-            final all = widget.tags;
-            final filtered = q.trim().isEmpty
-                ? all
-                : all
-                    .where((t) =>
-                        t.name.toLowerCase().contains(q.trim().toLowerCase()))
-                    .toList();
-            return SafeArea(
-              child: SizedBox(
-                height: MediaQuery.of(ctx2).size.height * 0.72,
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                      child: Row(
-                        children: [
-                          const Expanded(
-                            child: Text(
-                              'Tag 筛选',
-                              style: TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.w700),
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () => setS(() => temp.clear()),
-                            child: const Text('全部'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                      child: TextField(
-                        onChanged: (v) => setS(() => q = v),
-                        decoration: InputDecoration(
-                          isDense: true,
-                          hintText: '搜索标签',
-                          prefixIcon: const Icon(Icons.search, size: 18),
-                          suffixIcon: q.trim().isEmpty
-                              ? null
-                              : IconButton(
-                                  tooltip: '清除',
-                                  onPressed: () => setS(() => q = ''),
-                                  icon: const Icon(Icons.close, size: 18),
-                                ),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: filtered.isEmpty
-                          ? const Center(child: Text('没有匹配的标签'))
-                          : ListView.builder(
-                              itemCount: filtered.length,
-                              itemBuilder: (_, i) {
-                                final t = filtered[i];
-                                return CheckboxListTile(
-                                  value: temp.contains(t.id),
-                                  onChanged: (v) => setS(() {
-                                    if (v == true) {
-                                      temp.add(t.id);
-                                    } else {
-                                      temp.remove(t.id);
-                                    }
-                                  }),
-                                  title: Text(t.name),
-                                  secondary: CircleAvatar(
-                                    radius: 8,
-                                    backgroundColor: Color(t.colorValue),
-                                  ),
-                                  controlAffinity:
-                                      ListTileControlAffinity.trailing,
-                                );
-                              },
-                            ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              temp.isEmpty
-                                  ? '当前：全部文件'
-                                  : '当前：已选 ${temp.length} 个 Tag',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () => Navigator.pop(ctx2),
-                            child: const Text('取消'),
-                          ),
-                          const SizedBox(width: 8),
-                          FilledButton(
-                            onPressed: () => Navigator.pop(ctx2, temp),
-                            child: const Text('应用'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-
-    if (picked != null) {
-      widget.onSelectedTagIdsChanged(picked);
-    }
-  }
-
-  Widget _buildGridItem(TagTargetMeta it, List<Tag> tagsForItem) {
-    return GestureDetector(
-      onSecondaryTapDown: (details) => _showStoreToTagMenu(
-        context: context,
-        globalPosition: details.globalPosition,
-        item: it,
-        tagsForItem: tagsForItem,
-      ),
-      child: _FileCard(
-        meta: it,
-        tags: tagsForItem,
-        accountsMap: widget.accountsMap,
-        onTap: () => widget.onTapItem(it),
-        onEditTags: () => _editTagsForTarget(context, it),
-        onLocate: widget.onLocateItem == null
-            ? null
-            : () => unawaited(widget.onLocateItem!(it)),
-      ),
-    );
-  }
-
-  Widget _buildListItem(TagTargetMeta it, List<Tag> tagsForItem) {
-    final showTags = tagsForItem.take(2).toList(growable: false);
-    final rest = tagsForItem.length - showTags.length;
-
-    return GestureDetector(
-      onSecondaryTapDown: (details) => _showStoreToTagMenu(
-        context: context,
-        globalPosition: details.globalPosition,
-        item: it,
-        tagsForItem: tagsForItem,
-      ),
-      child: Material(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(12),
-        elevation: 0.3,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => widget.onTapItem(it),
-          child: Padding(
-            padding: const EdgeInsets.all(10),
-            child: Row(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: SizedBox(
-                    width: 110,
-                    height: 66,
-                    child: _TagCover(meta: it, accountsMap: widget.accountsMap),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          _KindBadge(kind: it.kind),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              it.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        children: [
-                          for (final t in showTags) _TagPill(tag: t),
-                          if (rest > 0) _MorePill(count: rest),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  tooltip: '编辑/去除标签',
-                  icon: const Icon(Icons.edit_outlined, size: 18),
-                  onPressed: () => _editTagsForTarget(context, it),
-                  visualDensity: VisualDensity.compact,
-                ),
-                if (widget.onLocateItem != null)
-                  IconButton(
-                    tooltip: 'Locate',
-                    icon: const Icon(Icons.my_location_outlined, size: 18),
-                    onPressed: () => unawaited(widget.onLocateItem!(it)),
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomScrollView(
-      slivers: [
-        // 头部筛选栏
-        SliverToBoxAdapter(
-          child: _TagFilterHeader(
-            query: widget.query,
-            onQueryChanged: widget.onQueryChanged,
-            searchExpanded: widget.searchExpanded,
-            onSearchExpandedChanged: widget.onSearchExpandedChanged,
-            sort: widget.sort,
-            sortAsc: widget.sortAsc,
-            onSortChanged: widget.onSortChanged,
-            onToggleSortOrder: widget.onToggleSortOrder,
-            selectedTagCount: widget.selectedTagIds.length,
-            onOpenTagFilter: _openTagFilterPanel,
-            viewMode: widget.viewMode,
-            onViewModeChanged: widget.onViewModeChanged,
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 10)),
-        if (widget.items.isEmpty)
-          const SliverFillRemaining(
-            hasScrollBody: false,
-            child: Center(child: Text('没有文件')),
-          )
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 18),
-            sliver: widget.viewMode == _TagFilesViewMode.grid
-                ? SliverLayoutBuilder(
-                    builder: (context, constraints) {
-                      final w = constraints.crossAxisExtent;
-                      int cols;
-                      if (w >= 1400) {
-                        cols = 6;
-                      } else if (w >= 1100) {
-                        cols = 5;
-                      } else if (w >= 860) {
-                        cols = 4;
-                      } else if (w >= 620) {
-                        cols = 3;
-                      } else if (w >= 430) {
-                        cols = 2;
-                      } else {
-                        cols = 1;
-                      }
-
-                      return SliverGrid(
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: cols,
-                          mainAxisSpacing: 12,
-                          crossAxisSpacing: 12,
-                          childAspectRatio: 1.05,
-                        ),
-                        delegate: SliverChildBuilderDelegate(
-                          (context, i) {
-                            final it = widget.items[i];
-                            final tagsForItem = _tagsForTarget(it);
-                            return _buildGridItem(it, tagsForItem);
-                          },
-                          childCount: widget.items.length,
-                        ),
-                      );
-                    },
-                  )
-                : SliverList.separated(
-                    itemCount: widget.items.length,
-                    itemBuilder: (context, i) {
-                      final it = widget.items[i];
-                      final tagsForItem = _tagsForTarget(it);
-                      return _buildListItem(it, tagsForItem);
-                    },
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  ),
-          ),
-      ],
-    );
-  }
-}
-
-class _TagFilterHeader extends StatelessWidget {
-  final String query;
-  final ValueChanged<String> onQueryChanged;
-  final bool searchExpanded;
-  final ValueChanged<bool> onSearchExpandedChanged;
-
-  final _TagSortMode sort;
-  final bool sortAsc;
-  final ValueChanged<_TagSortMode> onSortChanged;
-  final VoidCallback onToggleSortOrder;
-  final int selectedTagCount;
-  final VoidCallback onOpenTagFilter;
-  final _TagFilesViewMode viewMode;
-  final ValueChanged<_TagFilesViewMode> onViewModeChanged;
-
-  const _TagFilterHeader({
-    required this.query,
-    required this.onQueryChanged,
-    required this.searchExpanded,
-    required this.onSearchExpandedChanged,
-    required this.sort,
-    required this.sortAsc,
-    required this.onSortChanged,
-    required this.onToggleSortOrder,
-    required this.selectedTagCount,
-    required this.onOpenTagFilter,
-    required this.viewMode,
-    required this.onViewModeChanged,
-  });
-
-  String _sortLabel(_TagSortMode s) {
-    switch (s) {
-      case _TagSortMode.kind:
-        return '类型';
-      case _TagSortMode.name:
-        return '名称';
-      case _TagSortMode.tagCount:
-        return '热度';
-    }
-  }
-
-  Widget _sortButton(BuildContext context) {
-    final theme = Theme.of(context);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        PopupMenuButton<_TagSortMode>(
-          tooltip: '排序依据',
-          initialValue: sort,
-          onSelected: onSortChanged,
-          itemBuilder: (_) => const [
-            PopupMenuItem(
-              value: _TagSortMode.kind,
-              child: Row(children: [
-                Icon(Icons.category_outlined, size: 16),
-                SizedBox(width: 8),
-                Text('按类型 (图片/视频/文件)')
-              ]),
-            ),
-            PopupMenuItem(
-              value: _TagSortMode.name,
-              child: Row(children: [
-                Icon(Icons.sort_by_alpha, size: 16),
-                SizedBox(width: 8),
-                Text('按名称')
-              ]),
-            ),
-            PopupMenuItem(
-              value: _TagSortMode.tagCount,
-              child: Row(children: [
-                Icon(Icons.local_offer_outlined, size: 16),
-                SizedBox(width: 8),
-                Text('按标签数量 (热度)')
-              ]),
-            ),
-          ],
-          child: Container(
-            height: 40,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: theme.dividerColor),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.sort, size: 18),
-                const SizedBox(width: 6),
-                Text(_sortLabel(sort)),
-                const SizedBox(width: 2),
-                const Icon(Icons.arrow_drop_down),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 6),
-        InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: onToggleSortOrder,
-          child: Container(
-            height: 40,
-            width: 44,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: theme.dividerColor),
-            ),
-            alignment: Alignment.center,
-            child: Icon(
-              sortAsc ? Icons.arrow_upward : Icons.arrow_downward,
-              size: 18,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _tagFilterButton(BuildContext context) {
-    final theme = Theme.of(context);
-    final active = selectedTagCount > 0;
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: onOpenTagFilter,
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-              color: active ? theme.colorScheme.primary : theme.dividerColor),
-          color:
-              active ? theme.colorScheme.primary.withValues(alpha: 0.08) : null,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(active ? Icons.sell : Icons.sell_outlined, size: 18),
-            const SizedBox(width: 6),
-            Text(active ? 'Tag($selectedTagCount)' : 'Tag选择'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _viewModeLabel(_TagFilesViewMode m) =>
-      m == _TagFilesViewMode.grid ? '卡片' : '列表';
-
-  IconData _viewModeIcon(_TagFilesViewMode m) => m == _TagFilesViewMode.grid
-      ? Icons.grid_view_outlined
-      : Icons.view_list_outlined;
-
-  Widget _viewModeButton(BuildContext context) {
-    final theme = Theme.of(context);
-    return PopupMenuButton<_TagFilesViewMode>(
-      tooltip: '视图模式',
-      initialValue: viewMode,
-      onSelected: onViewModeChanged,
-      itemBuilder: (_) => const [
-        PopupMenuItem(
-          value: _TagFilesViewMode.grid,
-          child: Row(
-            children: [
-              Icon(Icons.grid_view_outlined, size: 16),
-              SizedBox(width: 8),
-              Text('卡片视图'),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: _TagFilesViewMode.list,
-          child: Row(
-            children: [
-              Icon(Icons.view_list_outlined, size: 16),
-              SizedBox(width: 8),
-              Text('列表视图'),
-            ],
-          ),
-        ),
-      ],
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: theme.dividerColor),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_viewModeIcon(viewMode), size: 18),
-            const SizedBox(width: 6),
-            Text(_viewModeLabel(viewMode)),
-            const SizedBox(width: 2),
-            const Icon(Icons.arrow_drop_down),
-          ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final showSearch = searchExpanded || query.trim().isNotEmpty;
-    return Material(
-      color: Theme.of(context).colorScheme.surface,
-      elevation: 0.6,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _sortButton(context),
-                  const SizedBox(width: 8),
-                  _tagFilterButton(context),
-                  const SizedBox(width: 8),
-                  _viewModeButton(context),
-                ],
-              ),
-            ),
-            if (showSearch) ...[
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 40,
-                child: TextField(
-                  onChanged: onQueryChanged,
-                  controller: TextEditingController(text: query)
-                    ..selection = TextSelection.collapsed(offset: query.length),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: '搜索文件名',
-                    prefixIcon: const Icon(Icons.search, size: 18),
-                    suffixIcon: query.trim().isEmpty
-                        ? IconButton(
-                            tooltip: '收起',
-                            icon: const Icon(Icons.expand_less, size: 18),
-                            onPressed: () => onSearchExpandedChanged(false),
-                          )
-                        : IconButton(
-                            tooltip: '清除',
-                            icon: const Icon(Icons.close, size: 18),
-                            onPressed: () => onQueryChanged(''),
-                          ),
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 10),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 简化后的 TagsView，移除所有排序UI
-class _TagsView extends StatelessWidget {
-  final List<Tag> tags;
-  final ValueChanged<Tag> onRename;
-  final ValueChanged<Tag> onDelete;
-
-  final String query;
-  final ValueChanged<String> onQueryChanged;
-  final bool searchExpanded;
-  final ValueChanged<bool> onSearchExpandedChanged;
-  final TagDirectoryOpenCallback? onOpenTagDirectory;
-
-  const _TagsView({
-    required this.tags,
-    required this.onRename,
-    required this.onDelete,
-    required this.query,
-    required this.onQueryChanged,
-    required this.searchExpanded,
-    required this.onSearchExpandedChanged,
-    this.onOpenTagDirectory,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final showSearch = searchExpanded || query.trim().isNotEmpty;
-
-    return Column(children: [
-      // 头部：移动端优先，默认收纳搜索框
-      Material(
-        color: theme.colorScheme.surface,
-        elevation: 0.6,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.sell_outlined, size: 18),
-                  const SizedBox(width: 6),
-                  const Expanded(
-                    child: Text(
-                      '标签列表',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                  Text('${tags.length} 项'),
-                ],
-              ),
-              if (showSearch) ...[
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: 40,
-                  width: double.infinity,
-                  child: TextField(
-                    onChanged: onQueryChanged,
-                    controller: TextEditingController(text: query)
-                      ..selection =
-                          TextSelection.collapsed(offset: query.length),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      hintText: '搜索标签',
-                      prefixIcon: const Icon(Icons.search, size: 18),
-                      suffixIcon: query.trim().isEmpty
-                          ? IconButton(
-                              tooltip: '收起',
-                              icon: const Icon(Icons.expand_less, size: 18),
-                              onPressed: () => onSearchExpandedChanged(false),
-                            )
-                          : IconButton(
-                              tooltip: '清除',
-                              icon: const Icon(Icons.close, size: 18),
-                              onPressed: () => onQueryChanged(''),
-                            ),
-                      border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 10),
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-      Expanded(
-        child: tags.isEmpty
-            ? const Center(child: Text('没有匹配的标签'))
-            : ListView.separated(
-                itemCount: tags.length,
-                separatorBuilder: (_, __) => const Divider(height: 1),
-                itemBuilder: (_, i) {
-                  final t = tags[i];
-                  final count = TagStore.I.targetsOfTag(t.id).length;
-                  // --- tag.dart -> _TagsView 内部的 itemBuilder ---
-                  return ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: Color(t.colorValue),
-                      child: const Icon(Icons.sell_outlined,
-                          color: Colors.white, size: 20),
-                    ),
-                    title: Text(t.name),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('$count 个文件'),
-                        if (t.localPath != null)
-                          Text('物理存放：${p.basename(t.localPath!)}',
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  color: theme.colorScheme.primary)),
-                      ],
-                    ),
-                    trailing: PopupMenuButton<String>(
-                      tooltip: '标签操作',
-                      onSelected: (v) async {
-                        // 1. 重命名
-                        if (v == 'rename') onRename(t);
-
-                        // 2. 删除
-                        if (v == 'delete') onDelete(t);
-
-                        // 3. 绑定物理目录
-                        if (v == 'bind_path') {
-                          final path =
-                              await FilePicker.platform.getDirectoryPath(
-                            dialogTitle: '选择标签「${t.name}」的本地存放目录',
-                          );
-                          if (path != null) {
-                            await TagStore.I.bindPathToTag(t.id, path);
-                          }
-                        }
-
-                        // 4. 导入文件到该目录 (实现“右键上传/拉入”功能)
-                        if (v == 'import_files' && t.localPath != null) {
-                          final result = await FilePicker.platform
-                              .pickFiles(allowMultiple: true);
-                          if (result != null && result.files.isNotEmpty) {
-                            int count = 0;
-                            final targetDir = Directory(t.localPath!);
-                            if (!await targetDir.exists())
-                              await targetDir.create(recursive: true);
-
-                            for (final file in result.files) {
-                              if (file.path == null) continue;
-                              try {
-                                final src = File(file.path!);
-                                // 复制文件到标签目录
-                                final dst = File(p.join(
-                                    t.localPath!, p.basename(file.path!)));
-                                await src.copy(dst.path);
-                                count++;
-                              } catch (e) {
-                                debugPrint('Import failed: $e');
-                              }
-                            }
-                            if (context.mounted && count > 0) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                    content: Text(
-                                        '已导入 $count 个文件到：${p.basename(t.localPath!)}')),
-                              );
-                            }
-                          }
-                        }
-
-                        // 5. 打开目录浏览 (复用现有的文件夹详情页)
-                        if (v == 'open_path' &&
-                            t.localPath != null &&
-                            onOpenTagDirectory != null) {
-                          if (!context.mounted) return;
-                          await onOpenTagDirectory!(context, t);
-                        }
-                      },
-                      itemBuilder: (_) => [
-                        const PopupMenuItem(
-                            value: 'rename', child: Text('重命名')),
-                        const PopupMenuItem(
-                            value: 'bind_path', child: Text('设置本地存放目录')),
-                        if (t.localPath != null) ...[
-                          const PopupMenuItem(
-                              value: 'import_files', child: Text('导入文件到此目录')),
-                          if (onOpenTagDirectory != null)
-                            const PopupMenuItem(
-                                value: 'open_path', child: Text('浏览物理目录内容')),
-                        ],
-                        const PopupMenuItem(value: 'delete', child: Text('删除')),
-                      ],
-                    ),
-                  );
-                },
-              ),
-      ),
-    ]);
-  }
-}
-
-// ... _FileCard, _KindBadge, _TagPill, _MorePill, _TagCover, _CoverPlaceholder 等保持不变 ...
-// ... 如果你需要这部分代码，请告诉我，通常这部分不需要变动 ...
-// ... 为了完整性，我将在下面附上这部分（保持原样） ...
-
-class _FileCard extends StatelessWidget {
-  final TagTargetMeta meta;
-  final List<Tag> tags;
-  final Map<String, WebDavAccount> accountsMap;
-  final VoidCallback onTap;
-  final VoidCallback onEditTags;
-  final VoidCallback? onLocate;
-
-  const _FileCard({
-    required this.meta,
-    required this.tags,
-    required this.accountsMap,
-    required this.onTap,
-    required this.onEditTags,
-    this.onLocate,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final radius = BorderRadius.circular(14);
-
-    final showTags = tags.take(2).toList();
-    final rest = tags.length - showTags.length;
-
-    return Material(
-      color: theme.colorScheme.surface,
-      borderRadius: radius,
-      elevation: 0.4,
-      child: InkWell(
-        borderRadius: radius,
-        onTap: onTap,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            ClipRRect(
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(14)),
-              child: AspectRatio(
-                aspectRatio: 16 / 9,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    _TagCover(meta: meta, accountsMap: accountsMap),
-                    if (meta.kind == TagKind.video)
-                      Positioned(
-                        right: 8,
-                        bottom: 8,
-                        child: Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.42),
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                          child: const Icon(Icons.play_arrow_rounded,
-                              color: Colors.white, size: 18),
-                        ),
-                      ),
-                    Positioned(
-                      left: 8,
-                      top: 8,
-                      child: _KindBadge(kind: meta.kind),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 2),
-              child: Text(
-                meta.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-              child: Row(
-                children: [
-                  for (final t in showTags) ...[
-                    _TagPill(tag: t),
-                    const SizedBox(width: 6),
-                  ],
-                  if (rest > 0) _MorePill(count: rest),
-                  const Spacer(),
-                  if (onLocate != null)
-                    IconButton(
-                      tooltip: 'Locate',
-                      icon: const Icon(Icons.my_location_outlined, size: 18),
-                      onPressed: onLocate,
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  IconButton(
-                    tooltip: '编辑/去除标签',
-                    icon: const Icon(Icons.edit_outlined, size: 18),
-                    onPressed: onEditTags,
-                    visualDensity: VisualDensity.compact,
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _KindBadge extends StatelessWidget {
-  final TagKind kind;
-  const _KindBadge({required this.kind});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    IconData icon;
-    String text;
-    switch (kind) {
-      case TagKind.image:
-        icon = Icons.image_outlined;
-        text = '图片';
-        break;
-      case TagKind.video:
-        icon = Icons.videocam_outlined;
-        text = '视频';
-        break;
-      default:
-        icon = Icons.insert_drive_file_outlined;
-        text = '文件';
-        break;
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface.withValues(alpha: 0.88),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: theme.dividerColor.withValues(alpha: 0.7)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14),
-          const SizedBox(width: 4),
-          Text(text, style: const TextStyle(fontSize: 11)),
-        ],
-      ),
-    );
-  }
-}
-
-class _TagPill extends StatelessWidget {
-  final Tag tag;
-  const _TagPill({required this.tag});
-
-  @override
-  Widget build(BuildContext context) {
-    final c = Color(tag.colorValue);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: c.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: c.withValues(alpha: 0.35)),
-      ),
-      child: Text(tag.name, style: const TextStyle(fontSize: 11)),
-    );
-  }
-}
-
-class _MorePill extends StatelessWidget {
-  final int count;
-  const _MorePill({required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color:
-            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: theme.dividerColor.withValues(alpha: 0.8)),
-      ),
-      child: Text('+$count', style: const TextStyle(fontSize: 11)),
-    );
-  }
-}
-
-class _TagCover extends StatelessWidget {
-  final TagTargetMeta meta;
-  final Map<String, WebDavAccount> accountsMap;
-
-  const _TagCover({required this.meta, required this.accountsMap});
-
-  @override
-  Widget build(BuildContext context) {
-    final embyUrl = _resolveEmbyCoverUrl();
-    if (embyUrl.isNotEmpty) {
-      return Image.network(
-        embyUrl,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => const _CoverPlaceholder(
-          icon: Icons.image_not_supported_outlined,
-        ),
-      );
-    }
-    if (meta.kind == TagKind.image) {
-      return _imageCover();
-    }
-    if (meta.kind == TagKind.video) {
-      return _videoCover();
-    }
-    return const _CoverPlaceholder(icon: Icons.insert_drive_file_outlined);
-  }
-
-  String _resolveEmbyCoverUrl() {
-    final fromMeta = (meta.embyCoverUrl ?? '').trim();
-    if (fromMeta.isNotEmpty) return fromMeta;
-    final key = meta.key.trim();
-    if (key.isEmpty) return '';
-    if (!(meta.isEmby || key.toLowerCase().startsWith('emby://'))) return '';
-    return '';
-  }
-
-  Widget _imageCover() {
-    if (meta.isWebDav) {
-      final acc =
-          meta.wdAccountId != null ? accountsMap[meta.wdAccountId!] : null;
-      final href = meta.wdHref;
-      if (acc == null || href == null || href.trim().isEmpty) {
-        return const _CoverPlaceholder(
-            icon: Icons.image_not_supported_outlined);
-      }
-
-      return FutureBuilder<File>(
-        future:
-            WebDavClient(acc).coverFileForHref(href, suggestedName: meta.name),
-        builder: (_, snap) {
-          final f = snap.data;
-          if (f != null && f.existsSync() && f.lengthSync() > 0) {
-            return Image.file(f,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) =>
-                    const _CoverPlaceholder(icon: Icons.broken_image_outlined));
-          }
-          return const _CoverPlaceholder(icon: Icons.image_outlined);
-        },
-      );
-    }
-
-    final lp = meta.localPath;
-    if (lp == null || lp.isEmpty)
-      return const _CoverPlaceholder(icon: Icons.image_not_supported_outlined);
-    final f = File(lp);
-    if (!f.existsSync())
-      return const _CoverPlaceholder(icon: Icons.image_not_supported_outlined);
-    return Image.file(f,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) =>
-            const _CoverPlaceholder(icon: Icons.broken_image_outlined));
-  }
-
-  Widget _videoCover() {
-    if (meta.isWebDav) {
-      final acc =
-          meta.wdAccountId != null ? accountsMap[meta.wdAccountId!] : null;
-      final href = meta.wdHref;
-      if (acc == null || href == null || href.trim().isEmpty) {
-        return const _CoverPlaceholder(icon: Icons.videocam_off_outlined);
-      }
-      return FutureBuilder<File>(
-        future:
-            WebDavClient(acc).cacheFileForHref(href, suggestedName: meta.name),
-        builder: (_, snap) {
-          final f = snap.data;
-          if (f != null && f.existsSync() && f.lengthSync() > 0) {
-            return VideoThumbImage(videoPath: f.path, cacheOnly: true);
-          }
-          return const _CoverPlaceholder(icon: Icons.videocam_outlined);
-        },
-      );
-    }
-
-    final lp = meta.localPath;
-    if (lp == null || lp.isEmpty)
-      return const _CoverPlaceholder(icon: Icons.videocam_off_outlined);
-    final f = File(lp);
-    if (!f.existsSync())
-      return const _CoverPlaceholder(icon: Icons.videocam_off_outlined);
-    return VideoThumbImage(videoPath: f.path, cacheOnly: true);
-  }
-}
-
-class _CoverPlaceholder extends StatelessWidget {
-  final IconData icon;
-  const _CoverPlaceholder({required this.icon});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
-      alignment: Alignment.center,
-      child: Icon(icon,
-          color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.72),
-          size: 28),
     );
   }
 }

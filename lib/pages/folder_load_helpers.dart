@@ -9,7 +9,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     _wdAccMap
       ..clear()
       ..addAll(WebDavManager.instance.accountsMap);
-    _wdClientMap..clear();
+    _wdClientMap.clear();
     for (final e in _wdAccMap.entries) {
       _wdClientMap[e.key] = WebDavClient(e.value);
     }
@@ -22,8 +22,8 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     if (accMap.length != 1) return false;
     final newId = accMap.keys.first;
     final old =
-        _buildWebDavSource(ref.accountId, ref.relPath, isDir: ref.isDir);
-    final neu = _buildWebDavSource(newId, ref.relPath, isDir: ref.isDir);
+        buildPageWebDavSource(ref.accountId, ref.relPath, isDir: ref.isDir);
+    final neu = buildPageWebDavSource(newId, ref.relPath, isDir: ref.isDir);
     final i = widget.collection.sources.indexOf(old);
     if (i >= 0) {
       widget.collection.sources[i] = neu;
@@ -31,7 +31,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     }
     for (var k = 0; k < widget.collection.sources.length; k++) {
       final s = widget.collection.sources[k];
-      final r = _parseWebDavSource(s);
+      final r = parsePageWebDavSource(s);
       if (r == null) continue;
       if (r.accountId == ref.accountId &&
           r.relPath == ref.relPath &&
@@ -50,7 +50,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     final neu = buildEmbySource(newId, ref.path);
     for (var k = 0; k < widget.collection.sources.length; k++) {
       final s = widget.collection.sources[k];
-      final r = _parseEmbySource(s);
+      final r = parsePageEmbySource(s);
       if (r == null) continue;
       if (r.accountId == ref.accountId && r.path == ref.path) {
         widget.collection.sources[k] = neu;
@@ -60,10 +60,10 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     return false;
   }
 
-  Future<List<_Entry>> _loadVirtual() async {
-    final out = <_Entry>[];
+  Future<List<Entry>> _loadVirtual() async {
+    final out = <Entry>[];
 
-    final hasWebDav = widget.collection.sources.any(_isWebDavSource);
+    final hasWebDav = widget.collection.sources.any(isPageWebDavSource);
     if (hasWebDav) {
       await _ensureWebDavAccountsLoaded(force: true);
     } else {
@@ -76,10 +76,116 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     final embyAccList = await EmbyStore.load();
     final embyAccMap = {for (final a in embyAccList) a.id: a};
 
+    Future<void> appendEmbyFavoritesRootEntries(EmbyAccount account) async {
+      final origin = 'Emby：${account.name}';
+      final client = EmbyClient(account);
+
+      try {
+        final views = await client.listViews();
+        if (views.isNotEmpty) {
+          for (final v in views) {
+            out.add(
+              Entry(
+                isDir: true,
+                name: v.name.isEmpty ? '未命名库' : v.name,
+                size: 0,
+                modified: DateTime.fromMillisecondsSinceEpoch(0),
+                typeKey: 'emby_folder',
+                origin: origin,
+                embyAccountId: account.id,
+                embyItemId: v.id,
+                embyCoverUrl: client.bestCoverUrl(v, maxWidth: 420),
+              ),
+            );
+          }
+          return;
+        }
+
+        final fav = await client.listFavorites();
+        if (fav.isEmpty) {
+          out.add(
+            Entry(
+              isDir: false,
+              name: 'Emby 没有可用媒体库',
+              size: 0,
+              modified: DateTime.fromMillisecondsSinceEpoch(0),
+              typeKey: 'emby_empty',
+              origin: origin,
+              embyAccountId: account.id,
+            ),
+          );
+          return;
+        }
+
+        for (final it in fav) {
+          final cover = client.bestCoverUrl(
+            it,
+            maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
+          );
+
+          final isDir = _embyTypeIsDir(it.type);
+          final isImg = _embyTypeIsImage(it.type);
+
+          out.add(
+            Entry(
+              isDir: isDir,
+              name: it.name.isEmpty ? '未命名' : it.name,
+              size: isDir ? 0 : it.size,
+              modified: it.dateCreated ??
+                  it.dateModified ??
+                  DateTime.fromMillisecondsSinceEpoch(0),
+              typeKey:
+                  isDir ? 'emby_folder' : (isImg ? 'emby_image' : 'emby_video'),
+              origin: origin,
+              embyAccountId: account.id,
+              embyItemId: it.id,
+              embyCoverUrl: cover,
+            ),
+          );
+        }
+      } catch (e) {
+        out.add(
+          Entry(
+            isDir: false,
+            name: '去 Emby 登录/检查配置',
+            size: 0,
+            modified: DateTime.fromMillisecondsSinceEpoch(0),
+            typeKey: 'emby_login',
+            origin: '$origin\n${e.toString().replaceFirst("Exception: ", "")}',
+            embyAccountId: account.id,
+          ),
+        );
+      }
+    }
+
     for (final src in widget.collection.sources) {
-      if (_isEmbySource(src)) {
-        final ref = _parseEmbySource(src);
+      if (isPageEmbySource(src)) {
+        final ref = parsePageEmbySource(src);
         if (ref == null) continue;
+
+        final sourcePath =
+            ref.path.trim().isEmpty ? 'favorites' : ref.path.trim();
+        if (ref.accountId.trim().toLowerCase() == 'all' &&
+            sourcePath == 'favorites') {
+          if (embyAccList.isEmpty) {
+            out.add(
+              Entry(
+                isDir: false,
+                name: 'Emby 账号不存在 / 已删除',
+                size: 0,
+                modified: DateTime.fromMillisecondsSinceEpoch(0),
+                typeKey: 'emby_login',
+                origin: '当前没有任何 Emby 账号。请到 Emby 设置页先添加/登录。',
+                embyAccountId: ref.accountId,
+              ),
+            );
+            continue;
+          }
+          for (final account in embyAccList) {
+            await appendEmbyFavoritesRootEntries(account);
+          }
+          continue;
+        }
 
         var a = embyAccMap[ref.accountId];
         if (a == null) {
@@ -87,18 +193,18 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
           if (migrated) {
             final s2 = widget.collection.sources.firstWhere(
               (s) =>
-                  _parseEmbySource(s)?.path == ref.path &&
-                  (_parseEmbySource(s)?.accountId ?? '') != ref.accountId,
+                  parsePageEmbySource(s)?.path == ref.path &&
+                  (parsePageEmbySource(s)?.accountId ?? '') != ref.accountId,
               orElse: () => '',
             );
-            final r2 = s2.isEmpty ? null : _parseEmbySource(s2);
+            final r2 = s2.isEmpty ? null : parsePageEmbySource(s2);
             a = (r2 == null) ? null : embyAccMap[r2.accountId];
           }
         }
 
         if (a == null) {
           out.add(
-            _Entry(
+            Entry(
               isDir: false,
               name: 'Emby 账号不存在 / 已删除',
               size: 0,
@@ -116,16 +222,13 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
         }
 
         final origin = 'Emby：${a.name}';
-        final client = EmbyClient(a);
-        final sourcePath =
-            ref.path.trim().isEmpty ? 'favorites' : ref.path.trim();
 
         if (sourcePath != 'favorites') {
           try {
             final scoped = await _loadEmby(a.id, sourcePath);
             if (scoped.isEmpty) {
               out.add(
-                _Entry(
+                Entry(
                   isDir: false,
                   name: 'Emby 目录为空',
                   size: 0,
@@ -141,7 +244,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
             continue;
           } catch (e) {
             out.add(
-              _Entry(
+              Entry(
                 isDir: false,
                 name: '去 Emby 登录/检查配置',
                 size: 0,
@@ -156,89 +259,12 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
           }
         }
 
-        try {
-          final views = await client.listViews();
-          if (views.isNotEmpty) {
-            for (final v in views) {
-              out.add(
-                _Entry(
-                  isDir: true,
-                  name: v.name.isEmpty ? '未命名库' : v.name,
-                  size: 0,
-                  modified: DateTime.fromMillisecondsSinceEpoch(0),
-                  typeKey: 'emby_folder',
-                  origin: origin,
-                  embyAccountId: a.id,
-                  embyItemId: v.id,
-                  embyCoverUrl: client.bestCoverUrl(v, maxWidth: 420),
-                ),
-              );
-            }
-            continue;
-          }
-
-          final fav = await client.listFavorites();
-          if (fav.isEmpty) {
-            out.add(
-              _Entry(
-                isDir: false,
-                name: 'Emby 没有可用媒体库',
-                size: 0,
-                modified: DateTime.fromMillisecondsSinceEpoch(0),
-                typeKey: 'emby_empty',
-                origin: origin,
-                embyAccountId: a.id,
-              ),
-            );
-            continue;
-          }
-
-          for (final it in fav) {
-            final cover = client.bestCoverUrl(
-              it,
-              maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-            );
-
-            final isDir = _embyTypeIsDir(it.type);
-            final isImg = _embyTypeIsImage(it.type);
-
-            out.add(
-              _Entry(
-                isDir: isDir,
-                name: it.name.isEmpty ? '未命名' : it.name,
-                size: isDir ? 0 : it.size,
-                modified: it.dateCreated ??
-                    it.dateModified ??
-                    DateTime.fromMillisecondsSinceEpoch(0),
-                typeKey: isDir
-                    ? 'emby_folder'
-                    : (isImg ? 'emby_image' : 'emby_video'),
-                origin: origin,
-                embyAccountId: a.id,
-                embyItemId: it.id,
-                embyCoverUrl: cover,
-              ),
-            );
-          }
-        } catch (e) {
-          out.add(
-            _Entry(
-              isDir: false,
-              name: '去 Emby 登录/检查配置',
-              size: 0,
-              modified: DateTime.fromMillisecondsSinceEpoch(0),
-              typeKey: 'emby_login',
-              origin:
-                  '$origin\n${e.toString().replaceFirst("Exception: ", "")}',
-              embyAccountId: a.id,
-            ),
-          );
-        }
+        await appendEmbyFavoritesRootEntries(a);
         continue;
       }
 
-      if (_isWebDavSource(src)) {
-        final ref = _parseWebDavSource(src);
+      if (isPageWebDavSource(src)) {
+        final ref = parsePageWebDavSource(src);
         if (ref == null) continue;
 
         var a = accMap[ref.accountId];
@@ -247,8 +273,8 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
           if (migrated) {
             await _ensureWebDavAccountsLoaded(force: true);
             a = _wdAccMap[
-                _parseWebDavSource(widget.collection.sources.firstWhere((s) {
-                      final r = _parseWebDavSource(s);
+                parsePageWebDavSource(widget.collection.sources.firstWhere((s) {
+                      final r = parsePageWebDavSource(s);
                       return r != null &&
                           r.relPath == ref.relPath &&
                           r.isDir == ref.isDir;
@@ -259,7 +285,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
 
         if (a == null) {
           out.add(
-            _Entry(
+            Entry(
               isDir: false,
               name: 'WebDAV 账号不存在 / 已删除',
               size: 0,
@@ -286,7 +312,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
         if (!ref.isDir) {
           final name = p.basename(ref.relPath);
           out.add(
-            _Entry(
+            Entry(
               isDir: false,
               name: name.isEmpty ? '文件' : name,
               size: 0,
@@ -310,7 +336,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
           final children = await client.list(baseRel);
           for (final it in children) {
             out.add(
-              _Entry(
+              Entry(
                 isDir: it.isDir,
                 name: it.name,
                 size: it.size,
@@ -329,7 +355,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
           }
         } catch (e) {
           out.add(
-            _Entry(
+            Entry(
               isDir: false,
               name: 'WebDAV 加载失败',
               size: 0,
@@ -361,7 +387,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
           }
           final ext = p.extension(e.path).toLowerCase();
           out.add(
-            _Entry(
+            Entry(
               isDir: isDir,
               name: (p.basename(e.path).isEmpty ? e.path : p.basename(e.path)),
               size: isDir ? 0 : st.size,
@@ -379,7 +405,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
 
     if (out.isEmpty) {
       out.add(
-        _Entry(
+        Entry(
           isDir: false,
           name: '暂无内容',
           size: 0,
@@ -394,7 +420,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     return out;
   }
 
-  Future<List<_Entry>> _loadLocalDir(String folder) async {
+  Future<List<Entry>> _loadLocalDir(String folder) async {
     final d = Directory(folder);
     if (!await d.exists()) return [];
     List<FileSystemEntity> children;
@@ -403,7 +429,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     } catch (_) {
       return [];
     }
-    final out = <_Entry>[];
+    final out = <Entry>[];
     for (final e in children) {
       final isDir = e is Directory;
       FileStat st;
@@ -414,7 +440,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
       }
       final ext = p.extension(e.path).toLowerCase();
       out.add(
-        _Entry(
+        Entry(
           isDir: isDir,
           name: (p.basename(e.path).isEmpty ? e.path : p.basename(e.path)),
           size: isDir ? 0 : st.size,
@@ -428,14 +454,13 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
     return out;
   }
 
-  Future<List<_Entry>> _loadWebDavDir(
-      String accountId, String relFolder) async {
+  Future<List<Entry>> _loadWebDavDir(String accountId, String relFolder) async {
     await _ensureWebDavAccountsLoaded(force: true);
 
     final a = _wdAccMap[accountId];
     if (a == null) {
       return [
-        _Entry(
+        Entry(
           isDir: false,
           name: 'WebDAV 账号不存在 / 已删除',
           size: 0,
@@ -455,7 +480,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
       list = await client.list(relFolder);
     } catch (e) {
       return [
-        _Entry(
+        Entry(
           isDir: false,
           name: 'WebDAV 加载失败',
           size: 0,
@@ -471,7 +496,7 @@ extension _FolderLoadHelperMethods on _FolderDetailPageState {
 
     return [
       for (final it in list)
-        _Entry(
+        Entry(
           isDir: it.isDir,
           name: it.name,
           size: it.size,

@@ -353,9 +353,12 @@ class _PlaybackInspectorOverlayState extends State<PlaybackInspectorOverlay> {
       int outBytes = 0;
       for (final e in _recentEvents) {
         if (e.t.isAfter(oneSecAgo)) {
-          if (e.kind == ProxyEventKind.remoteFetchDone)
+          if (e.kind == ProxyEventKind.remoteFetchDone) {
             inBytes += (e.bytes ?? 0);
-          if (e.kind == ProxyEventKind.respOut) outBytes += (e.bytes ?? 0);
+          }
+          if (e.kind == ProxyEventKind.respOut) {
+            outBytes += (e.bytes ?? 0);
+          }
         }
       }
 

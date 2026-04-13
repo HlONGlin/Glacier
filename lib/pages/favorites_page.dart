@@ -11,12 +11,11 @@ class FavoritesPage extends StatefulWidget {
 }
 
 class _FavoritesPageState extends State<FavoritesPage> {
-  bool showGlobalLoading = false;
-
   bool _loading = true;
   Object? _loadError;
   bool _reloading = false;
   List<FavoriteCollection> _list = [];
+  bool _tagEnabled = true;
   String _favoritesQuery = '';
   bool _favoritesSearchExpanded = false;
   bool _favoritesGrid = true;
@@ -31,20 +30,25 @@ class _FavoritesPageState extends State<FavoritesPage> {
   Future<void> _reload() async {
     if (_reloading) return;
     _reloading = true;
-    if (showGlobalLoading) {
-      setState(() => _loading = true);
+    var tagEnabled = _tagEnabled;
+    try {
+      tagEnabled = await AppSettings.getTagEnabled();
+    } catch (_) {
+      // ignore and keep current UI state
     }
     try {
       final list = await FavoriteStore.load();
       if (!mounted) return;
       setState(() {
         _list = list;
+        _tagEnabled = tagEnabled;
         _loadError = null;
         _loading = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
+        _tagEnabled = tagEnabled;
         _loadError = e;
         _loading = false;
       });
@@ -56,7 +60,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
 
     if (!_autoEnteredLast) {
       _autoEnteredLast = true;
-      _tryAutoEnterLastFavorite();
+      await _tryAutoEnterLastFavorite();
     }
   }
 
@@ -71,7 +75,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
         builder: (_) => EmbyExclusiveFavoritesPage(
           accountIds: scopedAccountIds,
           openFolder: (ctx, {required title, required source}) {
-            return _openTagSourceAsFolder(ctx, title: title, source: source);
+            return openTagSourceAsFolder(ctx, title: title, source: source);
           },
           openSettings: (ctx) {
             return Navigator.push(
@@ -99,6 +103,10 @@ class _FavoritesPageState extends State<FavoritesPage> {
 
       if (!mounted) return;
       final c = _list[idx];
+      if (await _tryOpenCollectionWithEmbyUi(c)) {
+        return;
+      }
+      if (!mounted) return;
       final updated = await Navigator.push<FavoriteCollection>(
         context,
         MaterialPageRoute(
@@ -110,7 +118,9 @@ class _FavoritesPageState extends State<FavoritesPage> {
         setState(() => _list[uIdx] = updated);
         await _save();
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('auto enter last favorite failed: $e');
+    }
   }
 
   Future<void> _save() => FavoriteStore.save(_list);
@@ -129,34 +139,23 @@ class _FavoritesPageState extends State<FavoritesPage> {
   }
 
   Future<void> _openCollection(FavoriteCollection c) async {
-    await AppSettings.setLastFavoriteId(c.id);
+    final live = _list.firstWhere(
+      (e) => e.id == c.id,
+      orElse: () => c,
+    );
 
-    final onlyEmbySource =
-        c.sources.isNotEmpty && c.sources.every(_isEmbySource);
-    final embyAccIds = c.sources
-        .where(_isEmbySource)
-        .map(_parseEmbySource)
-        .whereType<_EmbyRef>()
-        .map((r) => r.accountId.trim())
-        .where((id) => id.isNotEmpty && id.toLowerCase() != 'all')
-        .toSet();
-    if (onlyEmbySource) {
-      try {
-        final enabled = await AppSettings.getEmbyExclusiveFavoritesUiEnabled();
-        if (enabled) {
-          if (!mounted) return;
-          await _openEmbyOnlyFavorites(
-            scopedAccountIds: embyAccIds.isEmpty ? null : embyAccIds,
-          );
-          return;
-        }
-      } catch (_) {}
+    await AppSettings.setLastFavoriteId(live.id);
+
+    if (await _tryOpenCollectionWithEmbyUi(live)) {
+      return;
     }
 
     if (!mounted) return;
     final updated = await Navigator.push<FavoriteCollection>(
       context,
-      MaterialPageRoute(builder: (_) => FolderDetailPage(collection: c.copy())),
+      MaterialPageRoute(
+        builder: (_) => FolderDetailPage(collection: live.copy()),
+      ),
     );
     if (updated == null) return;
     final idx = _list.indexWhere((e) => e.id == updated.id);
@@ -166,11 +165,44 @@ class _FavoritesPageState extends State<FavoritesPage> {
     }
   }
 
+  Future<bool> _tryOpenCollectionWithEmbyUi(FavoriteCollection c) async {
+    final onlyEmbySource =
+        c.sources.isNotEmpty && c.sources.every(isPageEmbySource);
+
+    final embyAccIds = c.sources
+        .where(isPageEmbySource)
+        .map(parsePageEmbySource)
+        .whereType<EmbyPathSourceRef>()
+        .map((r) => r.accountId.trim())
+        .where((id) => id.isNotEmpty && id.toLowerCase() != 'all')
+        .toSet();
+    if (onlyEmbySource) {
+      try {
+        final enabled = await AppSettings.getEmbyExclusiveFavoritesUiEnabled();
+        if (enabled) {
+          if (!mounted) return false;
+          await _openEmbyOnlyFavorites(
+            scopedAccountIds: embyAccIds.isEmpty ? null : embyAccIds,
+          );
+          return true;
+        }
+      } catch (_) {}
+    }
+
+    return false;
+  }
+
   Future<void> _newCollection() async {
     final name = await _textInput(context,
         title: '新建收藏夹', hint: '输入收藏夹名称', initial: '新收藏夹');
     if (name == null) return;
-    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final random = Random.secure();
+    String id;
+    do {
+      final now = DateTime.now().microsecondsSinceEpoch;
+      final suffix = random.nextInt(1 << 32).toRadixString(16);
+      id = '${now}_$suffix';
+    } while (_list.any((e) => e.id == id));
     setState(() {
       _list.add(
         FavoriteCollection(
@@ -211,8 +243,9 @@ class _FavoritesPageState extends State<FavoritesPage> {
       dialogTitle: '选择封面（图片或视频）',
       allowMultiple: false,
       type: FileType.custom,
-      allowedExtensions:
-          [..._imgExts, ..._vidExts].map((e) => e.substring(1)).toList(),
+      allowedExtensions: [...kPageImageExts, ...kPageVideoExts]
+          .map((e) => e.substring(1))
+          .toList(),
     );
     if (res == null || res.files.isEmpty) return;
     final path = res.files.single.path;
@@ -399,28 +432,29 @@ class _FavoritesPageState extends State<FavoritesPage> {
                             ),
                             TopActionMenu<String>(
                               tooltip: '更多',
-                              items: const [
-                                TopActionMenuItem(
+                              items: [
+                                const TopActionMenuItem(
                                     value: 'history',
                                     icon: Icons.history,
                                     label: '历史记录'),
-                                TopActionMenuItem(
+                                const TopActionMenuItem(
                                     value: 'settings',
                                     icon: Icons.settings_outlined,
                                     label: '设置'),
-                                TopActionMenuItem(
-                                    value: 'tags',
-                                    icon: Icons.sell_outlined,
-                                    label: '标签管理'),
-                                TopActionMenuItem(
+                                if (_tagEnabled)
+                                  const TopActionMenuItem(
+                                      value: 'tags',
+                                      icon: Icons.sell_outlined,
+                                      label: '标签管理'),
+                                const TopActionMenuItem(
                                     value: 'webdav',
                                     icon: Icons.cloud_outlined,
                                     label: 'WebDAV'),
-                                TopActionMenuItem(
+                                const TopActionMenuItem(
                                     value: 'emby',
                                     icon: Icons.video_library_outlined,
                                     label: 'Emby'),
-                                TopActionMenuItem(
+                                const TopActionMenuItem(
                                     value: 'refresh',
                                     icon: Icons.refresh,
                                     label: '刷新'),
@@ -440,6 +474,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
                                         MaterialPageRoute(
                                             builder: (_) =>
                                                 const SettingsPage()));
+                                    await _reload();
                                     break;
                                   case 'tags':
                                     if (!mounted) return;
@@ -447,10 +482,16 @@ class _FavoritesPageState extends State<FavoritesPage> {
                                       context: context,
                                       barrierLabel: 'tag_manager',
                                       child: TagManagerPage(
-                                        onOpenItem: (item) =>
-                                            openTagTarget(context, item),
-                                        onLocateItem: (item) =>
-                                            locateTagTarget(context, item),
+                                        onOpenItem: (item) => openTagTarget(
+                                          context,
+                                          item,
+                                          openFolder: openTagSourceAsFolder,
+                                        ),
+                                        onLocateItem: (item) => locateTagTarget(
+                                          context,
+                                          item,
+                                          openFolder: openTagSourceAsFolder,
+                                        ),
                                       ),
                                     );
                                     break;
@@ -561,11 +602,11 @@ class _FavoritesPageState extends State<FavoritesPage> {
 Widget _collectionCover(FavoriteCollection c) {
   final custom = c.coverPath;
   if (custom != null && custom.trim().isNotEmpty && File(custom).existsSync()) {
-    return _isImg(custom)
+    return isPageImagePath(custom)
         ? Image.file(File(custom),
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) => const _CoverPlaceholder())
-        : (_isVid(custom)
+        : (isPageVideoPath(custom)
             ? VideoThumbImage(videoPath: custom)
             : const _CoverPlaceholder());
   }

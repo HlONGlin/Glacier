@@ -2,23 +2,28 @@ part of '../pages.dart';
 
 extension _FolderScopeSearchMethods on _FolderDetailPageState {
   Future<void> _loadSearchScopeSettings() async {
+    if (_searchScopeSettingsLoaded) return;
     try {
-      final scopeRaw = await AppSettings.getFolderSearchScope();
-      final singleId = await AppSettings.getFolderSearchSingleCollectionId();
+      final values = await Future.wait<Object?>([
+        AppSettings.getFolderSearchScope(),
+        AppSettings.getFolderSearchSingleCollectionId(),
+      ]);
+      final scopeRaw = values[0] as String;
+      final singleId = values[1] as String?;
       if (!mounted) return;
       switch (scopeRaw) {
         case 'currentDirectory':
-          _searchScope = _FolderSearchScope.currentDirectory;
+          _searchScope = FolderSearchScope.currentDirectory;
           break;
         case 'allCollections':
-          _searchScope = _FolderSearchScope.allCollections;
+          _searchScope = FolderSearchScope.allCollections;
           break;
         case 'singleCollection':
-          _searchScope = _FolderSearchScope.singleCollection;
+          _searchScope = FolderSearchScope.singleCollection;
           break;
         case 'currentCollection':
         default:
-          _searchScope = _FolderSearchScope.currentCollection;
+          _searchScope = FolderSearchScope.currentCollection;
           break;
       }
       final sid = (singleId ?? '').trim();
@@ -27,11 +32,13 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
       } else {
         _singleSearchCollectionId ??= widget.collection.id;
       }
+      _searchScopeSettingsLoaded = true;
       _refreshFolderDetailState();
     } catch (_) {
       if (!mounted) return;
-      _searchScope = _FolderSearchScope.currentCollection;
+      _searchScope = FolderSearchScope.currentCollection;
       _singleSearchCollectionId ??= widget.collection.id;
+      _searchScopeSettingsLoaded = true;
       _refreshFolderDetailState();
     }
   }
@@ -44,6 +51,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     } else {
       await AppSettings.setFolderSearchSingleCollectionId(sid);
     }
+    _searchScopeSettingsLoaded = true;
   }
 
   FavoriteCollection? _collectionById(String? id) {
@@ -82,7 +90,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     }
   }
 
-  String _searchPathHint(_Entry e) {
+  String _searchPathHint(Entry e) {
     if (e.isWebDav) {
       final rel = (e.wdRelPath ?? '').trim();
       if (rel.isEmpty) return 'WebDAV';
@@ -99,13 +107,13 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     return base.isEmpty ? d : base;
   }
 
-  _Entry _cloneEntry(
-    _Entry e, {
+  Entry _cloneEntry(
+    Entry e, {
     String? origin,
     String? searchCollectionId,
     String? searchCollectionName,
   }) {
-    return _Entry(
+    return Entry(
       isDir: e.isDir,
       name: e.name,
       size: e.size,
@@ -124,7 +132,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     );
   }
 
-  _Entry _asSearchResult(FavoriteCollection c, _Entry e) {
+  Entry _asSearchResult(FavoriteCollection c, Entry e) {
     final cName = c.name.trim().isEmpty ? '未命名收藏夹' : c.name.trim();
     final hint = _searchPathHint(e);
     final label = hint.trim().isEmpty ? cName : '$cName · $hint';
@@ -147,7 +155,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     _scopeSearchToken++;
     _scopeSearching = false;
     _scopeSearchError = null;
-    _scopeSearchRaw = const <_Entry>[];
+    _scopeSearchRaw = const <Entry>[];
     if (clearCache) _scopeSearchCache.clear();
   }
 
@@ -164,7 +172,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     }
     _scopeSearching = true;
     _scopeSearchError = null;
-    _scopeSearchRaw = const <_Entry>[];
+    _scopeSearchRaw = const <Entry>[];
     _refreshFolderDetailState();
     void run() {
       _runScopeSearchNow();
@@ -183,16 +191,16 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     _scheduleScopeSearch();
   }
 
-  Future<List<_Entry>> _loadRootEntriesForCollection(
+  Future<List<Entry>> _loadRootEntriesForCollection(
     FavoriteCollection collection, {
     String searchQuery = '',
   }) async {
-    final out = <_Entry>[];
+    final out = <Entry>[];
     final q = searchQuery.trim();
     for (final src in collection.sources) {
       try {
-        if (_isEmbySource(src)) {
-          final ref = _parseEmbySource(src);
+        if (isPageEmbySource(src)) {
+          final ref = parsePageEmbySource(src);
           if (ref == null) continue;
           if (q.isNotEmpty) {
             out.addAll(await _searchEmbyEntriesBySource(ref, q));
@@ -203,13 +211,13 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
           continue;
         }
 
-        if (_isWebDavSource(src)) {
-          final ref = _parseWebDavSource(src);
+        if (isPageWebDavSource(src)) {
+          final ref = parsePageWebDavSource(src);
           if (ref == null) continue;
           if (!ref.isDir) {
             final fileName = p.basename(ref.relPath);
             out.add(
-              _Entry(
+              Entry(
                 isDir: false,
                 name: fileName.isEmpty ? '文件' : fileName,
                 size: 0,
@@ -239,7 +247,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     return out;
   }
 
-  _Entry _entryFromEmbySearchItem({
+  Entry _entryFromEmbySearchItem({
     required EmbyAccount account,
     required EmbyClient client,
     required EmbyItem item,
@@ -247,7 +255,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     final isDir = item.isFolder || _embyTypeIsDir(item.type);
     final isImg = !isDir && _embyTypeIsImage(item.type);
     final thumbWidth = _active.viewMode == ViewMode.grid ? 420 : 220;
-    return _Entry(
+    return Entry(
       isDir: isDir,
       name: item.name.isEmpty ? '未命名' : item.name,
       size: isDir ? 0 : item.size,
@@ -262,16 +270,16 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     );
   }
 
-  Future<List<_Entry>> _searchEmbyEntriesByTraversalFallback({
+  Future<List<Entry>> _searchEmbyEntriesByTraversalFallback({
     required EmbyAccount account,
     required EmbyClient client,
     required String sourcePath,
     required String query,
   }) async {
     final qLower = query.trim().toLowerCase();
-    if (qLower.isEmpty) return const <_Entry>[];
+    if (qLower.isEmpty) return const <Entry>[];
 
-    final out = <_Entry>[];
+    final out = <Entry>[];
     final seenItemIds = <String>{};
     final dirQueue = <String>[];
     var cursor = 0;
@@ -370,11 +378,11 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     return out;
   }
 
-  Future<List<_Entry>> _searchEmbyEntriesBySource(
+  Future<List<Entry>> _searchEmbyEntriesBySource(
       _EmbyRef ref, String query) async {
     final accMap = await _loadEmbyAccountsMap();
     final a = accMap[ref.accountId];
-    if (a == null) return const <_Entry>[];
+    if (a == null) return const <Entry>[];
 
     final client = EmbyClient(a);
     final sourcePath = ref.path.trim().isEmpty ? 'favorites' : ref.path.trim();
@@ -382,7 +390,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
 
     if (sourcePath.startsWith('view:')) {
       final pid = sourcePath.substring('view:'.length).trim();
-      if (pid.isEmpty) return const <_Entry>[];
+      if (pid.isEmpty) return const <Entry>[];
       parentId = pid;
     } else if (sourcePath == 'favorites') {
       parentId = null;
@@ -431,17 +439,17 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
 
     List<FavoriteCollection> targets = <FavoriteCollection>[];
     switch (_searchScope) {
-      case _FolderSearchScope.currentDirectory:
+      case FolderSearchScope.currentDirectory:
         targets = <FavoriteCollection>[];
         break;
-      case _FolderSearchScope.currentCollection:
+      case FolderSearchScope.currentCollection:
         targets = <FavoriteCollection>[widget.collection];
         break;
-      case _FolderSearchScope.allCollections:
+      case FolderSearchScope.allCollections:
         await _ensureSearchCollectionsLoaded();
         targets = _allSearchCollections();
         break;
-      case _FolderSearchScope.singleCollection:
+      case FolderSearchScope.singleCollection:
         await _ensureSearchCollectionsLoaded();
         var selected = _collectionById(_singleSearchCollectionId);
         if (selected == null) {
@@ -457,7 +465,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
       if (!mounted) return;
       _scopeSearching = false;
       _scopeSearchError = null;
-      _scopeSearchRaw = const <_Entry>[];
+      _scopeSearchRaw = const <Entry>[];
       _refreshFolderDetailState();
       return;
     }
@@ -475,14 +483,15 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
     }
 
     try {
-      final out = <_Entry>[];
+      final out = <Entry>[];
       final seen = <String>{};
       for (final c in targets) {
         if (out.length >= _FolderDetailPageState._maxScopeSearchResults) break;
         final list = await _loadRootEntriesForCollection(c, searchQuery: qRaw);
         for (final e in list) {
-          if (out.length >= _FolderDetailPageState._maxScopeSearchResults)
+          if (out.length >= _FolderDetailPageState._maxScopeSearchResults) {
             break;
+          }
           final name = e.name.toLowerCase();
           final matchedByName = name.contains(qLower);
           if (!matchedByName && !(e.isEmby && qRaw.isNotEmpty)) continue;
@@ -508,7 +517,7 @@ extension _FolderScopeSearchMethods on _FolderDetailPageState {
       if (!mounted || token != _scopeSearchToken) return;
       _scopeSearching = false;
       _scopeSearchError = e;
-      _scopeSearchRaw = const <_Entry>[];
+      _scopeSearchRaw = const <Entry>[];
       _refreshFolderDetailState();
     }
   }

@@ -1,11 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
+export 'features/accounts/emby/data/emby_account_model.dart';
+export 'features/accounts/emby/data/emby_store.dart';
+
+import 'features/accounts/emby/data/emby_account_model.dart';
+import 'features/accounts/emby/data/emby_store.dart';
 import 'emby_native_logic.dart';
 import 'ui_kit.dart';
 
@@ -14,133 +17,6 @@ const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
   statusBarIconBrightness: Brightness.dark,
   statusBarBrightness: Brightness.light,
 );
-
-/// =========================
-/// Emby models & store
-/// =========================
-
-class EmbyAccount {
-  final String id;
-  String name;
-  String serverUrl; // e.g. http://host:8096 OR http://host:8096/emby
-  String username;
-  String password; // 为了“免输入”体验而保存的密码（仅本地存储，存在安全风险）
-  String userId;
-  String apiKey;
-
-  EmbyAccount({
-    required this.id,
-    required this.name,
-    required this.serverUrl,
-    required this.username,
-    this.password = '',
-    required this.userId,
-    required this.apiKey,
-  });
-
-  Uri get baseUri {
-    var s = serverUrl.trim();
-    while (s.endsWith('/')) s = s.substring(0, s.length - 1);
-    return Uri.parse(s);
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'serverUrl': serverUrl,
-        'username': username,
-        'password': password,
-        'userId': userId,
-        'apiKey': apiKey,
-      };
-
-  static EmbyAccount fromJson(Map<String, dynamic> j) {
-    final id = (j['id'] ?? '').toString().trim();
-    return EmbyAccount(
-      id: id.isEmpty ? DateTime.now().millisecondsSinceEpoch.toString() : id,
-      name: ((j['name'] ?? '').toString().trim().isEmpty)
-          ? 'Emby'
-          : (j['name'] ?? '').toString(),
-      serverUrl: (j['serverUrl'] ?? '').toString(),
-      username: (j['username'] ?? '').toString(),
-      password: (j['password'] ?? '').toString(),
-      userId: (j['userId'] ?? '').toString(),
-      apiKey: (j['apiKey'] ?? '').toString(),
-    );
-  }
-}
-
-class EmbyStore {
-  static const _k = 'emby_accounts_v3';
-
-  static bool _isGuid(String s) {
-    final t = s.trim();
-    if (t.isEmpty) return false;
-    final r1 = RegExp(r'^[0-9a-fA-F]{32}$');
-    final r2 = RegExp(
-        r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
-    return r1.hasMatch(t) || r2.hasMatch(t);
-  }
-
-  static Future<List<EmbyAccount>> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_k) ??
-        prefs.getString('emby_accounts_v2') ??
-        prefs.getString('emby_accounts_v1');
-
-    if (raw == null || raw.trim().isEmpty) return [];
-
-    try {
-      final list = jsonDecode(raw);
-      if (list is List) {
-        final accs = list
-            .whereType<Map>()
-            .map((m) => EmbyAccount.fromJson(m.cast<String, dynamic>()))
-            .toList();
-
-        bool mutated = false;
-        for (final a in accs) {
-          if (a.username.trim().isEmpty &&
-              a.userId.trim().isNotEmpty &&
-              !_isGuid(a.userId)) {
-            a.username = a.userId.trim();
-            a.userId = '';
-            a.apiKey = '';
-            mutated = true;
-          }
-          if (a.userId.trim().isNotEmpty && !_isGuid(a.userId)) {
-            a.userId = '';
-            a.apiKey = '';
-            mutated = true;
-          }
-        }
-
-        if (mutated) {
-          await save(accs);
-        }
-        return accs;
-      }
-    } catch (_) {}
-    return [];
-  }
-
-  static Future<void> save(List<EmbyAccount> list) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_k, jsonEncode(list.map((e) => e.toJson()).toList()));
-  }
-
-  static Future<String> getOrCreateDeviceId() async {
-    final prefs = await SharedPreferences.getInstance();
-    final existing = prefs.getString('emby_device_id');
-    if (existing != null && existing.trim().isNotEmpty) return existing.trim();
-
-    final r = Random();
-    final id =
-        'android-${DateTime.now().millisecondsSinceEpoch}-${r.nextInt(1 << 32)}';
-    await prefs.setString('emby_device_id', id);
-    return id;
-  }
-}
 
 /// =========================
 /// Emby client
@@ -236,12 +112,12 @@ class EmbyItem {
       }
     }
 
-    String? _tagOrNull(dynamic v) {
+    String? tagOrNull(dynamic v) {
       final s = (v ?? '').toString().trim();
       return s.isEmpty ? null : s;
     }
 
-    DateTime? _parseRawDate(dynamic value) {
+    DateTime? parseRawDate(dynamic value) {
       final raw = (value ?? '').toString().trim();
       if (raw.isEmpty) return null;
       try {
@@ -251,30 +127,30 @@ class EmbyItem {
       }
     }
 
-    DateTime? _parseDate(String key) => _parseRawDate(j[key]);
+    DateTime? parseDate(String key) => parseRawDate(j[key]);
 
-    DateTime? _parseUserDataDate() {
+    DateTime? parseUserDataDate() {
       final userData = j['UserData'];
       if (userData is! Map) return null;
-      return _parseRawDate(userData['LastPlayedDate']) ??
-          _parseRawDate(userData['DatePlayed']) ??
-          _parseRawDate(userData['DateLastPlayed']);
+      return parseRawDate(userData['LastPlayedDate']) ??
+          parseRawDate(userData['DatePlayed']) ??
+          parseRawDate(userData['DateLastPlayed']);
     }
 
-    Map<String, dynamic> _userDataMap() {
+    Map<String, dynamic> userDataMap() {
       final userData = j['UserData'];
       if (userData is Map) return userData.cast<String, dynamic>();
       return const <String, dynamic>{};
     }
 
-    double? _parseDouble(String key) {
+    double? parseDouble(String key) {
       final v = j[key];
       if (v is num) return v.toDouble();
       if (v is String) return double.tryParse(v.trim());
       return null;
     }
 
-    int? _parseInt(String key) {
+    int? parseIntValue(String key) {
       final v = j[key];
       if (v is int) return v;
       if (v is double) return v.toInt();
@@ -282,7 +158,7 @@ class EmbyItem {
       return null;
     }
 
-    int _parseSize() {
+    int parseSize() {
       final v = j['Size'];
       if (v is int) return v;
       if (v is double) return v.toInt();
@@ -309,7 +185,7 @@ class EmbyItem {
 
     final mediaTypeRaw = (j['MediaType'] ?? '').toString().trim();
     final collectionTypeRaw = (j['CollectionType'] ?? '').toString().trim();
-    final userData = _userDataMap();
+    final userData = userDataMap();
     final genresRaw = j['Genres'];
     final genres = <String>[];
     if (genresRaw is List) {
@@ -326,16 +202,16 @@ class EmbyItem {
       mediaType: mediaTypeRaw.isEmpty ? null : mediaTypeRaw,
       collectionType: collectionTypeRaw.isEmpty ? null : collectionTypeRaw,
       isFolder: j['IsFolder'] == true,
-      seriesId: _tagOrNull(j['SeriesId']),
-      seriesName: _tagOrNull(j['SeriesName']),
-      primaryImageAspectRatio: _parseDouble('PrimaryImageAspectRatio'),
-      overview: _tagOrNull(j['Overview']),
-      productionYear: _parseInt('ProductionYear'),
-      endDate: _parseDate('EndDate'),
-      communityRating: _parseDouble('CommunityRating'),
-      runTimeTicks: _parseInt('RunTimeTicks'),
+      seriesId: tagOrNull(j['SeriesId']),
+      seriesName: tagOrNull(j['SeriesName']),
+      primaryImageAspectRatio: parseDouble('PrimaryImageAspectRatio'),
+      overview: tagOrNull(j['Overview']),
+      productionYear: parseIntValue('ProductionYear'),
+      endDate: parseDate('EndDate'),
+      communityRating: parseDouble('CommunityRating'),
+      runTimeTicks: parseIntValue('RunTimeTicks'),
       genres: genres,
-      playbackPositionTicks: _parseInt('PlaybackPositionTicks') ??
+      playbackPositionTicks: parseIntValue('PlaybackPositionTicks') ??
           (userData['PlaybackPositionTicks'] is int
               ? userData['PlaybackPositionTicks'] as int
               : (userData['PlaybackPositionTicks'] is double
@@ -343,7 +219,7 @@ class EmbyItem {
                   : int.tryParse((userData['PlaybackPositionTicks'] ?? '')
                           .toString()) ??
                       0)),
-      playedPercentage: _parseDouble('PlayedPercentage') ??
+      playedPercentage: parseDouble('PlayedPercentage') ??
           (() {
             final raw = userData['PlayedPercentage'];
             if (raw is num) return raw.toDouble();
@@ -351,7 +227,7 @@ class EmbyItem {
             return null;
           })(),
       isPlayed: j['Played'] == true || userData['Played'] == true,
-      unplayedItemCount: _parseInt('UnplayedItemCount') ??
+      unplayedItemCount: parseIntValue('UnplayedItemCount') ??
           (() {
             final raw = userData['UnplayedItemCount'];
             if (raw is int) return raw;
@@ -359,20 +235,20 @@ class EmbyItem {
             if (raw is String) return int.tryParse(raw.trim()) ?? 0;
             return 0;
           })(),
-      indexNumber: _parseInt('IndexNumber'),
-      parentIndexNumber: _parseInt('ParentIndexNumber'),
-      primaryTag: _tagOrNull(tags['Primary']),
-      thumbTag: _tagOrNull(tags['Thumb']),
+      indexNumber: parseIntValue('IndexNumber'),
+      parentIndexNumber: parseIntValue('ParentIndexNumber'),
+      primaryTag: tagOrNull(tags['Primary']),
+      thumbTag: tagOrNull(tags['Thumb']),
       backdropTags: backdropTags,
       // DateAdded 在部分服务端实现中可能存在；优先 DateCreated，兜底 DateAdded。
-      dateCreated: _parseDate('DateCreated') ?? _parseDate('DateAdded'),
+      dateCreated: parseDate('DateCreated') ?? parseDate('DateAdded'),
       // DateModified 在很多库类型上更稳定（例如部分剧集/扫描器实现）。
-      dateModified: _parseDate('DateModified'),
-      datePlayed: _parseDate('DatePlayed') ??
-          _parseDate('DateLastPlayed') ??
-          _parseDate('LastPlayedDate') ??
-          _parseUserDataDate(),
-      size: _parseSize(),
+      dateModified: parseDate('DateModified'),
+      datePlayed: parseDate('DatePlayed') ??
+          parseDate('DateLastPlayed') ??
+          parseDate('LastPlayedDate') ??
+          parseUserDataDate(),
+      size: parseSize(),
     );
   }
 }
@@ -724,7 +600,6 @@ class EmbyClient {
         'Fields': 'MediaSources,Size',
       });
       final j = await _getJson(uri);
-      if (j is! Map) return null;
       final item = EmbyItem.fromJson(j.cast<String, dynamic>());
       return item.size > 0 ? item.size : null;
     } catch (_) {
@@ -1019,7 +894,7 @@ class EmbyClient {
     // ✅ 兼容性：部分服务端/版本可能不支持在列表接口里返回 MediaSources，
     // 这会导致“大小排序/显示”拿不到 Size 字段，甚至直接请求失败（例如 HTTP 400）。
     // 因此这里先尝试带 MediaSources，失败则自动回退到基础字段，保证浏览功能可用。
-    Future<List<EmbyItem>> _fetch(String fields) async {
+    Future<List<EmbyItem>> fetch(String fields) async {
       final uri = _u('/Users/${account.userId}/Items', <String, String>{
         'Recursive': 'true',
         'Filters': 'IsFavorite',
@@ -1042,9 +917,9 @@ class EmbyClient {
     const fallback = _kListFieldsFallback;
 
     try {
-      return await _fetch(full);
+      return await fetch(full);
     } catch (_) {
-      return await _fetch(fallback);
+      return await fetch(fallback);
     }
   }
 
@@ -1052,7 +927,7 @@ class EmbyClient {
     await validateToken();
     final cappedLimit = limit.clamp(1, 200).toInt();
 
-    Future<List<EmbyItem>> _fetchFromResume(String fields) async {
+    Future<List<EmbyItem>> fetchFromResume(String fields) async {
       final uri = _u('/Users/${account.userId}/Items/Resume', <String, String>{
         'Fields': fields,
         'Limit': '$cappedLimit',
@@ -1066,7 +941,7 @@ class EmbyClient {
           .toList(growable: false);
     }
 
-    Future<List<EmbyItem>> _fetchFromItems(String fields) async {
+    Future<List<EmbyItem>> fetchFromItems(String fields) async {
       final uri = _u('/Users/${account.userId}/Items', <String, String>{
         'Recursive': 'true',
         'Filters': 'IsResumable',
@@ -1092,19 +967,19 @@ class EmbyClient {
     // 这里按“先 Resume，空则回退 Items”顺序补一次查询，避免首页“继续观看”空白。
     List<EmbyItem> out = const <EmbyItem>[];
     try {
-      out = await _fetchFromResume(full);
+      out = await fetchFromResume(full);
     } catch (_) {}
     if (out.isNotEmpty) return out;
     try {
-      out = await _fetchFromResume(fallback);
+      out = await fetchFromResume(fallback);
     } catch (_) {}
     if (out.isNotEmpty) return out;
     try {
-      out = await _fetchFromItems(full);
+      out = await fetchFromItems(full);
     } catch (_) {}
     if (out.isNotEmpty) return out;
     try {
-      out = await _fetchFromItems(fallback);
+      out = await fetchFromItems(fallback);
     } catch (_) {}
     return out;
   }
@@ -1219,7 +1094,7 @@ class EmbyClient {
     final pid = (parentId ?? '').trim();
     final token = account.apiKey.trim();
 
-    Future<List<EmbyItem>> _fetch(String fields, String? types) async {
+    Future<List<EmbyItem>> fetchLatest(String fields, String? types) async {
       final qp = <String, String>{
         'Fields': fields,
         'Limit': '${limit.clamp(1, 240)}',
@@ -1269,12 +1144,12 @@ class EmbyClient {
       final key = (t ?? '__none__').trim();
       if (!tried.add(key)) continue;
       try {
-        return await _fetch(full, t);
+        return await fetchLatest(full, t);
       } catch (e) {
         lastErr = e;
       }
       try {
-        return await _fetch(fallback, t);
+        return await fetchLatest(fallback, t);
       } catch (e) {
         lastErr = e;
       }
@@ -1295,7 +1170,7 @@ class EmbyClient {
     await validateToken();
 
     // 同 listFavorites：优先请求 MediaSources 以获取 Size（用于大小排序/显示），失败则回退。
-    Future<List<EmbyItem>> _fetch(String fields) async {
+    Future<List<EmbyItem>> fetchChildren(String fields) async {
       final qp = <String, String>{
         'ParentId': parentId,
         'Recursive': recursive ? 'true' : 'false',
@@ -1318,13 +1193,13 @@ class EmbyClient {
 
     // ✅ DateModified：用于“日期排序”兜底；部分库类型不会返回 DateCreated。
     if (lightweight) {
-      return await _fetch(_kListFieldsLite);
+      return await fetchChildren(_kListFieldsLite);
     }
 
     try {
-      return await _fetch(_kListFieldsFull);
+      return await fetchChildren(_kListFieldsFull);
     } catch (_) {
-      return await _fetch(_kListFieldsFallback);
+      return await fetchChildren(_kListFieldsFallback);
     }
   }
 
@@ -1344,7 +1219,7 @@ class EmbyClient {
     final q = query.trim();
     if (q.isEmpty) return const <EmbyItem>[];
 
-    Future<List<EmbyItem>> _fetch({
+    Future<List<EmbyItem>> fetch({
       required String fields,
       String? includeItemTypes,
     }) async {
@@ -1385,7 +1260,7 @@ class EmbyClient {
     const includeTypesCompat =
         'Folder,Series,Season,BoxSet,Movie,Episode,Video,Photo,MusicVideo';
 
-    Future<List<EmbyItem>> _fetchWithCompat(String fields) async {
+    Future<List<EmbyItem>> fetchWithCompat(String fields) async {
       Object? lastErr;
       for (final types in <String?>[
         includeTypesPrimary,
@@ -1393,7 +1268,7 @@ class EmbyClient {
         null,
       ]) {
         try {
-          return await _fetch(fields: fields, includeItemTypes: types);
+          return await fetch(fields: fields, includeItemTypes: types);
         } catch (e) {
           lastErr = e;
         }
@@ -1403,9 +1278,9 @@ class EmbyClient {
     }
 
     try {
-      return await _fetchWithCompat(full);
+      return await fetchWithCompat(full);
     } catch (_) {
-      return await _fetchWithCompat(fallback);
+      return await fetchWithCompat(fallback);
     }
   }
 
@@ -1421,16 +1296,16 @@ class EmbyClient {
   }) async {
     await validateToken();
 
-    bool _looksLikeMovie(EmbyItem item) {
+    bool looksLikeMovie(EmbyItem item) {
       if (embyNativeItemIsMovie(item)) return true;
       if (embyNativeItemIsEpisode(item)) return false;
       if (!embyNativeItemIsVideo(item)) return false;
       return embyNativeCollectionIsMovies(item.collectionType);
     }
 
-    int _playableCmp(EmbyItem a, EmbyItem b) {
-      final am = _looksLikeMovie(a) ? 1 : 0;
-      final bm = _looksLikeMovie(b) ? 1 : 0;
+    int playableCmp(EmbyItem a, EmbyItem b) {
+      final am = looksLikeMovie(a) ? 1 : 0;
+      final bm = looksLikeMovie(b) ? 1 : 0;
       if (am != bm) return bm.compareTo(am);
 
       final sizeCmp = b.size.compareTo(a.size);
@@ -1439,8 +1314,8 @@ class EmbyClient {
       return a.name.toLowerCase().compareTo(b.name.toLowerCase());
     }
 
-    Future<EmbyItem?> _pickPrimaryPlayable() async {
-      Future<List<EmbyItem>> _fetch(bool recursive, int limit) {
+    Future<EmbyItem?> pickPrimaryPlayable() async {
+      Future<List<EmbyItem>> fetchPlayable(bool recursive, int limit) {
         return listChildren(
           parentId: folderId,
           recursive: recursive,
@@ -1453,12 +1328,12 @@ class EmbyClient {
 
       var items = <EmbyItem>[];
       try {
-        items = await _fetch(false, 120);
+        items = await fetchPlayable(false, 120);
       } catch (_) {}
 
       if (items.isEmpty) {
         try {
-          items = await _fetch(true, 260);
+          items = await fetchPlayable(true, 260);
         } catch (_) {}
       }
 
@@ -1466,7 +1341,7 @@ class EmbyClient {
           items.where((it) => it.id.trim().isNotEmpty).toList(growable: false);
       if (playable.isEmpty) return null;
 
-      final ordered = playable.toList(growable: false)..sort(_playableCmp);
+      final ordered = playable.toList(growable: false)..sort(playableCmp);
       return ordered.first;
     }
 
@@ -1478,18 +1353,16 @@ class EmbyClient {
         'Fields': 'ImageTags,BackdropImageTags,PrimaryImageAspectRatio',
       });
       final j = await _getJson(itemUri);
-      if (j is Map) {
-        final self = EmbyItem.fromJson(j.cast<String, dynamic>());
-        final selfUrl =
-            _bestExistingImageUrl(self, maxWidth: maxWidth, quality: quality);
-        if (selfUrl != null) return selfUrl;
-      }
+      final self = EmbyItem.fromJson(j.cast<String, dynamic>());
+      final selfUrl =
+          _bestExistingImageUrl(self, maxWidth: maxWidth, quality: quality);
+      if (selfUrl != null) return selfUrl;
     } catch (_) {
       // 忽略：无权限/旧版本不支持该 endpoint 等
     }
 
     // ✅ 递归候选：一次拉一批，挑“真正有图片 tag”的第一个
-    Future<EmbyItem?> _pickFirstWithImage({
+    Future<EmbyItem?> pickFirstWithImage({
       required String includeItemTypes,
       int limit = 60,
     }) async {
@@ -1522,30 +1395,33 @@ class EmbyClient {
 
     // 1) Photo 优先（如果你的图片被入库为 Photo）
     final photo =
-        await _pickFirstWithImage(includeItemTypes: 'Photo', limit: 120);
-    if (photo != null)
+        await pickFirstWithImage(includeItemTypes: 'Photo', limit: 120);
+    if (photo != null) {
       return bestCoverUrl(photo, maxWidth: maxWidth, quality: quality);
+    }
 
     // 1.5) 很多“目录内图片文件”并不会作为 Photo 出现，而是作为某个视频/剧集的本地图片或缩略图。
     // 因此这里再把常见媒体类型也一起扫一遍，仍然取“第一个有图片 tag 的条目”。
-    final media = await _pickFirstWithImage(
+    final media = await pickFirstWithImage(
       includeItemTypes: 'Movie,Episode,Video,MusicVideo,Series,Season',
       limit: 200,
     );
-    if (media != null)
+    if (media != null) {
       return bestCoverUrl(media, maxWidth: maxWidth, quality: quality);
+    }
 
     // 2) 可选：再用第一条视频兜底
     if (fallbackToVideo) {
-      final video = await _pickFirstWithImage(
+      final video = await pickFirstWithImage(
           includeItemTypes: 'Movie,Episode,Video,MusicVideo', limit: 300);
-      if (video != null)
+      if (video != null) {
         return bestCoverUrl(video, maxWidth: maxWidth, quality: quality);
+      }
 
       // 3) 原生 UI 风格兜底：
       //    即使条目没有 image tag，也尝试挑一个主视频条目，交给 bestCoverUrl 生成封面 URL。
       //    这可以覆盖“目录自动封面可用，但列表字段里没有 tag”的场景。
-      final primary = await _pickPrimaryPlayable();
+      final primary = await pickPrimaryPlayable();
       if (primary != null) {
         final url =
             bestCoverUrl(primary, maxWidth: maxWidth, quality: quality).trim();
@@ -1828,7 +1704,9 @@ class _EmbyPageState extends State<EmbyPage> {
 
     Future<void> doLogin(StateSetter setState) async {
       var url = urlC.text.trim();
-      while (url.endsWith('/')) url = url.substring(0, url.length - 1);
+      while (url.endsWith('/')) {
+        url = url.substring(0, url.length - 1);
+      }
 
       final uname = userNameC.text.trim();
       final pw = pwC.text;
@@ -1960,7 +1838,9 @@ class _EmbyPageState extends State<EmbyPage> {
 
     final name = nameC.text.trim().isEmpty ? 'Emby' : nameC.text.trim();
     var url = urlC.text.trim();
-    while (url.endsWith('/')) url = url.substring(0, url.length - 1);
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
     final username = userNameC.text.trim();
     final password = pwC.text;
 
@@ -2026,7 +1906,7 @@ class _EmbyPageState extends State<EmbyPage> {
 
     setState(() {
       if (isEdit) {
-        existing!.name = name;
+        existing.name = name;
         existing.serverUrl = url;
         existing.username = username;
         existing.password = password;
@@ -2184,9 +2064,9 @@ class EmbyPickSourcePage extends StatelessWidget {
             return const Scaffold(body: AppLoadingState());
           }
           if (accs.isEmpty) {
-            return Scaffold(
-              appBar: GlassAppBar(title: const Text('选择 Emby')),
-              body: const AppEmptyState(
+            return const Scaffold(
+              appBar: GlassAppBar(title: Text('选择 Emby')),
+              body: AppEmptyState(
                 title: '还没有 Emby 配置',
                 subtitle: '请先返回添加账号',
                 icon: Icons.video_library_outlined,
@@ -2194,7 +2074,7 @@ class EmbyPickSourcePage extends StatelessWidget {
             );
           }
           return Scaffold(
-            appBar: GlassAppBar(title: const Text('选择 Emby')),
+            appBar: const GlassAppBar(title: Text('选择 Emby')),
             body: AppViewport(
               child: ListView.separated(
                 padding: const EdgeInsets.all(12),

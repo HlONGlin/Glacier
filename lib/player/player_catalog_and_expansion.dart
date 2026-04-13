@@ -45,10 +45,10 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
   }
 
   Widget _buildCatalogThumb(String source, {int cacheWidth = 320}) {
-    if (_isEmbySource(source)) {
+    if (isEmbySource(source)) {
       final ref = _parseEmbySourceRef(source);
       if (ref == null) return _catalogThumbPlaceholder();
-      _embyAccountMapFuture ??= _loadEmbyAccountMap();
+      _embyAccountMapFuture ??= PlayerSourceResolver.loadEmbyAccountMap();
       return FutureBuilder<Map<String, EmbyAccount>>(
         future: _embyAccountMapFuture,
         builder: (ctx, snap) {
@@ -69,7 +69,7 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
       );
     }
 
-    if (_isWebDavSource(source)) {
+    if (isWebDavSource(source)) {
       final cover = _webDavSidecarCoverByVideoSource[source];
       if (cover != null && cover.trim().isNotEmpty) {
         return _buildWebDavImageThumb(cover, cacheWidth: cacheWidth);
@@ -91,33 +91,30 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
 
   Future<({String url, Map<String, String> headers})?> _resolveWebDavHttp(
       String source) {
-    final fut = _webDavResolveFutureCache.putIfAbsent(source, () async {
+    final hit = _touchLru(_webDavResolveFutureCache, source);
+    if (hit != null) return hit;
+
+    final fut = _rememberLru(_webDavResolveFutureCache, source, () async {
       final ref = _parseWebDavSourceForListing(source);
       if (ref == null) return null;
       final accountId = ref.accountId;
       final relDecoded = ref.relPath;
       if (accountId.isEmpty || relDecoded.isEmpty) return null;
 
-      final accs =
-          await (_webDavAccountCacheFuture ?? _loadWebDavAccountCache());
+      final accs = await (_webDavAccountCacheFuture ??
+          PlayerSourceResolver.loadWebDavAccountCache());
       final acc = accs[accountId];
       if (acc == null) return null;
-      final baseUrl = (acc['baseUrl'] ?? '').trim();
-      final username = (acc['username'] ?? '').toString();
-      final password = (acc['password'] ?? '').toString();
-      if (baseUrl.isEmpty) return null;
-
-      final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
-      final relEncoded = encodePathPreserveSlash(relDecoded);
-      final url = Uri.parse(base).resolve(relEncoded).toString();
-      final token = base64Encode(utf8.encode('$username:$password'));
-      return (
-        url: url,
-        headers: <String, String>{
-          HttpHeaders.authorizationHeader: 'Basic $token'
-        },
+      final resolved = await PlayerSourceResolver.tryResolveWebDavSource(
+        source,
+        accounts: accs,
       );
-    });
+      if (resolved == null) return null;
+      return (
+        url: resolved.uri.toString(),
+        headers: resolved.headers,
+      );
+    }());
     _trimFutureCache(
       _webDavResolveFutureCache,
       _VideoPlayerPageState._kMaxWebDavResolveEntries,
@@ -143,8 +140,12 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
   }
 
   Widget _buildWebDavVideoThumb(String source, {int cacheWidth = 320}) {
-    final fut = _webDavVideoThumbFutureCache.putIfAbsent(
-        source, () => _getOrCreateWebDavVideoThumb(source));
+    final fut = _touchLru(_webDavVideoThumbFutureCache, source) ??
+        _rememberLru(
+          _webDavVideoThumbFutureCache,
+          source,
+          _getOrCreateWebDavVideoThumb(source),
+        );
     _trimFutureCache(
       _webDavVideoThumbFutureCache,
       _VideoPlayerPageState._kMaxWebDavVideoThumbFutureEntries,
@@ -169,10 +170,10 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
   Future<File?> _getOrCreateWebDavVideoThumb(String source) async {
     return _catalogThumbSemaphore.withPermit(() async {
       try {
-        final ref = _parseWebDavSourceForListing(source);
-        final relExt = ref == null ? '' : p.extension(ref.relPath);
         final resolved = await _resolveWebDavHttp(source);
         if (resolved == null) return null;
+        final ref = _parseWebDavSourceForListing(source);
+        final relExt = ref == null ? '' : p.extension(ref.relPath);
 
         final key = PersistentStore.instance
             .makeKey('webdav_prefix|${resolved.url}|6mb');
@@ -183,7 +184,7 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
         if (cached != null) return cached;
 
         if (!await part.exists() || await part.length() <= 0) {
-          await _downloadWebDavPrefixToFile(
+          await RemoteMediaRangeCache.downloadPrefixToFile(
             resolved.url,
             resolved.headers,
             part,
@@ -206,74 +207,20 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
     });
   }
 
-  Future<void> _downloadWebDavPrefixToFile(
-    String url,
-    Map<String, String> headers,
-    File out, {
-    required int maxBytes,
-  }) async {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 15);
-    try {
-      final uri = Uri.parse(url);
-      final req = await client.getUrl(uri);
-      headers.forEach((k, v) => req.headers.set(k, v));
-      req.headers.set('Accept', '*/*');
-      req.headers.set('Range', 'bytes=0-${maxBytes - 1}');
-      final res = await req.close();
-
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        throw HttpException('GET failed: ${res.statusCode}', uri: uri);
-      }
-
-      final tmp = File('${out.path}.download');
-      if (await tmp.exists()) {
-        try {
-          await tmp.delete();
-        } catch (_) {}
-      }
-      await tmp.create(recursive: true);
-      final sink = tmp.openWrite();
-
-      var received = 0;
-      await for (final chunk in res) {
-        if (received >= maxBytes) break;
-        final remain = maxBytes - received;
-        if (chunk.length <= remain) {
-          sink.add(chunk);
-          received += chunk.length;
-        } else {
-          sink.add(chunk.sublist(0, remain));
-          received += remain;
-          break;
-        }
-      }
-      await sink.flush();
-      await sink.close();
-
-      if (await out.exists()) {
-        try {
-          await out.delete();
-        } catch (_) {}
-      }
-      await tmp.rename(out.path);
-    } finally {
-      try {
-        client.close(force: true);
-      } catch (_) {}
-    }
-  }
-
   void _prefetchCatalogThumbsAround(int index) {
     if (!_hasPlaylist) return;
     final start = max(0, index - 2);
     final end = min(_sources.length - 1, index + 2);
     for (var i = start; i <= end; i++) {
       final src = _sources[i];
-      if (_isWebDavSource(src)) {
+      if (isWebDavSource(src)) {
         if ((_webDavSidecarCoverByVideoSource[src] ?? '').trim().isEmpty) {
-          _webDavVideoThumbFutureCache.putIfAbsent(
-              src, () => _getOrCreateWebDavVideoThumb(src));
+          _touchLru(_webDavVideoThumbFutureCache, src) ??
+              _rememberLru(
+                _webDavVideoThumbFutureCache,
+                src,
+                _getOrCreateWebDavVideoThumb(src),
+              );
           _trimFutureCache(
             _webDavVideoThumbFutureCache,
             _VideoPlayerPageState._kMaxWebDavVideoThumbFutureEntries,
@@ -475,9 +422,9 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
       final cur = _currentPath;
 
       _ExpandedPlaylist? expanded;
-      if (_isWebDavSource(cur)) {
+      if (isWebDavSource(cur)) {
         expanded = await _expandPlaylistFromWebDavDir(cur);
-      } else if (_isEmbySource(cur)) {
+      } else if (isEmbySource(cur)) {
         expanded = await _expandPlaylistFromEmbyDir(cur);
       } else {
         expanded = await _expandPlaylistFromLocalDir(cur);
@@ -489,7 +436,7 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
         final oldPos = _player.state.position;
         final wasPlaying = _player.state.playing;
 
-        _sources = expanded!.sources;
+        _sources = expanded.sources;
         _index = expanded.index.clamp(0, _sources.length - 1);
         _refreshCatalogExpansionState();
 
@@ -555,8 +502,12 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
 
       if (isDigit(aChar) && isDigit(bChar)) {
         var aNum = '', bNum = '';
-        while (aIdx < aLen && isDigit(a[aIdx])) aNum += a[aIdx++];
-        while (bIdx < bLen && isDigit(b[bIdx])) bNum += b[bIdx++];
+        while (aIdx < aLen && isDigit(a[aIdx])) {
+          aNum += a[aIdx++];
+        }
+        while (bIdx < bLen && isDigit(b[bIdx])) {
+          bNum += b[bIdx++];
+        }
         final aVal = int.tryParse(aNum) ?? 0;
         final bVal = int.tryParse(bNum) ?? 0;
         if (aVal != bVal) return aVal.compareTo(bVal);
@@ -594,8 +545,9 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
     required String password,
     required String relFolder,
   }) async {
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 15);
+    final client = HttpClientFactory.createForeground(
+      connectionTimeout: const Duration(seconds: 15),
+    );
     try {
       final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
       final folderEncoded = encodePathPreserveSlash(relFolder);
@@ -603,7 +555,10 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
           Uri.parse(base).resolve(folderEncoded.isEmpty ? '' : folderEncoded);
 
       final token = base64Encode(utf8.encode('$username:$password'));
-      final req = await client.openUrl('PROPFIND', url);
+      final req = await NetworkRunner.run(
+        () => client.openUrl('PROPFIND', url),
+        label: 'player-catalog-propfind-open',
+      );
       req.followRedirects = true;
       req.headers.set('Depth', '1');
       req.headers.set(HttpHeaders.authorizationHeader, 'Basic $token');
@@ -621,7 +576,10 @@ extension _PlayerCatalogAndExpansion on _VideoPlayerPageState {
 </D:propfind>
 ''';
       req.add(utf8.encode(body));
-      final resp = await req.close();
+      final resp = await NetworkRunner.run(
+        () => req.close(),
+        label: 'player-catalog-propfind-close',
+      );
       final text = await utf8.decodeStream(resp);
       if (resp.statusCode != 207 && resp.statusCode != 200) {
         throw Exception('WebDAV PROPFIND 失败：HTTP ${resp.statusCode}');

@@ -63,7 +63,7 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
   void initState() {
     super.initState();
     _future = _pickFromSources(widget.sources);
-    _accFuture = _loadWebDavAccountsMapShared();
+    _accFuture = loadPageWebDavAccountsMap();
   }
 
   @override
@@ -97,8 +97,8 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
         final t = s.data;
         if (t == null) return const _CoverPlaceholder();
 
-        if (_isWebDavSource(t.path)) {
-          final ref = _parseWebDavSource(t.path);
+        if (isPageWebDavSource(t.path)) {
+          final ref = parsePageWebDavSource(t.path);
           if (ref != null && !ref.isDir) {
             return FutureBuilder<Map<String, WebDavAccount>>(
               future: _accFuture,
@@ -175,7 +175,7 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
                 }
                 final vFuture = _webDavVideoThumbFuture.putIfAbsent(
                   href,
-                  () => _getWebDavVideoThumbFile(
+                  () => getPageWebDavVideoThumbFile(
                     client,
                     href,
                     p.basename(ref.relPath),
@@ -244,7 +244,7 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
 
   Future<_PreviewTarget?> _pickFromSources(List<String> sources) async {
     for (final s in sources) {
-      if (_isWebDavSource(s)) {
+      if (isPageWebDavSource(s)) {
         final target = await _pickFromWebDavSource(s);
         if (target != null) return target;
       } else {
@@ -256,10 +256,10 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
   }
 
   Future<_PreviewTarget?> _pickFromWebDavSource(String source) async {
-    final ref = _parseWebDavSource(source);
+    final ref = parsePageWebDavSource(source);
     if (ref == null || !ref.isDir) return null;
 
-    final accMap = await _loadWebDavAccountsMapShared();
+    final accMap = await loadPageWebDavAccountsMap();
     final acc = accMap[ref.accountId];
     if (acc == null) return null;
 
@@ -308,26 +308,28 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
         }
 
         final name = (item.name).toLowerCase();
-        if (preferredCoverNames.contains(name) && _isImgName(item.name)) {
+        if (preferredCoverNames.contains(name) && isPageImageName(item.name)) {
           return _PreviewTarget(
-            _buildWebDavSource(ref.accountId, item.relPath, isDir: false),
+            buildPageWebDavSource(ref.accountId, item.relPath, isDir: false),
             true,
           );
         }
 
-        if (firstImage == null && _isImgName(item.name)) firstImage = item;
-        if (firstVideo == null && _isVidName(item.name)) firstVideo = item;
+        if (firstImage == null && isPageImageName(item.name)) firstImage = item;
+        if (firstVideo == null && isPageVideoName(item.name)) firstVideo = item;
       }
     } catch (_) {}
 
     if (firstImage != null) {
       return _PreviewTarget(
-          _buildWebDavSource(ref.accountId, firstImage!.relPath, isDir: false),
+          buildPageWebDavSource(ref.accountId, firstImage.relPath,
+              isDir: false),
           true);
     }
     if (firstVideo != null) {
       return _PreviewTarget(
-          _buildWebDavSource(ref.accountId, firstVideo!.relPath, isDir: false),
+          buildPageWebDavSource(ref.accountId, firstVideo.relPath,
+              isDir: false),
           false);
     }
 
@@ -353,12 +355,13 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
               next.add(child);
               continue;
             }
-            if (_isImgName(item.name)) {
+            if (isPageImageName(item.name)) {
               return _PreviewTarget(
-                  _buildWebDavSource(ref.accountId, item.relPath, isDir: false),
+                  buildPageWebDavSource(ref.accountId, item.relPath,
+                      isDir: false),
                   true);
             }
-            if (fallbackVideo == null && _isVidName(item.name)) {
+            if (fallbackVideo == null && isPageVideoName(item.name)) {
               fallbackVideo = item;
             }
           }
@@ -366,7 +369,7 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
 
         if (fallbackVideo != null) {
           return _PreviewTarget(
-              _buildWebDavSource(ref.accountId, fallbackVideo!.relPath,
+              buildPageWebDavSource(ref.accountId, fallbackVideo.relPath,
                   isDir: false),
               false);
         }
@@ -416,12 +419,12 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
 
         if (e is File) {
           final name = p.basename(e.path).toLowerCase();
-          if (preferredCoverNames.contains(name) && _isImg(e.path)) {
+          if (preferredCoverNames.contains(name) && isPageImagePath(e.path)) {
             return _PreviewTarget(e.path, true);
           }
-          if (firstImage == null && _isImg(e.path)) {
+          if (firstImage == null && isPageImagePath(e.path)) {
             firstImage = e;
-          } else if (firstVideo == null && _isVid(e.path)) {
+          } else if (firstVideo == null && isPageVideoPath(e.path)) {
             firstVideo = e;
           }
         } else if (e is Directory) {
@@ -430,8 +433,8 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
       }
     } catch (_) {}
 
-    if (firstImage != null) return _PreviewTarget(firstImage!.path, true);
-    if (firstVideo != null) return _PreviewTarget(firstVideo!.path, false);
+    if (firstImage != null) return _PreviewTarget(firstImage.path, true);
+    if (firstVideo != null) return _PreviewTarget(firstVideo.path, false);
 
     const maxDepth = 2, maxFolders = 40, maxFiles = 800;
     var depth = 0, folders = 0, files = 0;
@@ -451,7 +454,7 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
             if (files >= maxFiles) break;
             if (e is File) {
               files++;
-              if (_isImg(e.path)) return _PreviewTarget(e.path, true);
+              if (isPageImagePath(e.path)) return _PreviewTarget(e.path, true);
             } else if (e is Directory) {
               next.add(e);
             }
@@ -468,7 +471,7 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
             if (files >= maxFiles) break;
             if (e is File) {
               files++;
-              if (_isVid(e.path)) return _PreviewTarget(e.path, false);
+              if (isPageVideoPath(e.path)) return _PreviewTarget(e.path, false);
             }
           }
         } catch (_) {

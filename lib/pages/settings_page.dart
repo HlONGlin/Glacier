@@ -53,33 +53,49 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _load() async {
     try {
-      final font = await AppSettings.getSubtitleFontSize();
-      final bottom = await AppSettings.getSubtitleBottomOffset();
-      final lpEnabled = await AppSettings.getLongPressSpeedEnabled();
-      final lpMul = await AppSettings.getLongPressSpeedMultiplier();
-      final miniProgress = await AppSettings.getVideoMiniProgressWhenHidden();
-      final catalogEnabled = await AppSettings.getVideoCatalogEnabled();
-      final episodeNavEnabled =
-          await AppSettings.getVideoEpisodeNavButtonsEnabled();
-      final lockPauseSeekEnabled =
-          await AppSettings.getVideoLockPauseSeekEnabled();
-      final locateCurrentOnOpen =
-          await AppSettings.getVideoCatalogLocateCurrentOnOpen();
-      final imageDominantThreshold =
-          await AppSettings.getEmbyImageDominantThresholdPercent();
-      final imageLibrarySimpleMode =
-          await AppSettings.getEmbyImageLibrarySimpleModeEnabled();
-      final videoResumeEnabled = await AppSettings.getVideoResumeEnabled();
-      final videoResumeHint = await AppSettings.getVideoResumeHintEnabled();
-      final imageVolumePaging = await AppSettings.getImageVolumeKeyPaging();
-      final imageExitLocate = await AppSettings.getImageExitLocateEnabled();
-      final autoFav = await AppSettings.getAutoEnterLastFavorite();
-      final perDirDisplay =
-          await AppSettings.getFavoritePerDirectoryDisplaySettingsEnabled();
-      final embyExclusiveFavoritesUiEnabled =
-          await AppSettings.getEmbyExclusiveFavoritesUiEnabled();
-      final his = await AppSettings.getHistoryEnabled();
-      final tagEnabled = await AppSettings.getTagEnabled();
+      final values = await Future.wait<Object?>([
+        AppSettings.getSubtitleFontSize(),
+        AppSettings.getSubtitleBottomOffset(),
+        AppSettings.getLongPressSpeedEnabled(),
+        AppSettings.getLongPressSpeedMultiplier(),
+        AppSettings.getVideoMiniProgressWhenHidden(),
+        AppSettings.getVideoCatalogEnabled(),
+        AppSettings.getVideoEpisodeNavButtonsEnabled(),
+        AppSettings.getVideoLockPauseSeekEnabled(),
+        AppSettings.getVideoCatalogLocateCurrentOnOpen(),
+        AppSettings.getEmbyImageDominantThresholdPercent(),
+        AppSettings.getEmbyImageLibrarySimpleModeEnabled(),
+        AppSettings.getVideoResumeEnabled(),
+        AppSettings.getVideoResumeHintEnabled(),
+        AppSettings.getImageVolumeKeyPaging(),
+        AppSettings.getImageExitLocateEnabled(),
+        AppSettings.getAutoEnterLastFavorite(),
+        AppSettings.getFavoritePerDirectoryDisplaySettingsEnabled(),
+        AppSettings.getEmbyExclusiveFavoritesUiEnabled(),
+        AppSettings.getHistoryEnabled(),
+        AppSettings.getTagEnabled(),
+      ]);
+
+      final font = values[0] as double;
+      final bottom = values[1] as double;
+      final lpEnabled = values[2] as bool;
+      final lpMul = values[3] as double;
+      final miniProgress = values[4] as bool;
+      final catalogEnabled = values[5] as bool;
+      final episodeNavEnabled = values[6] as bool;
+      final lockPauseSeekEnabled = values[7] as bool;
+      final locateCurrentOnOpen = values[8] as bool;
+      final imageDominantThreshold = values[9] as int;
+      final imageLibrarySimpleMode = values[10] as bool;
+      final videoResumeEnabled = values[11] as bool;
+      final videoResumeHint = values[12] as bool;
+      final imageVolumePaging = values[13] as bool;
+      final imageExitLocate = values[14] as bool;
+      final autoFav = values[15] as bool;
+      final perDirDisplay = values[16] as bool;
+      final embyExclusiveFavoritesUiEnabled = values[17] as bool;
+      final his = values[18] as bool;
+      final tagEnabled = values[19] as bool;
 
       if (!mounted) return;
       setState(() {
@@ -129,7 +145,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _kDarkStatusBarStyle,
       child: Scaffold(
-        appBar: GlassAppBar(title: const Text('设置')),
+        appBar: const GlassAppBar(title: Text('设置')),
         body: AppViewport(
           child: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -340,7 +356,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             builder: (_) => EmbyExclusiveFavoritesPage(
                               openFolder: (ctx,
                                   {required title, required source}) {
-                                return _openTagSourceAsFolder(ctx,
+                                return openTagSourceAsFolder(ctx,
                                     title: title, source: source);
                               },
                               openSettings: (ctx) {

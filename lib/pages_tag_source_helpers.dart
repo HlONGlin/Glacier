@@ -1,4 +1,4 @@
-import 'tag.dart';
+import 'tag_models.dart';
 import 'source_refs.dart';
 
 String tagKeyForEntry({

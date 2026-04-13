@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 
-import 'pages.dart';
-import 'ui_kit.dart';
-import 'utils.dart';
+import 'app/app.dart';
+import 'core/settings/app_settings.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,19 +17,9 @@ Future<void> main() async {
     statusBarBrightness: Brightness.light,
   ));
 
-  runApp(const MyApp());
+  runApp(const GlacierApp());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends GlacierApp {
   const MyApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Glacier',
-      theme: AppTheme.light(),
-      home: const FavoritesPage(),
-    );
-  }
 }

@@ -7,14 +7,27 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'emby.dart';
 import 'emby_cover_layout.dart';
+import 'emby_exclusive_folder_helpers.dart';
+import 'emby_exclusive_folder_cover_helpers.dart';
+import 'emby_exclusive_folder_load_helpers.dart';
+import 'emby_exclusive_folder_state_helpers.dart';
+import 'emby_exclusive_helpers.dart';
+import 'emby_exclusive_models.dart';
+import 'emby_exclusive_movie_helpers.dart';
+import 'emby_exclusive_series_helpers.dart';
+import 'emby_exclusive_state_helpers.dart';
 import 'emby_native_logic.dart';
 import 'emby_read_scheme.dart';
-import 'emby_url_utils.dart';
 import 'image.dart';
 import 'source_refs.dart';
 import 'ui_kit.dart';
 import 'utils.dart';
 import 'video.dart';
+part 'emby_exclusive_folder_page.dart';
+part 'emby_exclusive_folder_page_ui.dart';
+part 'emby_exclusive_movie_detail_page.dart';
+part 'emby_exclusive_series_detail_ui.dart';
+part 'emby_exclusive_movie_detail_ui.dart';
 
 typedef EmbyFolderOpener = Future<void> Function(
   BuildContext context, {
@@ -147,121 +160,9 @@ bool _looksLikeMovieFolder(EmbyItem item) {
   return embyNativeFolderIsMovieCollection(item);
 }
 
-final RegExp _kMovieMetaTagBracketPattern = RegExp(
-  r'\s*\[(?:tmdbid|imdbid|tvdbid|doubanid)[^\]]*\]',
-  caseSensitive: false,
-);
-final RegExp _kMultiSpacePattern = RegExp(r'\s{2,}');
-
-bool _isAsciiDigitCodeUnit(int c) => c >= 0x30 && c <= 0x39;
-
-int _naturalTitleCompare(String a, String b) {
-  final sa = a.trim().toLowerCase();
-  final sb = b.trim().toLowerCase();
-  if (sa == sb) return 0;
-
-  var ia = 0;
-  var ib = 0;
-  while (ia < sa.length && ib < sb.length) {
-    final ca = sa.codeUnitAt(ia);
-    final cb = sb.codeUnitAt(ib);
-    final da = _isAsciiDigitCodeUnit(ca);
-    final db = _isAsciiDigitCodeUnit(cb);
-
-    if (da && db) {
-      final startA = ia;
-      final startB = ib;
-      while (ia < sa.length && _isAsciiDigitCodeUnit(sa.codeUnitAt(ia))) {
-        ia++;
-      }
-      while (ib < sb.length && _isAsciiDigitCodeUnit(sb.codeUnitAt(ib))) {
-        ib++;
-      }
-
-      var nzA = startA;
-      var nzB = startB;
-      while (nzA < ia - 1 && sa.codeUnitAt(nzA) == 0x30) {
-        nzA++;
-      }
-      while (nzB < ib - 1 && sb.codeUnitAt(nzB) == 0x30) {
-        nzB++;
-      }
-
-      final lenA = ia - nzA;
-      final lenB = ib - nzB;
-      if (lenA != lenB) return lenA.compareTo(lenB);
-
-      for (var i = 0; i < lenA; i++) {
-        final cmp = sa.codeUnitAt(nzA + i).compareTo(sb.codeUnitAt(nzB + i));
-        if (cmp != 0) return cmp;
-      }
-
-      final leadingA = nzA - startA;
-      final leadingB = nzB - startB;
-      if (leadingA != leadingB) return leadingA.compareTo(leadingB);
-      continue;
-    }
-
-    if (ca != cb) return ca.compareTo(cb);
-    ia++;
-    ib++;
-  }
-  return sa.length.compareTo(sb.length);
-}
-
-String _movieCoverUrlFor(
-  EmbyClient client,
-  EmbyItem item, {
-  int maxWidth = 420,
-}) {
-  final itemId = item.id.trim();
-  if (itemId.isEmpty) return '';
-
-  final preferredWidth = maxWidth < 420 ? 420 : maxWidth;
-  final primaryTag = (item.primaryTag ?? '').trim();
-  if (primaryTag.isNotEmpty) {
-    return client.coverUrl(
-      itemId,
-      type: 'Primary',
-      maxWidth: preferredWidth,
-      quality: 86,
-      tag: primaryTag,
-    );
-  }
-
-  final thumbTag = (item.thumbTag ?? '').trim();
-  if (thumbTag.isNotEmpty) {
-    return client.coverUrl(
-      itemId,
-      type: 'Thumb',
-      maxWidth: preferredWidth,
-      quality: 84,
-      tag: thumbTag,
-    );
-  }
-
-  if (item.backdropTags.isNotEmpty) {
-    return client.coverUrl(
-      itemId,
-      type: 'Backdrop',
-      index: 0,
-      maxWidth: preferredWidth < 760 ? 760 : preferredWidth,
-      quality: 82,
-      tag: item.backdropTags.first,
-    );
-  }
-
-  return client.coverUrl(
-    itemId,
-    type: 'Primary',
-    maxWidth: preferredWidth,
-    quality: 84,
-  );
-}
-
 String _coverUrlFor(EmbyClient client, EmbyItem item, {int maxWidth = 420}) {
   if (_embyTypeIsMovie(item.type)) {
-    final movieCover = _movieCoverUrlFor(client, item, maxWidth: maxWidth);
+    final movieCover = movieCoverUrlFor(client, item, maxWidth: maxWidth);
     if (movieCover.trim().isNotEmpty) return movieCover;
   }
   return client.bestCoverUrl(item, maxWidth: maxWidth);
@@ -281,10 +182,6 @@ double? _imageAspectRatioFor(_UiItem it) {
   return ratio;
 }
 
-String _preferOriginalUrl(String url) {
-  return preferOriginalEmbyUrl(url);
-}
-
 class EmbyExclusiveFavoritesPage extends StatefulWidget {
   final EmbyFolderOpener openFolder;
   final EmbySettingsOpener? openSettings;
@@ -302,51 +199,9 @@ class EmbyExclusiveFavoritesPage extends StatefulWidget {
       _EmbyExclusiveFavoritesPageState();
 }
 
-class _UiItem {
-  final EmbyAccount account;
-  final EmbyItem item;
-  final bool isDir;
-  final bool isImage;
-  final String coverUrl;
-
-  const _UiItem({
-    required this.account,
-    required this.item,
-    required this.isDir,
-    required this.isImage,
-    required this.coverUrl,
-  });
-
-  String get title =>
-      item.name.trim().isEmpty ? '\u672a\u547d\u540d' : item.name.trim();
-}
-
-class _Section {
-  final EmbyAccount account;
-  final EmbyItem view;
-  final List<_UiItem> items;
-  const _Section(
-      {required this.account, required this.view, required this.items});
-}
-
-class _FolderPageSeed {
-  final List<_UiItem> directItems;
-  final List<_UiItem> recursiveVideos;
-  final List<_UiItem> recursiveImages;
-  final EmbyLibraryKindSignal kindHint;
-
-  const _FolderPageSeed({
-    this.directItems = const <_UiItem>[],
-    this.recursiveVideos = const <_UiItem>[],
-    this.recursiveImages = const <_UiItem>[],
-    this.kindHint = EmbyLibraryKindSignal.unknown,
-  });
-
-  bool get hasAnyData =>
-      directItems.isNotEmpty ||
-      recursiveVideos.isNotEmpty ||
-      recursiveImages.isNotEmpty;
-}
+typedef _UiItem = EmbyExclusiveUiItem;
+typedef _Section = EmbyExclusiveSection;
+typedef _FolderPageSeed = EmbyExclusiveFolderPageSeed;
 
 class _EmbyExclusiveFavoritesPageState
     extends State<EmbyExclusiveFavoritesPage> {
@@ -811,28 +666,6 @@ class _EmbyExclusiveFavoritesPageState
     );
   }
 
-  List<_UiItem> _replaceItemsForAccount(
-    List<_UiItem> src,
-    String accountId,
-    List<_UiItem> incoming,
-  ) {
-    final out =
-        src.where((x) => x.account.id != accountId).toList(growable: true);
-    out.addAll(incoming);
-    return out;
-  }
-
-  List<_Section> _replaceSectionsForAccount(
-    List<_Section> src,
-    String accountId,
-    List<_Section> incoming,
-  ) {
-    final out =
-        src.where((x) => x.account.id != accountId).toList(growable: true);
-    out.addAll(incoming);
-    return out;
-  }
-
   Future<void> _ensureAccountLoaded(
     String accountId, {
     required int token,
@@ -842,7 +675,7 @@ class _EmbyExclusiveFavoritesPageState
     if (id.isEmpty) return;
     if (!force && _loadedAccountIds.contains(id)) return;
 
-    final account = _accountById(id);
+    final account = EmbyExclusiveStateHelpers.accountById(_accounts, id);
     final client = _clients[id];
     final reader = _readers[id];
     if (account == null || client == null || reader == null) return;
@@ -863,12 +696,12 @@ class _EmbyExclusiveFavoritesPageState
         forceRefresh: force,
       );
       final uniqLib = _unique(accountData.lib)
-        ..sort((a, b) => _naturalTitleCompare(a.title, b.title));
+        ..sort((a, b) => naturalTitleCompare(a.title, b.title));
       final uniqResume = _unique(accountData.resume)
         ..sort((a, b) => (b.item.dateModified ?? DateTime(1970))
             .compareTo(a.item.dateModified ?? DateTime(1970)));
       final uniqFav = _unique(accountData.favorites)
-        ..sort((a, b) => _naturalTitleCompare(a.title, b.title));
+        ..sort((a, b) => naturalTitleCompare(a.title, b.title));
       final sectionsFuture =
           _loadLatestSections(account, client, accountData.views);
       final nextUpFuture = _deriveHomeNextUp(account, client, uniqResume);
@@ -877,11 +710,16 @@ class _EmbyExclusiveFavoritesPageState
 
       if (!mounted || token != _reloadToken) return;
       setState(() {
-        _libraries = _replaceItemsForAccount(_libraries, id, uniqLib);
-        _resume = _replaceItemsForAccount(_resume, id, uniqResume);
-        _nextUp = _replaceItemsForAccount(_nextUp, id, nextUp);
-        _favorites = _replaceItemsForAccount(_favorites, id, uniqFav);
-        _sections = _replaceSectionsForAccount(_sections, id, sections);
+        _libraries = EmbyExclusiveStateHelpers.replaceItemsForAccount(
+            _libraries, id, uniqLib);
+        _resume = EmbyExclusiveStateHelpers.replaceItemsForAccount(
+            _resume, id, uniqResume);
+        _nextUp = EmbyExclusiveStateHelpers.replaceItemsForAccount(
+            _nextUp, id, nextUp);
+        _favorites = EmbyExclusiveStateHelpers.replaceItemsForAccount(
+            _favorites, id, uniqFav);
+        _sections = EmbyExclusiveStateHelpers.replaceSectionsForAccount(
+            _sections, id, sections);
         _loadedAccountIds.add(id);
         _loading = false;
         _sectionsLoading = false;
@@ -1000,41 +838,30 @@ class _EmbyExclusiveFavoritesPageState
     }
   }
 
-  EmbyAccount? _accountById(String id) {
-    for (final a in _accounts) {
-      if (a.id == id) return a;
-    }
-    return null;
-  }
-
   String _accountName(String id) {
-    final a = _accountById(id);
-    if (a == null) return 'Emby';
-    return a.name.trim().isEmpty ? 'Emby' : a.name.trim();
+    return EmbyExclusiveStateHelpers.accountName(_accounts, id);
   }
 
   bool _matchesSelectedAccount(String accountId) {
-    final selected = (_selectedAccountId ?? '').trim();
-    if (selected.isEmpty) return true;
-    return accountId == selected;
+    return EmbyExclusiveStateHelpers.matchesSelectedAccount(
+      _selectedAccountId,
+      accountId,
+    );
   }
 
   List<_UiItem> _scopeItems(List<_UiItem> src) {
-    final selected = (_selectedAccountId ?? '').trim();
-    if (selected.isEmpty) return src;
-    return src.where((x) => x.account.id == selected).toList(growable: false);
+    return EmbyExclusiveStateHelpers.scopeItems(src, _selectedAccountId);
   }
 
   List<_Section> _scopeSections(List<_Section> src) {
-    final selected = (_selectedAccountId ?? '').trim();
-    if (selected.isEmpty) return src;
-    return src.where((x) => x.account.id == selected).toList(growable: false);
+    return EmbyExclusiveStateHelpers.scopeSections(src, _selectedAccountId);
   }
 
   String _selectedAccountLabel() {
-    final selected = (_selectedAccountId ?? '').trim();
-    if (selected.isEmpty) return 'Emby';
-    return _accountName(selected);
+    return EmbyExclusiveStateHelpers.selectedAccountLabel(
+      _accounts,
+      _selectedAccountId,
+    );
   }
 
   Route _embyAccountsRouteWithUi() {
@@ -1350,7 +1177,7 @@ class _EmbyExclusiveFavoritesPageState
             }
           }
           final unique = _unique(out)
-            ..sort((a, b) => _naturalTitleCompare(a.title, b.title));
+            ..sort((a, b) => naturalTitleCompare(a.title, b.title));
           if (!mounted || seq != _searchSeq) return;
           setState(() {
             _searching = false;
@@ -2306,11 +2133,8 @@ class _EmbyExclusiveFavoritesPageState
       final scopedNextUp = _scopeItems(_nextUp);
       final scopedFavorites = _scopeItems(_favorites);
       final scopedSections = _scopeSections(_sections);
-
-      final groupedFav = <String, List<_UiItem>>{};
-      for (final f in scopedFavorites) {
-        groupedFav.putIfAbsent(f.account.id, () => <_UiItem>[]).add(f);
-      }
+      final groupedFav =
+          EmbyExclusiveStateHelpers.groupFavoritesByAccount(scopedFavorites);
 
       return RefreshIndicator(
         onRefresh: _reload,
@@ -2552,7 +2376,8 @@ class _EmbyExclusiveFavoritesPageState
                 _homeSectionBlock(
                   title: _accountName(e.key),
                   onMore: () {
-                    final acc = _accountById(e.key);
+                    final acc =
+                        EmbyExclusiveStateHelpers.accountById(_accounts, e.key);
                     if (acc != null) _openFavoritesUi(account: acc);
                   },
                   child: _shelf(e.value.take(20).toList(growable: false)),
@@ -2609,36 +2434,6 @@ class _EmbyExclusiveFavoritesPageState
     );
   }
 }
-
-class _EmbyExclusiveFolderPage extends StatefulWidget {
-  final EmbyAccount account;
-  final String title;
-  final String folderId;
-  final bool favoritesMode;
-  final _FolderPageSeed? initialSeed;
-  final _EmbyPaletteMode paletteMode;
-
-  const _EmbyExclusiveFolderPage({
-    required this.account,
-    required this.title,
-    required this.folderId,
-    this.favoritesMode = false,
-    this.initialSeed,
-    required this.paletteMode,
-  });
-
-  @override
-  State<_EmbyExclusiveFolderPage> createState() =>
-      _EmbyExclusiveFolderPageState();
-}
-
-enum _FolderTopTab { videos, images, folders }
-
-enum _FolderSortKind { updatedAt, addedAt, title, playDuration, playedAt }
-
-enum _AspectBucket { poster, square, landscape }
-
-enum _LibraryKind { unknown, movies, series, mixed }
 
 class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   late final EmbyClient _client = EmbyClient(widget.account);
@@ -3027,36 +2822,6 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     return _resolveFolderCoverById(item.item.id, maxWidth: maxWidth);
   }
 
-  String _topTabLabel(_FolderTopTab tab) {
-    switch (tab) {
-      case _FolderTopTab.videos:
-        if (_libraryKind == _LibraryKind.series) return '单集';
-        if (_libraryKind == _LibraryKind.movies) return '视频文件';
-        return '视频';
-      case _FolderTopTab.images:
-        return '图片';
-      case _FolderTopTab.folders:
-        if (_libraryKind == _LibraryKind.series) return '剧集';
-        if (_libraryKind == _LibraryKind.movies) return '内容';
-        return '分类';
-    }
-  }
-
-  String _sortLabel(_FolderSortKind sort) {
-    switch (sort) {
-      case _FolderSortKind.updatedAt:
-        return '\u66f4\u65b0\u65e5\u671f';
-      case _FolderSortKind.addedAt:
-        return '\u52a0\u5165\u65e5\u671f';
-      case _FolderSortKind.title:
-        return '\u6807\u9898';
-      case _FolderSortKind.playDuration:
-        return '\u64ad\u653e\u65f6\u957f';
-      case _FolderSortKind.playedAt:
-        return '\u64ad\u653e\u65e5\u671f';
-    }
-  }
-
   bool get _hasImages => _recursiveImages.isNotEmpty;
 
   bool _isSeriesFolder(_UiItem item) {
@@ -3079,155 +2844,59 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     return embyNativeTypeIsSeries(item.item.type);
   }
 
-  bool _isMovieItem(_UiItem item) {
-    if (item.isDir || item.isImage) return false;
-    final preferMovie = _libraryKind == _LibraryKind.movies;
-    final preferSeries = _libraryKind == _LibraryKind.series;
-    return _isLikelyMovieVideo(
-      item.item,
-      preferMovieVideos: preferMovie,
-      preferSeriesVideos: preferSeries,
-    );
-  }
+  bool _isMovieItem(_UiItem item) =>
+      EmbyExclusiveFolderStateHelpers.isMovieItem(
+        item,
+        libraryKind: _libraryKind,
+      );
 
   bool get _prefersStructuredContentTab =>
-      _libraryKind == _LibraryKind.series ||
-      _libraryKind == _LibraryKind.movies;
+      EmbyExclusiveFolderStateHelpers.prefersStructuredContentTab(_libraryKind);
 
-  _UiItem _seriesProxyFromVideo(_UiItem item) {
-    final seriesId = (item.item.seriesId ?? '').trim();
-    final seriesName = (item.item.seriesName ?? '').trim();
-    return _UiItem(
-      account: widget.account,
-      item: EmbyItem(
-        id: seriesId,
-        name: seriesName.isEmpty ? item.title : seriesName,
-        type: 'Series',
-        isFolder: true,
-        collectionType: 'tvshows',
-        dateCreated: item.item.dateCreated,
-        dateModified: item.item.dateModified,
-        datePlayed: item.item.datePlayed,
-      ),
-      isDir: true,
-      isImage: false,
-      coverUrl: item.coverUrl,
-    );
-  }
-
-  List<_UiItem> _collapsedSeriesVideoItems(List<_UiItem> src) {
-    if (src.isEmpty) return src;
-    final directSeries = <String, _UiItem>{
-      for (final item in _items)
-        if (_isSeriesDir(item) && item.item.id.trim().isNotEmpty)
-          item.item.id.trim(): item,
-    };
-    final out = <_UiItem>[];
-    final seen = <String>{};
-    for (final item in src) {
-      final seriesId = (item.item.seriesId ?? '').trim();
-      if (seriesId.isEmpty) {
-        final id = item.item.id.trim();
-        if (id.isEmpty || !seen.add(id)) continue;
-        out.add(item);
-        continue;
-      }
-      if (!seen.add(seriesId)) continue;
-      out.add(directSeries[seriesId] ?? _seriesProxyFromVideo(item));
-    }
-    return out;
-  }
-
-  List<_UiItem> _contentItemsForCurrentFolder() {
-    if (_isImageDominantMixedLibrary()) {
-      // 图片主导库：分类页严格按“当前目录直系结构”展示，
-      // 不做跨层合并/推断，避免把单层与双层目录混成抽象视图。
-      return _items;
-    }
-
-    if (_libraryKind == _LibraryKind.series) {
-      final directSeries = _items.where(_isSeriesDir).toList(growable: false);
-      if (directSeries.isNotEmpty) return directSeries;
-      final directPlayable =
-          _items.where((x) => !x.isDir && !x.isImage).toList(growable: false);
-      final collapsed = _collapsedSeriesVideoItems(
-        _mergeUiById(directPlayable, _recursiveVideos),
+  _UiItem _seriesProxyFromVideo(_UiItem item) =>
+      EmbyExclusiveFolderStateHelpers.seriesProxyFromVideo(
+        item,
+        account: widget.account,
       );
-      return collapsed.isNotEmpty ? collapsed : _items;
-    }
 
-    if (_libraryKind == _LibraryKind.movies) {
-      final directMovieFolders =
-          _items.where(_isMovieFolder).toList(growable: false);
-      final directMovieFiles =
-          _items.where(_isMovieItem).toList(growable: false);
-      if (directMovieFolders.isNotEmpty) {
-        return _mergeUiById(directMovieFolders, directMovieFiles);
-      }
-      final recursiveMovieFiles =
-          _recursiveVideos.where(_isMovieItem).toList(growable: false);
-      final merged = _mergeUiById(directMovieFiles, recursiveMovieFiles);
-      return merged.isNotEmpty ? merged : _items;
-    }
+  List<_UiItem> _collapsedSeriesVideoItems(List<_UiItem> src) =>
+      EmbyExclusiveFolderStateHelpers.collapsedSeriesVideoItems(
+        src,
+        directItems: _items,
+        isSeriesDir: _isSeriesDir,
+        seriesProxyFromVideo: _seriesProxyFromVideo,
+      );
 
-    return _items;
-  }
+  List<_UiItem> _contentItemsForCurrentFolder() =>
+      EmbyExclusiveFolderStateHelpers.contentItemsForCurrentFolder(
+        libraryKind: _libraryKind,
+        imageDominantMixedLibrary: _isImageDominantMixedLibrary(),
+        items: _items,
+        recursiveVideos: _recursiveVideos,
+        isSeriesDir: _isSeriesDir,
+        isMovieFolder: _isMovieFolder,
+        isMovieItem: _isMovieItem,
+        collapsedSeriesVideoItems: _collapsedSeriesVideoItems,
+      );
 
-  List<_UiItem> _baseItemsForTab() {
-    final directImages = _items.where((x) => x.isImage).toList(growable: false);
-    final directVideos = _items
-        .where((x) => !x.isDir && _isVideoItem(x))
-        .toList(growable: false);
-    final imageHeavy = _isImageDominantMixedLibrary();
+  List<_UiItem> _baseItemsForTab() =>
+      EmbyExclusiveFolderStateHelpers.baseItemsForTab(
+        topTab: _topTab,
+        libraryKind: _libraryKind,
+        imageDominantMixedLibrary: _isImageDominantMixedLibrary(),
+        items: _items,
+        recursiveVideos: _recursiveVideos,
+        recursiveImages: _recursiveImages,
+        isVideoItem: _isVideoItem,
+        collapsedSeriesVideoItems: _collapsedSeriesVideoItems,
+        contentItemsForCurrentFolder: _contentItemsForCurrentFolder,
+      );
 
-    switch (_topTab) {
-      case _FolderTopTab.videos:
-        if (_libraryKind == _LibraryKind.series) {
-          return _collapsedSeriesVideoItems(_recursiveVideos);
-        }
-        if (imageHeavy && directVideos.isNotEmpty) {
-          return directVideos;
-        }
-        return _recursiveVideos;
-      case _FolderTopTab.images:
-        if (imageHeavy && directImages.isNotEmpty) {
-          return _mergeUiById(directImages, _recursiveImages);
-        }
-        if (_recursiveImages.isEmpty && directImages.isNotEmpty) {
-          return directImages;
-        }
-        return _recursiveImages;
-      case _FolderTopTab.folders:
-        return _contentItemsForCurrentFolder();
-    }
-  }
+  _LibraryKind _libraryKindFromSignal(EmbyLibraryKindSignal kind) =>
+      EmbyExclusiveFolderHelpers.libraryKindFromSignal(kind);
 
-  _LibraryKind _libraryKindFromSignal(EmbyLibraryKindSignal kind) {
-    switch (kind) {
-      case EmbyLibraryKindSignal.movies:
-        return _LibraryKind.movies;
-      case EmbyLibraryKindSignal.series:
-        return _LibraryKind.series;
-      case EmbyLibraryKindSignal.mixed:
-        return _LibraryKind.mixed;
-      case EmbyLibraryKindSignal.homeVideos:
-      case EmbyLibraryKindSignal.unknown:
-        return _LibraryKind.unknown;
-    }
-  }
-
-  String _libraryKindLabel() {
-    switch (_libraryKind) {
-      case _LibraryKind.movies:
-        return '\u7535\u5f71\u5e93';
-      case _LibraryKind.series:
-        return '\u5267\u96c6\u5e93';
-      case _LibraryKind.mixed:
-        return '\u5f71\u89c6\u6df7\u5408';
-      case _LibraryKind.unknown:
-        return '';
-    }
-  }
+  String _libraryKindLabel() =>
+      EmbyExclusiveFolderHelpers.libraryKindLabel(_libraryKind);
 
   String _effectiveCoverUrl(_UiItem item) {
     final id = item.item.id.trim();
@@ -3242,193 +2911,44 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     return item.coverUrl.trim();
   }
 
-  double? _primaryAspectOf(_UiItem item) {
-    final ratio = item.item.primaryImageAspectRatio;
-    if (ratio == null || !ratio.isFinite) return null;
-    if (ratio < 0.45 || ratio > 2.4) return null;
-    return ratio;
-  }
-
-  double _fallbackAspectOf(_UiItem item) {
-    if (item.isImage) return 1.5;
-    if (item.isDir) return 0.67;
-    final type = item.item.type.trim().toLowerCase();
-    if (type.contains('movie') ||
-        type.contains('series') ||
-        type.contains('season') ||
-        type.contains('boxset') ||
-        type.contains('collection') ||
-        type.contains('folder') ||
-        type.contains('album') ||
-        type.contains('playlist')) {
-      return 0.67;
-    }
-    if (type.contains('photo') ||
-        type.contains('image') ||
-        type.contains('picture')) {
-      return 1.5;
-    }
-    if (type.contains('episode') ||
-        type.contains('video') ||
-        type.contains('trailer')) {
-      return 1.78;
-    }
-    return 1.25;
-  }
-
-  double _estimateAspectOf(_UiItem item) {
-    return _primaryAspectOf(item) ?? _fallbackAspectOf(item);
-  }
-
-  _AspectBucket _bucketOf(double ratio) {
-    if (ratio < 0.9) return _AspectBucket.poster;
-    if (ratio <= 1.25) return _AspectBucket.square;
-    return _AspectBucket.landscape;
-  }
-
-  int _bucketPriority(_AspectBucket bucket) {
-    switch (_topTab) {
-      case _FolderTopTab.images:
-        switch (bucket) {
-          case _AspectBucket.landscape:
-            return 3;
-          case _AspectBucket.square:
-            return 2;
-          case _AspectBucket.poster:
-            return 1;
-        }
-      case _FolderTopTab.videos:
-        switch (bucket) {
-          case _AspectBucket.poster:
-            return 3;
-          case _AspectBucket.landscape:
-            return 2;
-          case _AspectBucket.square:
-            return 1;
-        }
-      case _FolderTopTab.folders:
-        switch (bucket) {
-          case _AspectBucket.poster:
-            return 3;
-          case _AspectBucket.square:
-            return 2;
-          case _AspectBucket.landscape:
-            return 1;
-        }
-    }
-  }
-
-  double _dominantCoverAspect(List<_UiItem> items) {
-    if (items.isEmpty) return 0.67;
-    final values = <_AspectBucket, List<double>>{
-      _AspectBucket.poster: <double>[],
-      _AspectBucket.square: <double>[],
-      _AspectBucket.landscape: <double>[],
-    };
-
-    for (final item in items) {
-      final ratio = _estimateAspectOf(item);
-      values[_bucketOf(ratio)]!.add(ratio);
-    }
-
-    var winner = _AspectBucket.poster;
-    var winnerCount = -1;
-    for (final bucket in _AspectBucket.values) {
-      final count = values[bucket]!.length;
-      if (count > winnerCount) {
-        winner = bucket;
-        winnerCount = count;
-        continue;
-      }
-      if (count == winnerCount &&
-          count > 0 &&
-          _bucketPriority(bucket) > _bucketPriority(winner)) {
-        winner = bucket;
-      }
-    }
-
-    final selected = values[winner]!;
-    if (selected.isEmpty) return 0.67;
-    var sum = 0.0;
-    for (final v in selected) {
-      sum += v;
-    }
-    final avg = sum / selected.length;
-    switch (winner) {
-      case _AspectBucket.poster:
-        return avg.clamp(0.56, 0.88).toDouble();
-      case _AspectBucket.square:
-        return avg.clamp(0.9, 1.2).toDouble();
-      case _AspectBucket.landscape:
-        return avg.clamp(1.3, 2.0).toDouble();
-    }
-  }
+  double _dominantCoverAspect(List<_UiItem> items) =>
+      EmbyExclusiveFolderHelpers.dominantCoverAspect(
+        items,
+        topTab: _topTab,
+      );
 
   double _gridChildAspectRatio({
     required double maxWidth,
     required int columns,
     required double coverAspectRatio,
-  }) {
-    if (columns <= 0) return 0.74;
-    final safeWidth = maxWidth <= 0 ? 1.0 : maxWidth;
-    const crossSpacing = 10.0;
-    final tileWidth = (safeWidth - crossSpacing * (columns - 1)) / columns;
-    const tilePaddingY = 14.0;
-    const gapCoverTitle = 7.0;
-    const gapTitleKind = 3.0;
-    const titleHeight = 32.0;
-    const kindHeight = 14.0;
-    final tileHeight = (tileWidth / coverAspectRatio) +
-        tilePaddingY +
-        gapCoverTitle +
-        gapTitleKind +
-        titleHeight +
-        kindHeight;
-    final ratio = tileWidth / tileHeight;
-    return ratio.clamp(0.42, 1.45).toDouble();
-  }
+  }) =>
+      EmbyExclusiveFolderHelpers.gridChildAspectRatio(
+        maxWidth: maxWidth,
+        columns: columns,
+        coverAspectRatio: coverAspectRatio,
+      );
 
   int _adaptiveGridColumns({
     required double width,
     required double coverAspectRatio,
     required bool isTablet,
-  }) {
-    final phoneColumns = coverAspectRatio >= 1.12 ? 2 : 3;
-    if (!isTablet) return phoneColumns;
+  }) =>
+      EmbyExclusiveFolderHelpers.adaptiveGridColumns(
+        width: width,
+        coverAspectRatio: coverAspectRatio,
+        isTablet: isTablet,
+      );
 
-    const spacing = 10.0;
-    final targetWidth = coverAspectRatio >= 1.12
-        ? 220.0
-        : (coverAspectRatio <= 0.95 ? 170.0 : 185.0);
-    final raw = ((width + spacing) / (targetWidth + spacing)).floor();
-    final minColumns = phoneColumns + 1;
-    const maxColumns = 8;
-    return raw.clamp(minColumns, maxColumns).toInt();
-  }
+  int _sortFieldCompare(_UiItem a, _UiItem b) =>
+      EmbyExclusiveFolderHelpers.sortFieldCompare(
+        a,
+        b,
+        sort: _sort,
+        displayTitle: _displayTitle,
+      );
 
-  int _sortFieldCompare(_UiItem a, _UiItem b) {
-    switch (_sort) {
-      case _FolderSortKind.updatedAt:
-        return (a.item.dateModified?.millisecondsSinceEpoch ?? 0)
-            .compareTo(b.item.dateModified?.millisecondsSinceEpoch ?? 0);
-      case _FolderSortKind.addedAt:
-        return (a.item.dateCreated?.millisecondsSinceEpoch ?? 0)
-            .compareTo(b.item.dateCreated?.millisecondsSinceEpoch ?? 0);
-      case _FolderSortKind.playDuration:
-        return (a.item.runTimeTicks ?? 0).compareTo(b.item.runTimeTicks ?? 0);
-      case _FolderSortKind.playedAt:
-        return (a.item.datePlayed?.millisecondsSinceEpoch ?? 0)
-            .compareTo(b.item.datePlayed?.millisecondsSinceEpoch ?? 0);
-      case _FolderSortKind.title:
-        return _naturalTitleCompare(_displayTitle(a), _displayTitle(b));
-    }
-  }
-
-  int _categorySortRank(_UiItem item) {
-    if (item.isDir) return 0;
-    if (item.isImage) return 1;
-    return 2;
-  }
+  int _categorySortRank(_UiItem item) =>
+      EmbyExclusiveFolderHelpers.categorySortRank(item);
 
   String _displayItemsToken() {
     return [
@@ -3455,7 +2975,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
       }
       var cmp = _sortFieldCompare(a, b);
       if (cmp == 0) {
-        cmp = _naturalTitleCompare(_displayTitle(a), _displayTitle(b));
+        cmp = naturalTitleCompare(_displayTitle(a), _displayTitle(b));
       }
       if (!_sortAsc) cmp = -cmp;
       return cmp;
@@ -3492,73 +3012,37 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     return source.isNotEmpty;
   }
 
-  List<_FolderTopTab> _visibleTopTabs() {
-    final tabs = <_FolderTopTab>[];
-    void addTab(_FolderTopTab tab) {
-      if (!tabs.contains(tab)) tabs.add(tab);
-    }
-
-    final imageHeavy = _isImageDominantMixedLibrary();
-    if (_prefersStructuredContentTab) {
-      if (_contentItemsForCurrentFolder().isNotEmpty) {
-        addTab(_FolderTopTab.folders);
-      } else if (_recursiveVideos.isNotEmpty) {
-        addTab(_FolderTopTab.videos);
-      }
-    } else if (imageHeavy) {
-      addTab(_FolderTopTab.folders);
-      if (_hasImages) addTab(_FolderTopTab.images);
-      if (_recursiveVideos.isNotEmpty) addTab(_FolderTopTab.videos);
-    } else {
-      if (_recursiveVideos.isNotEmpty) {
-        addTab(_FolderTopTab.videos);
-      }
-      addTab(_FolderTopTab.folders);
-    }
-    if (_hasImages) addTab(_FolderTopTab.images);
-    if (tabs.isEmpty) {
-      if (_recursiveVideos.isNotEmpty) {
-        addTab(_FolderTopTab.videos);
-      } else {
-        addTab(_FolderTopTab.folders);
-      }
-    }
-    return tabs;
-  }
+  List<_FolderTopTab> _visibleTopTabs() =>
+      EmbyExclusiveFolderStateHelpers.visibleTopTabs(
+        prefersStructuredContentTab: _prefersStructuredContentTab,
+        imageDominantMixedLibrary: _isImageDominantMixedLibrary(),
+        hasImages: _hasImages,
+        recursiveVideosNotEmpty: _recursiveVideos.isNotEmpty,
+        hasFolderTabItems: _hasFolderTabItems(_items),
+        contentItemsNotEmpty: _contentItemsForCurrentFolder().isNotEmpty,
+      );
 
   _FolderTopTab _preferredTopTab({
     required bool hasVideos,
     required bool hasImages,
     required bool hasFolders,
-  }) {
-    final imageDominantMixed = _isImageDominantMixedLibrary();
-    if (_prefersStructuredContentTab && hasFolders) {
-      return _FolderTopTab.folders;
-    }
-    if (imageDominantMixed) {
-      if (hasFolders) return _FolderTopTab.folders;
-      if (hasImages) return _FolderTopTab.images;
-      if (hasVideos) return _FolderTopTab.videos;
-    }
-    if (hasVideos) return _FolderTopTab.videos;
-    if (hasFolders) return _FolderTopTab.folders;
-    if (hasImages) return _FolderTopTab.images;
-    return _FolderTopTab.videos;
-  }
+  }) =>
+      EmbyExclusiveFolderStateHelpers.preferredTopTab(
+        hasVideos: hasVideos,
+        hasImages: hasImages,
+        hasFolders: hasFolders,
+        prefersStructuredContentTab: _prefersStructuredContentTab,
+        imageDominantMixedLibrary: _isImageDominantMixedLibrary(),
+      );
 
-  bool _isImageDominantMixedLibrary() {
-    if (!_imageLibrarySimpleModeEnabled) return false;
-    if (_prefersStructuredContentTab) return false;
-    final imagesCount = _recursiveImages.length;
-    final videosCount = _recursiveVideos.length;
-    if (imagesCount <= 0) return false;
-    if (videosCount <= 0) return true;
-    final total = imagesCount + videosCount;
-    if (total <= 0) return false;
-    final imageRatioPct = imagesCount * 100.0 / total;
-    final threshold = _imageDominantThresholdPercent.clamp(50, 90);
-    return imageRatioPct >= threshold;
-  }
+  bool _isImageDominantMixedLibrary() =>
+      EmbyExclusiveFolderStateHelpers.isImageDominantMixedLibrary(
+        imageLibrarySimpleModeEnabled: _imageLibrarySimpleModeEnabled,
+        libraryKind: _libraryKind,
+        recursiveImagesCount: _recursiveImages.length,
+        recursiveVideosCount: _recursiveVideos.length,
+        thresholdPercent: _imageDominantThresholdPercent,
+      );
 
   void _onFolderTopTabSwipe(DragEndDetails details) {
     final velocity = details.primaryVelocity ?? 0;
@@ -3583,44 +3067,17 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     required List<_UiItem> videos,
     required List<_UiItem> images,
     bool preferPriority = false,
-  }) {
-    final hasVideos = videos.isNotEmpty;
-    final hasImages = images.isNotEmpty;
-    final hasFolders = _hasFolderTabItems(directItems);
-    if (preferPriority) {
-      return _preferredTopTab(
-        hasVideos: hasVideos,
-        hasImages: hasImages,
-        hasFolders: hasFolders,
+  }) =>
+      EmbyExclusiveFolderStateHelpers.chooseTopTab(
+        current: current,
+        directItems: directItems,
+        videos: videos,
+        images: images,
+        preferPriority: preferPriority,
+        prefersStructuredContentTab: _prefersStructuredContentTab,
+        hasFolderTabItems: _hasFolderTabItems,
+        preferredTopTab: _preferredTopTab,
       );
-    }
-
-    if (_prefersStructuredContentTab && hasFolders) {
-      if (current == _FolderTopTab.folders) {
-        return _FolderTopTab.folders;
-      }
-      if (current == _FolderTopTab.images && hasImages) {
-        return _FolderTopTab.images;
-      }
-      return _FolderTopTab.folders;
-    }
-
-    if (current == _FolderTopTab.videos && hasVideos) {
-      return _FolderTopTab.videos;
-    }
-    if (current == _FolderTopTab.folders && hasFolders) {
-      return _FolderTopTab.folders;
-    }
-    if (current == _FolderTopTab.images && hasImages) {
-      return _FolderTopTab.images;
-    }
-
-    return _preferredTopTab(
-      hasVideos: hasVideos,
-      hasImages: hasImages,
-      hasFolders: hasFolders,
-    );
-  }
 
   void _applyCoverBatch(
     Map<String, String> coverById, {
@@ -3646,10 +3103,11 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     if (_pendingMovieCoverBatch.isEmpty && _pendingFolderCoverBatch.isEmpty) {
       return;
     }
-    final movieBatch = Map<String, String>.from(_pendingMovieCoverBatch);
-    final folderBatch = Map<String, String>.from(_pendingFolderCoverBatch);
-    _pendingMovieCoverBatch.clear();
-    _pendingFolderCoverBatch.clear();
+    final movieBatch = EmbyExclusiveFolderCoverHelpers.takePendingBatch(
+        _pendingMovieCoverBatch);
+    final folderBatch = EmbyExclusiveFolderCoverHelpers.takePendingBatch(
+      _pendingFolderCoverBatch,
+    );
     if (_topTab != _FolderTopTab.folders) {
       if (movieBatch.isNotEmpty) {
         _movieFolderCoverUrlCache.addAll(movieBatch);
@@ -3672,82 +3130,44 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   List<String> _collectRegularFolderIds(
     Iterable<_UiItem> source,
     Set<String> seen,
-  ) {
-    final out = <String>[];
-    for (final item in source) {
-      if (!item.isDir) continue;
-      if (_isSeriesFolder(item) || _isMovieFolder(item)) continue;
-      final id = item.item.id.trim();
-      if (id.isEmpty) continue;
-      if (!seen.add(id)) continue;
-      if ((_folderCoverUrlCache[id] ?? '').trim().isNotEmpty) continue;
-      out.add(id);
-    }
-    return out;
-  }
+  ) =>
+      EmbyExclusiveFolderCoverHelpers.collectRegularFolderIds(
+        source,
+        seen,
+        isSeriesFolder: _isSeriesFolder,
+        isMovieFolder: _isMovieFolder,
+        folderCoverUrlCache: _folderCoverUrlCache,
+      );
 
   List<String> _collectMovieFolderIds(
     Iterable<_UiItem> source,
     Set<String> seen,
-  ) {
-    final out = <String>[];
-    for (final item in source) {
-      if (!_isMovieFolder(item)) continue;
-      final id = item.item.id.trim();
-      if (id.isEmpty) continue;
-      if (!seen.add(id)) continue;
-      if ((_movieFolderCoverUrlCache[id] ?? '').trim().isNotEmpty) continue;
-      if (_movieFolderPrimaryMisses.contains(id)) continue;
-      out.add(id);
-    }
-    return out;
-  }
+  ) =>
+      EmbyExclusiveFolderCoverHelpers.collectMovieFolderIds(
+        source,
+        seen,
+        isMovieFolder: _isMovieFolder,
+        movieFolderCoverUrlCache: _movieFolderCoverUrlCache,
+        movieFolderPrimaryMisses: _movieFolderPrimaryMisses,
+      );
 
-  List<_UiItem> _mergeUiById(List<_UiItem> base, List<_UiItem> extra) {
-    if (base.isEmpty) return extra;
-    if (extra.isEmpty) return base;
-    final seen = <String>{};
-    final out = <_UiItem>[];
-    for (final item in base) {
-      final id = item.item.id.trim();
-      if (id.isEmpty || !seen.add(id)) continue;
-      out.add(item);
-    }
-    for (final item in extra) {
-      final id = item.item.id.trim();
-      if (id.isEmpty || !seen.add(id)) continue;
-      out.add(item);
-    }
-    return out;
-  }
+  List<_UiItem> _mergeUiById(List<_UiItem> base, List<_UiItem> extra) =>
+      EmbyExclusiveFolderStateHelpers.mergeUiById(base, extra);
 
-  Map<String, _UiItem> _indexUiById(List<_UiItem> src) {
-    final out = <String, _UiItem>{};
-    for (final item in src) {
-      final id = item.item.id.trim();
-      if (id.isEmpty) continue;
-      out[id] = item;
-    }
-    return out;
-  }
+  Map<String, _UiItem> _indexUiById(List<_UiItem> src) =>
+      EmbyExclusiveFolderStateHelpers.indexUiById(src);
 
   List<_UiItem> _toUiItemsWithSeed(
     Iterable<EmbyItem> items, {
     required int maxWidth,
     Map<String, _UiItem>? seed,
-  }) {
-    final out = <_UiItem>[];
-    for (final item in items) {
-      final id = item.id.trim();
-      final cached = (id.isNotEmpty && seed != null) ? seed[id] : null;
-      if (cached != null) {
-        out.add(cached);
-        continue;
-      }
-      out.add(_toUiItem(item, maxWidth: maxWidth));
-    }
-    return out;
-  }
+  }) =>
+      EmbyExclusiveFolderStateHelpers.toUiItemsWithSeed(
+        items,
+        toUiItem: _toUiItem,
+        maxWidth: maxWidth,
+        seed: seed,
+      );
 
   void _maybePrewarmVisibleCovers({required int token}) {
     if (_topTab != _FolderTopTab.folders) return;
@@ -3770,40 +3190,25 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         kindHint: kindHint,
       );
       if (!mounted || token != _coverHydrationToken) return;
-      final existingVideoIds = _recursiveVideos
-          .map((x) => x.item.id.trim())
-          .where((id) => id.isNotEmpty)
-          .toSet();
-      final existingImageIds = _recursiveImages
-          .map((x) => x.item.id.trim())
-          .where((id) => id.isNotEmpty)
-          .toSet();
-      final quickVideos = _toUiItemsWithSeed(
-        quick.videos.where((e) => !existingVideoIds.contains(e.id.trim())),
-        maxWidth: 520,
-      );
-      final quickImages = _toUiItemsWithSeed(
-        quick.images.where((e) => !existingImageIds.contains(e.id.trim())),
-        maxWidth: 520,
-      );
-      if (quickVideos.isEmpty && quickImages.isEmpty) return;
-
-      final mergedVideos = _mergeUiById(_recursiveVideos, quickVideos);
-      final mergedImages = _mergeUiById(_recursiveImages, quickImages);
-      final previousTab = _topTab;
-      final tab = _chooseTopTab(
-        current: _topTab,
+      final merged = EmbyExclusiveFolderLoadHelpers.mergeQuickPreview(
+        quick: quick,
+        currentRecursiveVideos: _recursiveVideos,
+        currentRecursiveImages: _recursiveImages,
+        toUiItemsWithSeed: _toUiItemsWithSeed,
+        mergeUiById: _mergeUiById,
+        currentTopTab: _topTab,
         directItems: directItems,
-        videos: mergedVideos,
-        images: mergedImages,
+        chooseTopTab: _chooseTopTab,
         preferPriority: _applyEntryTopTabPriority && !_topTabTouchedSinceReload,
       );
+      if (merged == null) return;
+      final previousTab = _topTab;
       setState(() {
-        _recursiveVideos = mergedVideos;
-        _recursiveImages = mergedImages;
-        _topTab = tab;
+        _recursiveVideos = merged.mergedVideos;
+        _recursiveImages = merged.mergedImages;
+        _topTab = merged.nextTopTab;
       });
-      if (previousTab != tab) {
+      if (previousTab != merged.nextTopTab) {
         unawaited(_persistDisplaySettingsForCurrentFolder());
       }
       _maybePrewarmVisibleCovers(token: token);
@@ -3969,7 +3374,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         final sizeCmp = b.item.size.compareTo(a.item.size);
         if (sizeCmp != 0) return sizeCmp;
 
-        return _naturalTitleCompare(a.title, b.title);
+        return naturalTitleCompare(a.title, b.title);
       });
     return out.first;
   }
@@ -4176,48 +3581,33 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         favoritesMode: widget.favoritesMode,
       );
       final immediateSnap = plan.immediate;
-      final mapped = _toUiItemsWithSeed(
-        immediateSnap.directItems,
-        maxWidth: 520,
-      );
-      final immediateIndex = _indexUiById(mapped);
-      final immediateVideos = _toUiItemsWithSeed(
-        immediateSnap.directMedia.videos,
-        maxWidth: 520,
-        seed: immediateIndex,
-      );
-      final immediateImages = _toUiItemsWithSeed(
-        immediateSnap.directMedia.images,
-        maxWidth: 520,
-        seed: immediateIndex,
-      );
-      final libraryKind = _libraryKindFromSignal(immediateSnap.libraryKind);
-      final previousTopTab = _topTab;
-      final nextTopTab = _chooseTopTab(
-        current: _topTab,
-        directItems: mapped,
-        videos: immediateVideos,
-        images: immediateImages,
+      final stage = EmbyExclusiveFolderLoadHelpers.buildReloadStage(
+        immediateSnapshot: immediateSnap,
+        toUiItemsWithSeed: _toUiItemsWithSeed,
+        indexUiById: _indexUiById,
+        currentTopTab: _topTab,
+        chooseTopTab: _chooseTopTab,
         preferPriority: _applyEntryTopTabPriority && !_topTabTouchedSinceReload,
       );
+      final previousTopTab = _topTab;
       if (!mounted) return;
       setState(() {
-        _items = mapped;
-        _recursiveVideos = immediateVideos;
-        _recursiveImages = immediateImages;
-        _libraryKind = libraryKind;
-        _topTab = nextTopTab;
+        _items = stage.directItems;
+        _recursiveVideos = stage.recursiveVideos;
+        _recursiveImages = stage.recursiveImages;
+        _libraryKind = stage.libraryKind;
+        _topTab = stage.nextTopTab;
         _loading = false;
         _applyEntryTopTabPriority = false;
       });
-      if (previousTopTab != nextTopTab) {
+      if (previousTopTab != stage.nextTopTab) {
         unawaited(_persistDisplaySettingsForCurrentFolder());
       }
       _maybePrewarmVisibleCovers(token: token);
       unawaited(
         _applyFastRecursivePreview(
           token: token,
-          directItems: mapped,
+          directItems: stage.directItems,
           kindHint: immediateSnap.libraryKind,
         ),
       );
@@ -4225,6 +3615,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         try {
           final recursive = await plan.recursiveMedia;
           if (!mounted || token != _coverHydrationToken) return;
+          final immediateIndex = _indexUiById(stage.directItems);
           final recursiveVideos = _toUiItemsWithSeed(
             recursive.videos,
             maxWidth: 520,
@@ -4238,7 +3629,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
           final previousTab = _topTab;
           final tab = _chooseTopTab(
             current: _topTab,
-            directItems: mapped,
+            directItems: stage.directItems,
             videos: recursiveVideos,
             images: recursiveImages,
             preferPriority: false,
@@ -4377,349 +3768,6 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
           videoPaths: paths,
           initialIndex: idx.clamp(0, paths.length - 1),
         ),
-      ),
-    );
-  }
-
-  Widget _topTabButton(_FolderTopTab tab) {
-    final p = _palette;
-    final selected = _topTab == tab;
-    return InkWell(
-      borderRadius: BorderRadius.circular(999),
-      onTap: () => _setTopTab(tab),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? p.chipSelectedBg : Colors.transparent,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: AnimatedDefaultTextStyle(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          style: TextStyle(
-            color: p.text.withValues(alpha: selected ? 1 : 0.88),
-            fontSize: selected ? 14.2 : 14,
-            fontWeight: selected ? FontWeight.w800 : FontWeight.w700,
-          ),
-          child: Text(_topTabLabel(tab)),
-        ),
-      ),
-    );
-  }
-
-  Widget _sortMenuButton() {
-    final p = _palette;
-    return PopupMenuButton<_FolderSortKind>(
-      tooltip: '\u6392\u5e8f',
-      onSelected: _onSortSelected,
-      color: p.chipBg,
-      itemBuilder: (_) => [
-        for (final v in _FolderSortKind.values)
-          PopupMenuItem<_FolderSortKind>(
-            value: v,
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _sortLabel(v),
-                    style: TextStyle(color: p.text),
-                  ),
-                ),
-                if (_sort == v)
-                  Icon(
-                    _sortAsc ? Icons.arrow_upward : Icons.arrow_downward,
-                    color: p.text,
-                    size: 16,
-                  ),
-              ],
-            ),
-          ),
-      ],
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: p.chipBg,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.sort, color: p.text, size: 16),
-            const SizedBox(width: 6),
-            Text(
-              _sortLabel(_sort),
-              style: TextStyle(
-                color: p.text,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Icon(
-              _sortAsc ? Icons.arrow_upward : Icons.arrow_downward,
-              color: p.text,
-              size: 15,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _headerControls(int count) {
-    final p = _palette;
-    final tabs = _visibleTopTabs();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(4),
-          decoration: BoxDecoration(
-            color: p.chipBg,
-            borderRadius: BorderRadius.circular(999),
-          ),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onHorizontalDragEnd: _onFolderTopTabSwipe,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final tab in tabs) _topTabButton(tab),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            _sortMenuButton(),
-            const SizedBox(width: 8),
-            if (_libraryKind != _LibraryKind.unknown) ...[
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: p.chipBg,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Text(
-                  _libraryKindLabel(),
-                  style: TextStyle(
-                    color: p.sub,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-            ],
-            const Spacer(),
-            Text(
-              '\u5171 $count \u9879',
-              style: TextStyle(
-                color: p.sub,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _cover(_UiItem item) {
-    final p = _palette;
-    final url = _effectiveCoverUrl(item);
-    final isMovie = _isMovieItem(item) || _isMovieFolder(item);
-    final token = widget.account.apiKey.trim();
-    final headers =
-        token.isEmpty ? null : <String, String>{'X-Emby-Token': token};
-    final coverWidth = item.isImage ? 860 : (isMovie ? 620 : 560);
-    final icon = _isSeriesFolder(item)
-        ? Icons.live_tv_outlined
-        : (isMovie
-            ? Icons.movie_outlined
-            : (item.isDir
-                ? Icons.folder_open_rounded
-                : (item.isImage
-                    ? Icons.image_outlined
-                    : Icons.video_file_outlined)));
-
-    Widget emptyPlaceholder() {
-      return ColoredBox(
-        color: p.coverPlaceholderBg,
-        child: Center(child: Icon(icon, color: p.sub)),
-      );
-    }
-
-    Widget brokenPlaceholder() {
-      return ColoredBox(
-        color: p.coverPlaceholderBg,
-        child: Center(child: Icon(Icons.broken_image_outlined, color: p.sub)),
-      );
-    }
-
-    Widget buildDirSeed(String seedUrl) {
-      return Image.network(
-        seedUrl,
-        headers: headers,
-        fit: BoxFit.cover,
-        cacheWidth: coverWidth,
-        filterQuality: FilterQuality.low,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => emptyPlaceholder(),
-      );
-    }
-
-    if (item.isDir) {
-      if (url.isEmpty) return emptyPlaceholder();
-      return buildDirSeed(url);
-    }
-
-    if (url.isEmpty) {
-      return emptyPlaceholder();
-    }
-    return Image.network(
-      url,
-      headers: headers,
-      fit: BoxFit.cover,
-      cacheWidth: coverWidth,
-      filterQuality: FilterQuality.low,
-      gaplessPlayback: true,
-      errorBuilder: (_, __, ___) => brokenPlaceholder(),
-    );
-  }
-
-  String _itemKindLabel(_UiItem item) {
-    if (_isSeriesFolder(item)) return '\u5267\u96c6';
-    if (_isMovieFolder(item)) return '\u7535\u5f71';
-    if (item.isDir) return '\u6587\u4ef6\u5939';
-    if (item.isImage) return '\u56fe\u7247';
-    if (_isMovieItem(item)) return '\u7535\u5f71';
-    if (_libraryKind == _LibraryKind.series &&
-        _embyTypeIsEpisode(item.item.type)) {
-      return '\u5267\u96c6';
-    }
-    return '\u89c6\u9891';
-  }
-
-  String _displayTitle(_UiItem item) {
-    final raw = item.title.trim();
-    if (!_isMovieFolder(item) && !_isMovieItem(item)) return raw;
-    final stripped = raw.replaceAll(_kMovieMetaTagBracketPattern, '');
-    final compact = stripped.replaceAll(_kMultiSpacePattern, ' ').trim();
-    return compact.isEmpty ? raw : compact;
-  }
-
-  Widget _buildTopTabGridTile(
-    _UiItem item,
-    List<_UiItem> shown, {
-    required double coverAspect,
-  }) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(14),
-      onTap: () => _openItem(item, pool: shown),
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.transparent,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        padding: const EdgeInsets.all(7),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AspectRatio(
-              aspectRatio: coverAspect,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    _cover(item),
-                    _itemBadgeOverlay(item),
-                    _progressOverlay(item.item),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 7),
-            Text(
-              _displayTitle(item),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: _palette.text,
-                fontSize: 13.5,
-                fontWeight: FontWeight.w600,
-                height: 1.16,
-              ),
-            ),
-            const SizedBox(height: 3),
-            Text(
-              _itemKindLabel(item),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: _palette.sub,
-                fontSize: 11.5,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTopTabSliverContent(List<_UiItem> shown) {
-    if (shown.isEmpty) {
-      return SliverFillRemaining(
-        hasScrollBody: false,
-        child: Center(
-          child: Text(
-            '\u76ee\u5f55\u4e3a\u7a7a',
-            style: TextStyle(color: _palette.sub),
-          ),
-        ),
-      );
-    }
-
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.crossAxisExtent;
-          final coverAspect = _dominantCoverAspectCached(shown);
-          final isTablet = MediaQuery.sizeOf(context).shortestSide >= 600;
-          final columns = _adaptiveGridColumns(
-            width: width,
-            coverAspectRatio: coverAspect,
-            isTablet: isTablet,
-          );
-          final childAspect = _gridChildAspectRatio(
-            maxWidth: width,
-            columns: columns,
-            coverAspectRatio: coverAspect,
-          );
-          return SliverGrid(
-            delegate: SliverChildBuilderDelegate(
-              (_, i) => _buildTopTabGridTile(
-                shown[i],
-                shown,
-                coverAspect: coverAspect,
-              ),
-              childCount: shown.length,
-              addAutomaticKeepAlives: false,
-            ),
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 12,
-              childAspectRatio: childAspect,
-            ),
-          );
-        },
       ),
     );
   }
@@ -4991,11 +4039,8 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
 
   _EmbyPalette get _palette => _paletteForMode(widget.paletteMode);
 
-  bool _isResumableEpisode(EmbyItem item) {
-    final played = item.playedPercentage ?? 0;
-    if (item.playbackPositionTicks > 0 && played < 95) return true;
-    return item.playbackPositionTicks > 0 && !item.isPlayed;
-  }
+  bool _isResumableEpisode(EmbyItem item) =>
+      EmbyExclusiveSeriesHelpers.isResumableEpisode(item);
 
   @override
   void initState() {
@@ -5003,14 +4048,8 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     _reload();
   }
 
-  bool _isSeriesDir(_UiItem item) {
-    if (!item.isDir) return false;
-    return embyNativeTypeIsSeries(item.item.type);
-  }
-
-  bool _isSeasonType(EmbyItem item) {
-    return embyNativeTypeIsSeason(item.type);
-  }
+  bool _isSeasonType(EmbyItem item) =>
+      EmbyExclusiveSeriesHelpers.isSeasonType(item);
 
   _UiItem _toUiItem(EmbyItem item, {int maxWidth = 520}) {
     final isDir = _embyItemIsDir(item);
@@ -5024,17 +4063,8 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     );
   }
 
-  List<_UiItem> _uniqueById(List<_UiItem> src) {
-    final out = <_UiItem>[];
-    final seen = <String>{};
-    for (final item in src) {
-      final id = item.item.id.trim();
-      if (id.isEmpty) continue;
-      if (!seen.add(id)) continue;
-      out.add(item);
-    }
-    return out;
-  }
+  List<_UiItem> _uniqueById(List<_UiItem> src) =>
+      EmbyExclusiveSeriesHelpers.uniqueById(src);
 
   Future<List<EmbyItem>> _safeChildren({
     required String parentId,
@@ -5083,36 +4113,18 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     );
   }
 
-  int _episodeSortCompare(EmbyItem a, EmbyItem b) {
-    final seasonA = a.parentIndexNumber ?? 0;
-    final seasonB = b.parentIndexNumber ?? 0;
-    if (seasonA != seasonB) return seasonA.compareTo(seasonB);
-    final indexA = a.indexNumber ?? 0;
-    final indexB = b.indexNumber ?? 0;
-    if (indexA != indexB) return indexA.compareTo(indexB);
-    final ad = a.dateCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
-    final bd = b.dateCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
-    final cmp = ad.compareTo(bd);
-    if (cmp != 0) return cmp;
-    return _naturalTitleCompare(a.name, b.name);
-  }
+  int _episodeSortCompare(EmbyItem a, EmbyItem b) =>
+      EmbyExclusiveSeriesHelpers.episodeSortCompare(a, b);
 
   int _seasonSortCompare(EmbyItem a, EmbyItem b) {
     final indexA = a.indexNumber ?? 0;
     final indexB = b.indexNumber ?? 0;
     if (indexA != indexB) return indexA.compareTo(indexB);
-    return _naturalTitleCompare(a.name, b.name);
+    return naturalTitleCompare(a.name, b.name);
   }
 
-  String _episodeCode(EmbyItem item) {
-    final season = item.parentIndexNumber;
-    final episode = item.indexNumber;
-    if ((season ?? 0) > 0 && (episode ?? 0) > 0) {
-      return 'S${season.toString().padLeft(2, '0')}E${episode.toString().padLeft(2, '0')}';
-    }
-    if ((episode ?? 0) > 0) return '第 $episode 集';
-    return '';
-  }
+  String _episodeCode(EmbyItem item) =>
+      EmbyExclusiveSeriesHelpers.episodeCode(item);
 
   Future<void> _reload() async {
     setState(() {
@@ -5252,109 +4264,8 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     );
   }
 
-  Widget _metaChip({required IconData icon, required String text}) {
-    final p = _palette;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: p.chipBg.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: p.text),
-          const SizedBox(width: 6),
-          Text(
-            text,
-            style: TextStyle(
-              color: p.text,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _episodeProgressBar(_UiItem ep) {
-    final played = ep.item.playedPercentage;
-    final ratio = played != null && played.isFinite && played > 0
-        ? (played / 100).clamp(0.0, 1.0)
-        : (() {
-            final runtime = ep.item.runTimeTicks ?? 0;
-            if (runtime <= 0 || ep.item.playbackPositionTicks <= 0) return 0.0;
-            return (ep.item.playbackPositionTicks / runtime).clamp(0.0, 1.0);
-          })();
-    if (ratio <= 0) return const SizedBox.shrink();
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: Container(
-        height: 4,
-        color: Colors.black.withValues(alpha: 0.34),
-        child: FractionallySizedBox(
-          alignment: Alignment.centerLeft,
-          widthFactor: ratio,
-          child: Container(color: _palette.progress),
-        ),
-      ),
-    );
-  }
-
-  Widget _episodeStatusBadge(_UiItem ep) {
-    final label = ep.item.isPlayed
-        ? '已看'
-        : _isResumableEpisode(ep.item)
-            ? '继续播放'
-            : '未看';
-    return Positioned(
-      left: 8,
-      top: 8,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.46),
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
-    );
-  }
-
-  String _seasonSubtitle(_UiItem season) {
-    final parts = <String>[];
-    final index = season.item.indexNumber;
-    if ((index ?? 0) > 0) parts.add('第 $index 季');
-    final unplayed = season.item.unplayedItemCount;
-    if (unplayed > 0) {
-      parts.add('未看 $unplayed');
-    } else if (season.item.isPlayed) {
-      parts.add('已看完');
-    }
-    return parts.join(' · ');
-  }
-
-  _UiItem? _nextUpEpisode(List<_UiItem> playlist) {
-    if (playlist.isEmpty) return null;
-    for (final item in playlist) {
-      if (!item.item.isPlayed) return item;
-    }
-    if (_continueEpisodes.isEmpty) return playlist.first;
-    final last = _continueEpisodes.first;
-    final idx = playlist.indexWhere((e) => e.item.id == last.item.id);
-    if (idx >= 0 && idx < playlist.length - 1) return playlist[idx + 1];
-    return last;
-  }
+  _UiItem? _nextUpEpisode(List<_UiItem> playlist) =>
+      EmbyExclusiveSeriesHelpers.nextUpEpisode(playlist, _continueEpisodes);
 
   Future<void> _playNextUp() async {
     final playlist = _episodePlaylist();
@@ -5363,125 +4274,11 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     await _playEpisode(next, pool: playlist);
   }
 
-  Widget _nextUpCard(_UiItem ep, {required List<_UiItem> playlist}) {
-    final p = _palette;
-    final thumb = _episodeThumbUrl(ep).trim();
-    final code = _episodeCode(ep.item);
-    final title = code.isEmpty ? ep.title : '$code · ${ep.title}';
-    return InkWell(
-      borderRadius: BorderRadius.circular(16),
-      onTap: () => _playEpisode(ep, pool: playlist),
-      child: Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: p.panel,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: SizedBox(
-                width: 156,
-                height: 88,
-                child: thumb.isEmpty
-                    ? ColoredBox(
-                        color: p.coverPlaceholderBg,
-                        child: Center(
-                          child: Icon(Icons.movie_outlined, color: p.sub),
-                        ),
-                      )
-                    : Image.network(
-                        thumb,
-                        headers: _headers,
-                        fit: BoxFit.cover,
-                        cacheWidth: 720,
-                        filterQuality: FilterQuality.low,
-                        gaplessPlayback: true,
-                        errorBuilder: (_, __, ___) => ColoredBox(
-                          color: p.coverPlaceholderBg,
-                          child: Center(
-                            child:
-                                Icon(Icons.broken_image_outlined, color: p.sub),
-                          ),
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '\u4e0b\u4e00\u96c6',
-                    style: TextStyle(
-                      color: p.sub,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: p.text,
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w700,
-                      height: 1.1,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: p.chipSelectedBg,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              alignment: Alignment.center,
-              child: Icon(Icons.play_arrow_rounded, color: p.text),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  List<_UiItem> _episodePlaylist() =>
+      EmbyExclusiveSeriesHelpers.episodePlaylist(_episodes);
 
-  String _episodeThumbUrl(_UiItem ep) {
-    final tag = ep.item.thumbTag;
-    if (tag != null && tag.trim().isNotEmpty) {
-      return _client.coverUrl(
-        ep.item.id,
-        type: 'Thumb',
-        maxWidth: 640,
-        quality: 85,
-        tag: tag,
-      );
-    }
-    return ep.coverUrl;
-  }
-
-  List<_UiItem> _episodePlaylist() {
-    final out = _episodes.where((e) => !_isSeriesDir(e)).toList(growable: true);
-    out.sort((a, b) => _episodeSortCompare(a.item, b.item));
-    return out;
-  }
-
-  Map<String, int> _episodeNumberById(List<_UiItem> playlist) {
-    final out = <String, int>{};
-    for (var i = 0; i < playlist.length; i++) {
-      final id = playlist[i].item.id.trim();
-      if (id.isEmpty) continue;
-      out[id] = i + 1;
-    }
-    return out;
-  }
+  Map<String, int> _episodeNumberById(List<_UiItem> playlist) =>
+      EmbyExclusiveSeriesHelpers.episodeNumberById(playlist);
 
   Future<void> _playEpisode(_UiItem current, {List<_UiItem>? pool}) async {
     final items = (pool ?? _episodePlaylist())
@@ -5544,272 +4341,11 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
     );
   }
 
-  String _metaLine(EmbyItem series) {
-    final parts = <String>[];
-    final rating = series.communityRating;
-    if (rating != null && rating > 0) {
-      parts.add('\u8bc4\u5206 ${rating.toStringAsFixed(1)}');
-    }
-    final start = series.productionYear;
-    if (start != null && start > 0) {
-      final end =
-          series.endDate == null ? '\u81f3\u4eca' : '${series.endDate!.year}';
-      parts.add('$start-$end');
-    }
-    final seasonCount = _seasons.length;
-    if (seasonCount > 0) {
-      parts.add('\u5171$seasonCount\u5b63');
-    }
-    final episodeCount = _episodes.length;
-    if (episodeCount > 0) {
-      parts.add('\u5171$episodeCount\u96c6');
-    }
-    return parts.join('  \u00b7  ');
-  }
-
-  Widget _hero(EmbyItem series) {
-    final p = _palette;
-    final backdrop = _backdropUrl(series).trim();
-    return SizedBox(
-      height: 286,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (backdrop.isNotEmpty)
-            Image.network(
-              backdrop,
-              headers: _headers,
-              fit: BoxFit.cover,
-              cacheWidth: 1400,
-              filterQuality: FilterQuality.low,
-              errorBuilder: (_, __, ___) =>
-                  ColoredBox(color: p.coverPlaceholderBg),
-            )
-          else
-            ColoredBox(color: p.coverPlaceholderBg),
-          DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.25),
-                  Colors.black.withValues(alpha: 0.68),
-                ],
-              ),
-            ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: '\u8fd4\u56de',
-                    onPressed: () => Navigator.maybePop(context),
-                    icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                        color: Colors.white),
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    tooltip: '\u6536\u85cf',
-                    onPressed: () => showAppToast(
-                      context,
-                      '\u6682\u4e0d\u652f\u6301\u6536\u85cf',
-                    ),
-                    icon: const Icon(Icons.favorite_border_rounded,
-                        color: Colors.white),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 18,
-            child: Text(
-              series.name.trim().isEmpty
-                  ? '\u672a\u547d\u540d\u5267\u96c6'
-                  : series.name.trim(),
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 24,
-                fontWeight: FontWeight.w700,
-                shadows: [Shadow(blurRadius: 14, color: Colors.black54)],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _episodeShelf(List<_UiItem> items) {
-    final p = _palette;
-    if (items.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Text('\u6682\u65e0\u5185\u5bb9', style: TextStyle(color: p.sub)),
+  String _metaLine(EmbyItem series) => EmbyExclusiveSeriesHelpers.metaLine(
+        series: series,
+        seasonsCount: _seasons.length,
+        episodesCount: _episodes.length,
       );
-    }
-    final shelf = items.take(20).toList(growable: false);
-    final playlist = _episodePlaylist();
-    final numberById = _episodeNumberById(playlist);
-    return SizedBox(
-      height: 138,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: shelf.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 10),
-        itemBuilder: (_, i) {
-          final ep = shelf[i];
-          final code = _episodeCode(ep.item);
-          final no = numberById[ep.item.id.trim()];
-          final title = code.isNotEmpty
-              ? '$code · ${ep.title}'
-              : (no == null ? ep.title : '$no. ${ep.title}');
-          final thumb = _episodeThumbUrl(ep).trim();
-          return InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () => _playEpisode(ep, pool: playlist),
-            child: SizedBox(
-              width: 182,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  AspectRatio(
-                    aspectRatio: 16 / 9,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          thumb.isEmpty
-                              ? ColoredBox(
-                                  color: p.coverPlaceholderBg,
-                                  child: Center(
-                                    child: Icon(Icons.movie_outlined,
-                                        color: p.sub),
-                                  ),
-                                )
-                              : Image.network(
-                                  thumb,
-                                  headers: _headers,
-                                  fit: BoxFit.cover,
-                                  cacheWidth: 640,
-                                  filterQuality: FilterQuality.low,
-                                  gaplessPlayback: true,
-                                  errorBuilder: (_, __, ___) => ColoredBox(
-                                    color: p.coverPlaceholderBg,
-                                    child: Center(
-                                      child: Icon(Icons.broken_image_outlined,
-                                          color: p.sub),
-                                    ),
-                                  ),
-                                ),
-                          _episodeStatusBadge(ep),
-                          _episodeProgressBar(ep),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: p.text,
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _seasonShelf(List<_UiItem> items) {
-    final p = _palette;
-    if (items.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Text('\u6682\u65e0\u5206\u5b63\u4fe1\u606f',
-            style: TextStyle(color: p.sub)),
-      );
-    }
-    return SizedBox(
-      height: 216,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: items.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 12),
-        itemBuilder: (_, i) {
-          final season = items[i];
-          return InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () => _openSeason(season),
-            child: SizedBox(
-              width: 112,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  AspectRatio(
-                    aspectRatio: 0.67,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: season.coverUrl.trim().isEmpty
-                          ? ColoredBox(
-                              color: p.coverPlaceholderBg,
-                              child: Center(
-                                child: Icon(Icons.video_collection_outlined,
-                                    color: p.sub),
-                              ),
-                            )
-                          : Image.network(
-                              season.coverUrl,
-                              headers: _headers,
-                              fit: BoxFit.cover,
-                              cacheWidth: 420,
-                              filterQuality: FilterQuality.low,
-                              gaplessPlayback: true,
-                              errorBuilder: (_, __, ___) => ColoredBox(
-                                color: p.coverPlaceholderBg,
-                                child: Center(
-                                  child: Icon(Icons.broken_image_outlined,
-                                      color: p.sub),
-                                ),
-                              ),
-                            ),
-                    ),
-                  ),
-                  const SizedBox(height: 7),
-                  Text(
-                    season.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: p.text, fontSize: 13),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _seasonSubtitle(season),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: p.sub, fontSize: 11.5),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -6058,23 +4594,6 @@ class _EmbySeriesDetailPageState extends State<_EmbySeriesDetailPage> {
   }
 }
 
-class _EmbyMovieDetailPage extends StatefulWidget {
-  final EmbyAccount account;
-  final String movieId;
-  final EmbyItem seedMovie;
-  final _EmbyPaletteMode paletteMode;
-
-  const _EmbyMovieDetailPage({
-    required this.account,
-    required this.movieId,
-    required this.seedMovie,
-    required this.paletteMode,
-  });
-
-  @override
-  State<_EmbyMovieDetailPage> createState() => _EmbyMovieDetailPageState();
-}
-
 class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
   late final EmbyClient _client = EmbyClient(widget.account);
   bool _loading = true;
@@ -6181,7 +4700,7 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
   Future<void> _openPoster() async {
     final movie = _movie ?? widget.seedMovie;
     final ui = _toUiItem(movie, maxWidth: 1200);
-    final preferred = _preferOriginalUrl(ui.coverUrl).trim();
+    final preferred = preferOriginalUrl(ui.coverUrl).trim();
     final url = preferred.isNotEmpty
         ? preferred
         : _client.originalImageUrl(movie.id).trim();
@@ -6198,155 +4717,7 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
     );
   }
 
-  String _durationLabel(int? runTimeTicks) {
-    final ticks = runTimeTicks ?? 0;
-    if (ticks <= 0) return '';
-    const ticksPerMinute = 600000000;
-    final totalMinutes = ticks ~/ ticksPerMinute;
-    if (totalMinutes <= 0) return '';
-    final hours = totalMinutes ~/ 60;
-    final minutes = totalMinutes % 60;
-    if (hours <= 0) return '${totalMinutes}m';
-    if (minutes <= 0) return '${hours}h';
-    return '${hours}h ${minutes}m';
-  }
-
-  String _metaLine(EmbyItem movie) {
-    final parts = <String>[];
-    final rating = movie.communityRating;
-    if (rating != null && rating > 0) {
-      parts.add('\u8bc4\u5206 ${rating.toStringAsFixed(1)}');
-    }
-    final year = movie.productionYear;
-    if (year != null && year > 0) {
-      parts.add('$year');
-    }
-    final duration = _durationLabel(movie.runTimeTicks);
-    if (duration.isNotEmpty) {
-      parts.add(duration);
-    }
-    return parts.join('  \u00b7  ');
-  }
-
-  List<Widget> _movieFactChips(EmbyItem movie) {
-    final out = <Widget>[];
-    final rating = movie.communityRating;
-    if (rating != null && rating > 0) {
-      out.add(_detailFactChip(
-        _palette,
-        icon: Icons.star_rounded,
-        label: rating.toStringAsFixed(1),
-        highlight: true,
-      ));
-    }
-    final year = movie.productionYear;
-    if (year != null && year > 0) {
-      out.add(_detailFactChip(
-        _palette,
-        icon: Icons.calendar_today_outlined,
-        label: '$year',
-      ));
-    }
-    final duration = _durationLabel(movie.runTimeTicks);
-    if (duration.isNotEmpty) {
-      out.add(_detailFactChip(
-        _palette,
-        icon: Icons.schedule_rounded,
-        label: duration,
-      ));
-    }
-    out.add(_detailFactChip(
-      _palette,
-      icon: Icons.movie_outlined,
-      label: '电影',
-    ));
-    return out;
-  }
-
-  Widget _movieSummaryPanel(EmbyItem movie) {
-    final p = _palette;
-    final poster = _posterUrl(movie);
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: p.panel,
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(14),
-            child: SizedBox(
-              width: 104,
-              height: 156,
-              child: poster.isEmpty
-                  ? ColoredBox(
-                      color: p.coverPlaceholderBg,
-                      child: Center(
-                        child:
-                            Icon(Icons.movie_outlined, color: p.sub, size: 28),
-                      ),
-                    )
-                  : Image.network(
-                      poster,
-                      headers: _headers,
-                      fit: BoxFit.cover,
-                      cacheWidth: 520,
-                      filterQuality: FilterQuality.low,
-                      gaplessPlayback: true,
-                      errorBuilder: (_, __, ___) => ColoredBox(
-                        color: p.coverPlaceholderBg,
-                        child: Center(
-                          child: Icon(Icons.broken_image_outlined,
-                              color: p.sub, size: 24),
-                        ),
-                      ),
-                    ),
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  movie.name.trim().isEmpty ? '未命名电影' : movie.name.trim(),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: p.text,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
-                    height: 1.1,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: _movieFactChips(movie),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  _movieStatusText(movie),
-                  style: TextStyle(
-                    color: p.sub,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                if (movie.genres.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  _detailGenreWrap(p, movie.genres),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  String _metaLine(EmbyItem movie) => embyMovieMetaLine(movie);
 
   Future<void> _playMovie() async {
     final movie = _movie ?? widget.seedMovie;
@@ -6360,90 +4731,6 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
           videoPaths: <String>[path],
           initialIndex: 0,
         ),
-      ),
-    );
-  }
-
-  bool _isResumableMovie(EmbyItem movie) {
-    final played = movie.playedPercentage ?? 0;
-    if (movie.playbackPositionTicks > 0 && played < 95) return true;
-    return movie.playbackPositionTicks > 0 && !movie.isPlayed;
-  }
-
-  String _movieStatusText(EmbyItem movie) {
-    if (movie.isPlayed) return '已看完';
-    if (_isResumableMovie(movie)) return '继续播放';
-    return '未开始';
-  }
-
-  Widget _hero(EmbyItem movie) {
-    final p = _palette;
-    final backdrop = _backdropUrl(movie).trim();
-    return SizedBox(
-      height: 286,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (backdrop.isNotEmpty)
-            Image.network(
-              backdrop,
-              headers: _headers,
-              fit: BoxFit.cover,
-              cacheWidth: 1400,
-              filterQuality: FilterQuality.low,
-              gaplessPlayback: true,
-              errorBuilder: (_, __, ___) =>
-                  ColoredBox(color: p.coverPlaceholderBg),
-            )
-          else
-            ColoredBox(color: p.coverPlaceholderBg),
-          DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.25),
-                  Colors.black.withValues(alpha: 0.68),
-                ],
-              ),
-            ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: '\u8fd4\u56de',
-                    onPressed: () => Navigator.maybePop(context),
-                    icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                        color: Colors.white),
-                  ),
-                  const Spacer(),
-                ],
-              ),
-            ),
-          ),
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 18,
-            child: Text(
-              movie.name.trim().isEmpty
-                  ? '\u672a\u547d\u540d\u7535\u5f71'
-                  : movie.name.trim(),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 24,
-                fontWeight: FontWeight.w700,
-                shadows: [Shadow(blurRadius: 14, color: Colors.black54)],
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -6472,13 +4759,25 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
         child: ListView(
           padding: EdgeInsets.zero,
           children: [
-            _hero(movie),
+            _buildMovieHero(
+              context,
+              p,
+              movie,
+              backdrop: _backdropUrl(movie).trim(),
+              headers: _headers,
+            ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _movieSummaryPanel(movie),
+                  _buildMovieSummaryPanel(
+                    _palette,
+                    movie,
+                    poster: _posterUrl(movie),
+                    headers: _headers,
+                    statusText: embyMovieStatusText(movie),
+                  ),
                   if (meta.isNotEmpty) ...[
                     const SizedBox(height: 14),
                     Text(
@@ -6498,7 +4797,7 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
                           p,
                           onPressed: _playMovie,
                           icon: Icons.play_arrow_rounded,
-                          label: _isResumableMovie(movie) ? '继续播放' : '播放',
+                          label: embyMovieIsResumable(movie) ? '继续播放' : '播放',
                           primary: true,
                         ),
                       ),
@@ -6537,7 +4836,7 @@ class _EmbyMovieDetailPageState extends State<_EmbyMovieDetailPage> {
                     child: Wrap(
                       spacing: 8,
                       runSpacing: 8,
-                      children: _movieFactChips(movie),
+                      children: _buildMovieFactChips(_palette, movie),
                     ),
                   ),
                 ],

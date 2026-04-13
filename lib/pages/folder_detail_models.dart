@@ -1,16 +1,16 @@
-part of '../pages.dart';
+import '../source_refs.dart';
 
-enum _CtxKind { root, local, webdav, emby }
+enum CtxKind { root, local, webdav, emby }
 
-enum _FolderSearchScope {
+enum FolderSearchScope {
   currentDirectory,
   currentCollection,
   allCollections,
   singleCollection,
 }
 
-class _NavCtx {
-  final _CtxKind kind;
+class NavCtx {
+  final CtxKind kind;
   final String? title;
   final String? localDir;
   final String? wdAccountId;
@@ -18,37 +18,38 @@ class _NavCtx {
   final String? embyAccountId;
   final String embyPath;
 
-  const _NavCtx.root({this.title})
-      : kind = _CtxKind.root,
+  const NavCtx.root()
+      : kind = CtxKind.root,
+        title = null,
         localDir = null,
         wdAccountId = null,
         wdRel = '',
         embyAccountId = null,
         embyPath = '';
 
-  const _NavCtx.local(this.localDir, {this.title})
-      : kind = _CtxKind.local,
+  const NavCtx.local(this.localDir, {this.title})
+      : kind = CtxKind.local,
         wdAccountId = null,
         wdRel = '',
         embyAccountId = null,
         embyPath = '';
 
-  const _NavCtx.webdav(
+  const NavCtx.webdav(
       {required this.wdAccountId, required this.wdRel, this.title})
-      : kind = _CtxKind.webdav,
+      : kind = CtxKind.webdav,
         localDir = null,
         embyAccountId = null,
         embyPath = '';
 
-  const _NavCtx.emby(
+  const NavCtx.emby(
       {required this.embyAccountId, this.embyPath = 'favorites', this.title})
-      : kind = _CtxKind.emby,
+      : kind = CtxKind.emby,
         localDir = null,
         wdAccountId = null,
         wdRel = '';
 }
 
-class _Entry {
+class Entry {
   final bool isDir;
   final String name;
   final int size;
@@ -70,7 +71,7 @@ class _Entry {
   final String? searchCollectionId;
   final String? searchCollectionName;
 
-  const _Entry({
+  const Entry({
     required this.isDir,
     required this.name,
     required this.size,
@@ -93,7 +94,7 @@ class _Entry {
   bool get isEmby => embyAccountId != null;
 
   String get displayPath => isWebDav
-      ? _buildWebDavSource(wdAccountId ?? '', wdRelPath ?? '', isDir: isDir)
+      ? buildWebDavSource(wdAccountId ?? '', wdRelPath ?? '')
       : (isEmby
           ? () {
               final id = (embyItemId ?? '').trim();
@@ -108,7 +109,7 @@ class _Entry {
   static const String kLoadingTypeKey = '__loading__';
   bool get isLoading => typeKey == kLoadingTypeKey;
 
-  static _Entry loading(int i) => _Entry(
+  static Entry loading(int i) => Entry(
         isDir: false,
         name: 'loading_$i',
         size: 0,

@@ -1,7 +1,7 @@
 part of '../pages.dart';
 
 extension _FolderEntryHelperMethods on _FolderDetailPageState {
-  TagKind _tagKindForEntry(_Entry e) {
+  TagKind _tagKindForEntry(Entry e) {
     if (e.isDir) return TagKind.other;
     if (e.isEmby) {
       if (e.typeKey == 'emby_image') return TagKind.image;
@@ -10,7 +10,7 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     return TagKindX.fromFilename(e.name);
   }
 
-  String _entrySelectionKey(_Entry e) {
+  String _entrySelectionKey(Entry e) {
     if (!_isEntrySelectable(e)) return '';
     if (e.isEmby || e.isWebDav) {
       return tagKeyForEntry(
@@ -27,7 +27,7 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     return (e.localPath ?? '').trim();
   }
 
-  bool _isEntrySelectable(_Entry e) {
+  bool _isEntrySelectable(Entry e) {
     if (e.isLoading) return false;
     if (e.typeKey == 'hint' ||
         e.typeKey == 'emby_login' ||
@@ -38,7 +38,7 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     return _entrySelectionKeyRaw(e).isNotEmpty;
   }
 
-  String _entrySelectionKeyRaw(_Entry e) {
+  String _entrySelectionKeyRaw(Entry e) {
     if (e.isEmby || e.isWebDav) {
       return tagKeyForEntry(
         isWebDav: e.isWebDav,
@@ -54,20 +54,7 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     return (e.localPath ?? '').trim();
   }
 
-  String _imageSourceKeyForEntry(_Entry e) => _entrySelectionKeyRaw(e);
-
-  String _embyImageSourceKey(String accountId, String itemId) {
-    return tagKeyForEntry(
-      isWebDav: false,
-      isEmby: true,
-      localPath: null,
-      wdAccountId: null,
-      wdRelPath: null,
-      wdHref: null,
-      embyAccountId: accountId,
-      embyItemId: itemId,
-    );
-  }
+  String _imageSourceKeyForEntry(Entry e) => _entrySelectionKeyRaw(e);
 
   String _webDavImageSourceKey({
     required String accountId,
@@ -93,21 +80,21 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     );
   }
 
-  Widget _wrapWithEntryAnchor(_Entry e, Widget child) {
+  Widget _wrapWithEntryAnchor(Entry e, Widget child) {
     final sourceKey = _imageSourceKeyForEntry(e).trim();
     if (sourceKey.isEmpty) return child;
     return KeyedSubtree(key: _entryAnchorKeyForSource(sourceKey), child: child);
   }
 
-  String _folderKeyForCtx(_NavCtx ctx) {
-    if (ctx.kind == _CtxKind.local) return (ctx.localDir ?? '').trim();
-    if (ctx.kind == _CtxKind.webdav) {
+  String _folderKeyForCtx(NavCtx ctx) {
+    if (ctx.kind == CtxKind.local) return (ctx.localDir ?? '').trim();
+    if (ctx.kind == CtxKind.webdav) {
       return buildWebDavSource(ctx.wdAccountId ?? '', ctx.wdRel);
     }
     return '';
   }
 
-  String _folderKeyForEntry(_Entry e) {
+  String _folderKeyForEntry(Entry e) {
     if (!e.isDir) return '';
     if (!e.isWebDav) return (e.localPath ?? '').trim();
     var rel = (e.wdRelPath ?? '').trim();
@@ -123,7 +110,7 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     return r;
   }
 
-  String _folderCoverCacheKey(_Entry e) {
+  String _folderCoverCacheKey(Entry e) {
     if (!e.isDir) return '';
     if (e.isEmby) {
       return buildEmbySource(
@@ -146,7 +133,7 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
       for (final it in ents) {
         if (it is File) {
           final name = p.basename(it.path);
-          if (_isImgName(name) || _isVidName(name)) n++;
+          if (isPageImageName(name) || isPageVideoName(name)) n++;
         }
       }
       return n;
@@ -155,7 +142,7 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     }
   }
 
-  void _prefillSkeletonForFolder(_Entry folder) {
+  void _prefillSkeletonForFolder(Entry folder) {
     final key = _folderKeyForEntry(folder);
     var n = 0;
     if (!folder.isWebDav) {
@@ -169,16 +156,17 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     n = n.clamp(0, 120);
     if (n <= 0) return;
 
-    _raw = List.generate(n, (i) => _Entry.loading(i));
+    _raw = List.generate(n, (i) => Entry.loading(i));
     _loading = false;
     _refreshFolderDetailState();
   }
 
-  void _updateFolderCountCacheFromList(_NavCtx ctx, List<_Entry> list) {
+  void _updateFolderCountCacheFromList(NavCtx ctx, List<Entry> list) {
     final key = _folderKeyForCtx(ctx);
     if (key.trim().isEmpty) return;
     final n = list
-        .where((e) => !e.isDir && (_isImgName(e.name) || _isVidName(e.name)))
+        .where((e) =>
+            !e.isDir && (isPageImageName(e.name) || isPageVideoName(e.name)))
         .length;
     if (n <= 0) return;
     _folderMediaCountCache[key] = n;

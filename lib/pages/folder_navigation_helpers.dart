@@ -2,20 +2,20 @@ part of '../pages.dart';
 
 extension _FolderNavigationHelperMethods on _FolderDetailPageState {
   String _stackBreadcrumb() {
-    String labelFor(_NavCtx ctx) {
+    String labelFor(NavCtx ctx) {
       final t = (ctx.title ?? '').trim();
       if (t.isNotEmpty) return t;
-      if (ctx.kind == _CtxKind.local) {
+      if (ctx.kind == CtxKind.local) {
         final v = p.basename(ctx.localDir ?? '').trim();
         return v.isEmpty ? '本地目录' : v;
       }
-      if (ctx.kind == _CtxKind.webdav) {
+      if (ctx.kind == CtxKind.webdav) {
         final rel = ctx.wdRel.endsWith('/')
             ? ctx.wdRel.substring(0, ctx.wdRel.length - 1)
             : ctx.wdRel;
         return rel.isEmpty ? 'WebDAV' : p.basename(rel);
       }
-      if (ctx.kind == _CtxKind.emby) {
+      if (ctx.kind == CtxKind.emby) {
         return ctx.embyPath == 'favorites' ? 'Emby 收藏' : 'Emby';
       }
       return widget.collection.name;
@@ -28,26 +28,26 @@ extension _FolderNavigationHelperMethods on _FolderDetailPageState {
     return nodes.join(' / ');
   }
 
-  _NavCtx? _navForDirectoryEntry(_Entry e) {
+  NavCtx? _navForDirectoryEntry(Entry e) {
     if (!e.isDir) return null;
     if (e.isEmby) {
       final id = (e.embyItemId ?? '').trim();
       final pth = id.isEmpty ? 'favorites' : 'view:$id';
-      return _NavCtx.emby(
+      return NavCtx.emby(
           embyAccountId: e.embyAccountId!, embyPath: pth, title: e.name);
     }
     if (e.isWebDav) {
       var rel = (e.wdRelPath ?? '').trim();
       if (rel.isNotEmpty && !rel.endsWith('/')) rel = '$rel/';
-      return _NavCtx.webdav(
+      return NavCtx.webdav(
           wdAccountId: e.wdAccountId!, wdRel: rel, title: e.name);
     }
     final lp = (e.localPath ?? '').trim();
     if (lp.isEmpty) return null;
-    return _NavCtx.local(lp, title: e.name);
+    return NavCtx.local(lp, title: e.name);
   }
 
-  Future<bool> _openCrossCollectionDirectoryFromSearch(_Entry e) async {
+  Future<bool> _openCrossCollectionDirectoryFromSearch(Entry e) async {
     if (!_usingScopeSearch || !e.isDir) return false;
     final searchCollectionId = (e.searchCollectionId ?? '').trim();
     if (searchCollectionId.isEmpty ||

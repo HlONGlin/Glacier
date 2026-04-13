@@ -83,7 +83,7 @@ class _HistoryPageState extends State<HistoryPage> {
     if (kind == 'fav' || kind == 'folder') {
       final cp = (coverPath ?? '').trim();
       if (cp.isNotEmpty) {
-        if (_isImg(cp)) {
+        if (isPageImagePath(cp)) {
           return ClipRRect(
             borderRadius: radius,
             child: Image.file(File(cp),
@@ -91,7 +91,7 @@ class _HistoryPageState extends State<HistoryPage> {
                 errorBuilder: (_, __, ___) => const _FolderPreviewBox()),
           );
         }
-        if (_isVid(cp)) {
+        if (isPageVideoPath(cp)) {
           return ClipRRect(
               borderRadius: radius, child: VideoThumbImage(videoPath: cp));
         }
@@ -182,7 +182,7 @@ class _HistoryPageState extends State<HistoryPage> {
       );
     }
 
-    final isImg = _isImg(path);
+    final isImg = isPageImagePath(path);
     if (isImg) {
       return ClipRRect(
           borderRadius: radius,
@@ -190,7 +190,7 @@ class _HistoryPageState extends State<HistoryPage> {
               fit: BoxFit.cover,
               errorBuilder: (_, __, ___) => const _CoverPlaceholder()));
     }
-    if (_isVid(path)) {
+    if (isPageVideoPath(path)) {
       return ClipRRect(
           borderRadius: radius, child: VideoThumbImage(videoPath: path));
     }
@@ -268,7 +268,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
                                     if (!_isWebDavPath(path) &&
                                         !_isEmbyPath(path) &&
-                                        _isImg(path)) {
+                                        isPageImagePath(path)) {
                                       Navigator.push(
                                           context,
                                           MaterialPageRoute(
@@ -390,29 +390,29 @@ class _HistoryPageState extends State<HistoryPage> {
 
       final title = (e['title'] ?? '').toString().trim();
 
-      late final _NavCtx nav;
+      late final NavCtx nav;
       late final String source;
 
       if (kind == 'local') {
         final dir = (e['localDir'] ?? '').toString().trim();
         if (dir.isEmpty) return;
-        nav = _NavCtx.local(dir, title: title.isEmpty ? null : title);
+        nav = NavCtx.local(dir, title: title.isEmpty ? null : title);
         source = dir;
       } else if (kind == 'webdav') {
         final accId = (e['wdAccountId'] ?? '').toString().trim();
         final rel = (e['wdRel'] ?? '').toString().trim();
         if (accId.isEmpty) return;
         final rel2 = rel.isEmpty ? '' : (rel.endsWith('/') ? rel : '$rel/');
-        nav = _NavCtx.webdav(
+        nav = NavCtx.webdav(
             wdAccountId: accId,
             wdRel: rel2,
             title: title.isEmpty ? null : title);
-        source = _buildWebDavSource(accId, rel2, isDir: true);
+        source = buildPageWebDavSource(accId, rel2, isDir: true);
       } else if (kind == 'emby') {
         final accId = (e['embyAccountId'] ?? '').toString().trim();
         final pth = (e['embyPath'] ?? '').toString().trim();
         if (accId.isEmpty) return;
-        nav = _NavCtx.emby(
+        nav = NavCtx.emby(
           embyAccountId: accId,
           embyPath: pth.isEmpty ? 'favorites' : pth,
           title: title.isEmpty ? null : title,

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
@@ -9,378 +8,20 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'emby.dart';
-import 'source_accounts.dart';
+import 'image_provider_helpers.dart';
+import 'image_preload_windows.dart';
+import 'image_overlay_layout_helpers.dart';
+import 'image_source_resolver.dart';
+import 'image_ratio_cache.dart';
+import 'image_strip_sync_helpers.dart';
+import 'image_strip_layout_helpers.dart';
+import 'image_viewer_render_helpers.dart';
 import 'video.dart';
-import 'source_refs.dart';
 import 'utils.dart';
+part 'image_tiles.dart';
+part 'image_strip_item.dart';
 
 // ===== media_image.dart =====
-
-/// ===============================
-/// Media Tile (List Item)
-/// ===============================
-/// ===============================
-/// 视频缩略图（列表/封面通用）
-/// ===============================
-///
-/// 设计目标：
-/// - “最小改动”下补回缺失的 VideoThumbImage，避免全项目编译失败。
-/// - 仅在需要时生成缩略图，避免滚动列表频繁抽帧造成卡顿。
-/// - 生成/读取失败时给出稳定占位图（不影响主功能）。
-class VideoThumbImage extends StatelessWidget {
-  final String videoPath;
-  final BoxFit fit;
-  final bool cacheOnly;
-
-  const VideoThumbImage({
-    super.key,
-    required this.videoPath,
-    this.fit = BoxFit.cover,
-    this.cacheOnly = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final p = videoPath.trim();
-    if (p.isEmpty) return const _ThumbPlaceholder();
-
-    // ✅ 这里用永久缩略图缓存（utils.dart: ThumbCache），避免每次滚动都重新抽帧。
-
-    // ✅ cacheOnly=true：只读缓存，不触发抽帧生成，避免在列表快速滚动时造成卡顿。
-    // 说明：某些页面（例如 WebDAV/标签列表）只想“有就显示，没有就占位”，因此提供此开关兼容旧调用。
-    if (cacheOnly) {
-      return FutureBuilder<File?>(
-        future: ThumbCache.getCachedVideoThumb(p),
-        builder: (context, snap) {
-          final f = snap.data;
-          if (f != null && f.existsSync() && f.lengthSync() > 0) {
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.file(f,
-                    fit: fit,
-                    filterQuality: FilterQuality.medium,
-                    gaplessPlayback: true),
-                const Align(
-                  alignment: Alignment.bottomRight,
-                  child: Padding(
-                    padding: EdgeInsets.all(4),
-                    child: Icon(Icons.play_circle_fill,
-                        size: 18, color: Colors.white70),
-                  ),
-                ),
-              ],
-            );
-          }
-          return const _ThumbPlaceholder();
-        },
-      );
-    }
-
-    // ✅ 这里用永久缩略图缓存（utils.dart: ThumbCache），避免每次滚动都重新抽帧。
-    return FutureBuilder<File?>(
-      future: ThumbCache.getOrCreateVideoThumb(p),
-      builder: (context, snap) {
-        final f = snap.data;
-        if (f != null && f.existsSync() && f.lengthSync() > 0) {
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              Image.file(
-                f,
-                fit: fit,
-                filterQuality: FilterQuality.medium,
-                gaplessPlayback: true,
-                errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
-              ),
-              // ✅ 叠加一个轻量的“播放”角标，便于区分图片/视频
-              const Align(
-                alignment: Alignment.bottomRight,
-                child: Padding(
-                  padding: EdgeInsets.all(6),
-                  child: Icon(Icons.play_circle_fill,
-                      size: 18, color: Colors.white70),
-                ),
-              ),
-            ],
-          );
-        }
-
-        // 生成中/失败：显示占位，保证列表稳定渲染
-        return const _ThumbPlaceholder();
-      },
-    );
-  }
-}
-
-class MediaTile extends StatelessWidget {
-  final String filePath;
-  final String? subtitleText;
-  final List<String> imagePaths;
-  final List<String> videoPaths;
-  final int initialImageIndex;
-  final int initialVideoIndex;
-  final Future<void> Function()? onBeforeOpenImage;
-
-  const MediaTile({
-    super.key,
-    required this.filePath,
-    this.subtitleText,
-    required this.imagePaths,
-    required this.videoPaths,
-    required this.initialImageIndex,
-    required this.initialVideoIndex,
-    this.onBeforeOpenImage,
-  });
-
-  bool get _isImage => ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']
-      .contains(p.extension(filePath).toLowerCase());
-
-  bool get _isVideo => [
-        '.mp4',
-        '.mkv',
-        '.mov',
-        '.avi',
-        '.wmv',
-        '.flv',
-        '.webm',
-        '.m4v'
-      ].contains(p.extension(filePath).toLowerCase());
-
-  @override
-  Widget build(BuildContext context) {
-    final name = p.basename(filePath);
-    final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
-    final thumbW = (110 * dpr).round().clamp(110, 440);
-    final thumbH = (90 * dpr).round().clamp(90, 360);
-
-    return Card(
-      child: ListTile(
-        leading: SizedBox(
-          width: 110,
-          height: 90,
-          child: _isImage
-              ? _LocalImageThumb(
-                  filePath: filePath,
-                  cacheWidth: thumbW,
-                  cacheHeight: thumbH,
-                  fit: BoxFit.cover,
-                )
-              : _isVideo
-                  ? VideoThumbImage(videoPath: filePath)
-                  : const _ThumbPlaceholder(),
-        ),
-        title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(subtitleText ?? filePath,
-            maxLines: 1, overflow: TextOverflow.ellipsis),
-        trailing:
-            Icon(_isImage ? Icons.image_outlined : Icons.play_circle_outline),
-        onTap: () async {
-          if (_isImage && imagePaths.isNotEmpty && initialImageIndex >= 0) {
-            // ✅ 允许外部在“打开图片前”做一些附加逻辑（例如：记录所在目录到历史）。
-            // 设计原因：MediaTile 组件本身不应该关心“收藏夹/目录”概念，因此通过回调注入。
-            try {
-              await onBeforeOpenImage?.call();
-            } catch (_) {}
-            if (!context.mounted) return;
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ImageViewerPage(
-                  imagePaths: imagePaths,
-                  initialIndex: initialImageIndex,
-                ),
-              ),
-            );
-          } else if (_isVideo &&
-              videoPaths.isNotEmpty &&
-              initialVideoIndex >= 0) {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => VideoPlayerPage(
-                  videoPaths: videoPaths,
-                  initialIndex: initialVideoIndex,
-                ),
-              ),
-            );
-          }
-        },
-      ),
-    );
-  }
-}
-
-class _AsyncLimiter {
-  final int maxConcurrent;
-  int _running = 0;
-  final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
-
-  _AsyncLimiter({required this.maxConcurrent});
-
-  Future<T> run<T>(Future<T> Function() action) async {
-    if (_running >= maxConcurrent) {
-      final gate = Completer<void>();
-      _waiters.addLast(gate);
-      await gate.future;
-    }
-    _running++;
-    try {
-      return await action();
-    } finally {
-      _running--;
-      if (_waiters.isNotEmpty) {
-        final next = _waiters.removeFirst();
-        if (!next.isCompleted) next.complete();
-      }
-    }
-  }
-}
-
-class _SharedImageProviderCacheEntry {
-  final ImageProvider provider;
-  final int cost;
-
-  const _SharedImageProviderCacheEntry({
-    required this.provider,
-    required this.cost,
-  });
-}
-
-class _SharedImageProviderCache {
-  static final LinkedHashMap<String, _SharedImageProviderCacheEntry> _cache =
-      LinkedHashMap<String, _SharedImageProviderCacheEntry>();
-  static const int _kCap = 512;
-  static const int _kMaxCost = 48 * 1000 * 1000;
-  static int _totalCost = 0;
-  static int _hitCount = 0;
-  static int _missCount = 0;
-  static int _evictionCount = 0;
-
-  static int _estimateCost(int width, int height) {
-    return max(1, width * height);
-  }
-
-  static ImageProvider local(
-    String filePath, {
-    required int width,
-    required int height,
-  }) {
-    final key = 'file|${filePath.trim()}|$width|$height';
-    final hit = _cache.remove(key);
-    if (hit != null) {
-      _hitCount++;
-      _cache[key] = hit;
-      return hit.provider;
-    }
-    _missCount++;
-    final provider = ResizeImage(
-      FileImage(File(filePath)),
-      width: width,
-      height: height,
-    );
-    final entry = _SharedImageProviderCacheEntry(
-      provider: provider,
-      cost: _estimateCost(width, height),
-    );
-    _cache[key] = entry;
-    _totalCost += entry.cost;
-    _trim();
-    return provider;
-  }
-
-  static ImageProvider network(
-    String url, {
-    Map<String, String>? headers,
-    required int width,
-    required int height,
-  }) {
-    final headerKey = headers == null || headers.isEmpty
-        ? ''
-        : (headers.entries.toList()..sort((a, b) => a.key.compareTo(b.key)))
-            .map((e) => '${e.key}=${e.value}')
-            .join('&');
-    final key = 'net|$url|$headerKey|$width|$height';
-    final hit = _cache.remove(key);
-    if (hit != null) {
-      _hitCount++;
-      _cache[key] = hit;
-      return hit.provider;
-    }
-    _missCount++;
-    final provider = ResizeImage(
-      NetworkImage(url, headers: headers),
-      width: width,
-      height: height,
-    );
-    final entry = _SharedImageProviderCacheEntry(
-      provider: provider,
-      cost: _estimateCost(width, height),
-    );
-    _cache[key] = entry;
-    _totalCost += entry.cost;
-    _trim();
-    return provider;
-  }
-
-  static void _trim() {
-    while (_cache.length > _kCap || _totalCost > _kMaxCost) {
-      final oldestKey = _cache.keys.first;
-      final removed = _cache.remove(oldestKey);
-      if (removed != null) {
-        _evictionCount++;
-        _totalCost = max(0, _totalCost - removed.cost);
-      }
-    }
-  }
-
-  // ignore: unused_element
-  static Map<String, int> debugSnapshot() {
-    return <String, int>{
-      'entries': _cache.length,
-      'totalCost': _totalCost,
-      'hitCount': _hitCount,
-      'missCount': _missCount,
-      'evictionCount': _evictionCount,
-    };
-  }
-}
-
-class _LocalImageThumb extends StatelessWidget {
-  final String filePath;
-  final int cacheWidth;
-  final int cacheHeight;
-  final BoxFit fit;
-
-  const _LocalImageThumb({
-    required this.filePath,
-    required this.cacheWidth,
-    required this.cacheHeight,
-    this.fit = BoxFit.cover,
-  });
-
-  ImageProvider _provider() {
-    return _SharedImageProviderCache.local(
-      filePath,
-      width: cacheWidth,
-      height: cacheHeight,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return RepaintBoundary(
-      child: Image(
-        image: _provider(),
-        fit: fit,
-        filterQuality: FilterQuality.low,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
-      ),
-    );
-  }
-}
 
 /// ===============================
 /// Image Viewer
@@ -423,7 +64,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   bool _landscape = false;
 
   // 视图状态
-  Color _bg = Colors.black;
+  final Color _bg = Colors.black;
   bool _uiVisible = true;
   bool _topHover = false;
   bool _disposed = false;
@@ -453,23 +94,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   static const _kRatioCacheKey = 'img_view_ratio_cache_v1';
 
   // WebDAV 解析缓存
-  final Map<String, Future<({String url, Map<String, String> headers})?>>
-      _webdavResolveFutureCache = {};
-  final Map<
-      String,
-      Future<
-          ({
-            String url,
-            Map<String, String> headers,
-            double? aspectRatio
-          })?>> _embyResolveFutureCache = {};
-  final Map<String, Future<EmbyItem?>> _embyItemFutureCache = {};
-  final Map<String, Future<Map<String, dynamic>?>> _webdavAccountFutureCache =
-      {};
-  Future<Map<String, EmbyAccount>>? _embyAccountsMapFuture;
-  static final _AsyncLimiter _remoteResolveLimiter =
-      _AsyncLimiter(maxConcurrent: 3);
-  static final _AsyncLimiter _precacheLimiter = _AsyncLimiter(maxConcurrent: 2);
+  late final ImageSourceResolver _sourceResolver;
+  static final AsyncLimiter _precacheLimiter = AsyncLimiter(maxConcurrent: 2);
 
   // 预加载控制
   final Set<int> _preloadedIndices = {};
@@ -477,90 +103,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   int _preloadGeneration = 0;
   int _lastPreloadCenter = -1;
   static const int _kMaxPreloadedEntries = 240;
-  static const int _kPreloadForward = 3;
-  static const int _kPreloadBackward = 2;
-  static const int _kStripActiveRadius = 8;
-  static const int _kStripWarmForward = 10;
-  static const int _kStripWarmBackward = 4;
-  int _stripActiveRadiusCurrent = _kStripActiveRadius;
+  int _stripActiveRadiusCurrent = ImagePreloadWindows.stripActiveRadius;
   late final ValueNotifier<int> _stripActiveRadiusVN;
   static const int _kStripDecodeWarmForward = 3;
   static const int _kStripDecodeWarmBackward = 1;
-
-  ({int forward, int backward}) _warmWindowForDelta(int delta) {
-    if (delta >= 4) {
-      return (forward: 16, backward: 5);
-    }
-    if (delta >= 2) {
-      return (forward: 13, backward: 5);
-    }
-    return (forward: _kStripWarmForward, backward: _kStripWarmBackward);
-  }
-
-  ({int forward, int backward}) _pagedWindowForDelta(int delta, int direction) {
-    if (delta >= 4) {
-      return direction >= 0
-          ? (forward: 8, backward: 2)
-          : (forward: 2, backward: 8);
-    }
-    if (delta >= 2) {
-      return direction >= 0
-          ? (forward: 6, backward: 2)
-          : (forward: 2, backward: 6);
-    }
-    return direction >= 0
-        ? (forward: _kPreloadForward + 2, backward: _kPreloadBackward)
-        : (forward: _kPreloadBackward + 2, backward: _kPreloadForward);
-  }
-
-  ({int forward, int backward}) _pagedSourceWarmWindowForDelta(
-      int delta, int direction) {
-    if (delta >= 4) {
-      return direction >= 0
-          ? (forward: 12, backward: 3)
-          : (forward: 3, backward: 12);
-    }
-    if (delta >= 2) {
-      return direction >= 0
-          ? (forward: 9, backward: 3)
-          : (forward: 3, backward: 9);
-    }
-    return direction >= 0
-        ? (forward: 7, backward: 2)
-        : (forward: 2, backward: 7);
-  }
-
-  int _activeRadiusForDelta(int delta) {
-    if (delta >= 4) return 12;
-    if (delta >= 2) return 10;
-    return _kStripActiveRadius;
-  }
-
-  // ============================
-  // 自然排序
-  // ============================
-  static int _naturalCompare(String a, String b) {
-    final reg = RegExp(r'(\d+)|(\D+)');
-    final ma = reg.allMatches(a).iterator;
-    final mb = reg.allMatches(b).iterator;
-
-    while (ma.moveNext() && mb.moveNext()) {
-      final partA = ma.current.group(0)!;
-      final partB = mb.current.group(0)!;
-
-      final isNumA = int.tryParse(partA);
-      final isNumB = int.tryParse(partB);
-
-      if (isNumA != null && isNumB != null) {
-        final cmp = isNumA.compareTo(isNumB);
-        if (cmp != 0) return cmp;
-      } else {
-        final cmp = partA.compareTo(partB);
-        if (cmp != 0) return cmp;
-      }
-    }
-    return a.length.compareTo(b.length);
-  }
 
   late final ValueNotifier<int> _indexVN;
 
@@ -590,112 +136,14 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     Navigator.of(context).pop<String>(key);
   }
 
-  bool _isWebDavSource(String s) => isWebDavSource(s);
-  bool _isEmbySource(String s) => isEmbySource(s);
+  bool _isWebDavSource(String s) => _sourceResolver.isWebDavSource(s);
+  bool _isEmbySource(String s) => _sourceResolver.isEmbySource(s);
 
-  Future<Map<String, dynamic>?> _loadWebDavAccountJson(String accountId) async {
-    try {
-      return await loadWebDavAccountJsonShared(accountId);
-    } catch (_) {
-      return null;
-    }
-  }
+  Future<ResolvedImageSource?> _webdavFutureFor(String source) =>
+      _sourceResolver.webdavFutureFor(source);
 
-  Future<Map<String, dynamic>?> _webdavAccountFutureFor(String accountId) {
-    return _webdavAccountFutureCache.putIfAbsent(
-      accountId,
-      () => _loadWebDavAccountJson(accountId),
-    );
-  }
-
-  Future<Map<String, EmbyAccount>> _embyAccountsMapFutureFor() {
-    return _embyAccountsMapFuture ??= loadEmbyAccountsMapShared();
-  }
-
-  Future<EmbyItem?> _embyItemFutureFor(EmbyClient client, String itemId) {
-    final key = '${client.account.id}|$itemId';
-    return _embyItemFutureCache.putIfAbsent(
-      key,
-      () async {
-        try {
-          return await client.getItemById(itemId);
-        } catch (_) {
-          return null;
-        }
-      },
-    );
-  }
-
-  Future<({String url, Map<String, String> headers})?> _resolveWebDav(
-      String source) async {
-    try {
-      final ref = parseWebDavSource(source);
-      if (ref == null) return null;
-      final accountId = ref.accountId;
-      final rel = encodePathPreserveSlash(ref.relPath);
-      final j = await _webdavAccountFutureFor(accountId);
-      if (j == null) return null;
-
-      final baseUrl = (j['baseUrl'] ?? '').toString();
-      final username = (j['username'] ?? '').toString();
-      final password = (j['password'] ?? '').toString();
-      if (baseUrl.isEmpty) return null;
-
-      final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
-      final url = Uri.parse(base).resolve(rel).toString();
-      final token = base64Encode(utf8.encode('$username:$password'));
-      final headers = <String, String>{
-        HttpHeaders.authorizationHeader: 'Basic $token'
-      };
-      return (url: url, headers: headers);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<({String url, Map<String, String> headers})?> _webdavFutureFor(
-      String source) {
-    return _webdavResolveFutureCache.putIfAbsent(
-      source,
-      () => _remoteResolveLimiter.run(() => _resolveWebDav(source)),
-    );
-  }
-
-  Future<({String url, Map<String, String> headers, double? aspectRatio})?>
-      _resolveEmby(String source) async {
-    try {
-      final ref = parseEmbySourceRef(source);
-      if (ref == null) return null;
-      final map = await _embyAccountsMapFutureFor();
-      final account = map[ref.accountId];
-      if (account == null) return null;
-      final client = EmbyClient(account);
-      final item = await _embyItemFutureFor(client, ref.itemId);
-      var url = '';
-      if (item != null) {
-        url = client.bestImageUrl(item).trim();
-      }
-      if (url.isEmpty) {
-        url = client.originalImageUrl(ref.itemId).trim();
-      }
-      if (url.isEmpty) return null;
-      return (
-        url: url,
-        headers: client.imageHeaders(),
-        aspectRatio: item?.primaryImageAspectRatio
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<({String url, Map<String, String> headers, double? aspectRatio})?>
-      _embyFutureFor(String source) {
-    return _embyResolveFutureCache.putIfAbsent(
-      source,
-      () => _remoteResolveLimiter.run(() => _resolveEmby(source)),
-    );
-  }
+  Future<ResolvedEmbyImageSource?> _embyFutureFor(String source) =>
+      _sourceResolver.embyFutureFor(source);
 
   int _targetCacheWidth() {
     if (!mounted) return 1920;
@@ -741,7 +189,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         final r = await _webdavFutureFor(src);
         if (generation != _preloadGeneration) return;
         if (r == null || _disposed) return;
-        provider = _SharedImageProviderCache.network(
+        provider = SharedImageProviderCache.network(
           r.url,
           headers: r.headers,
           width: cacheWidth,
@@ -751,14 +199,14 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         final r = await _embyFutureFor(src);
         if (generation != _preloadGeneration) return;
         if (r == null || _disposed) return;
-        provider = _SharedImageProviderCache.network(
+        provider = SharedImageProviderCache.network(
           r.url,
           headers: r.headers,
           width: cacheWidth,
           height: cacheHeight,
         );
       } else if (src.startsWith('http://') || src.startsWith('https://')) {
-        provider = _SharedImageProviderCache.network(
+        provider = SharedImageProviderCache.network(
           src,
           width: cacheWidth,
           height: cacheHeight,
@@ -766,7 +214,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       } else {
         final f = File(src);
         if (await f.exists()) {
-          provider = _SharedImageProviderCache.local(
+          provider = SharedImageProviderCache.local(
             src,
             width: cacheWidth,
             height: cacheHeight,
@@ -791,7 +239,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     final direction =
         _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).sign;
     _lastPreloadCenter = centerIndex;
-    final window = _pagedWindowForDelta(deltaRaw, direction);
+    final window = ImagePreloadWindows.pagedWindowForDelta(deltaRaw, direction);
     _warmPagedSourcesAround(centerIndex,
         deltaRaw: deltaRaw, direction: direction);
     final plan = <int>[centerIndex];
@@ -817,7 +265,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
   void _warmPagedSourcesAround(int centerIndex,
       {required int deltaRaw, required int direction}) {
-    final window = _pagedSourceWarmWindowForDelta(deltaRaw, direction);
+    final window = ImagePreloadWindows.pagedSourceWarmWindowForDelta(
+      deltaRaw,
+      direction,
+    );
     final plan = <int>[centerIndex];
     if (direction >= 0) {
       for (int i = 1; i <= window.forward; i++) {
@@ -850,8 +301,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).abs();
     final direction =
         _lastPreloadCenter == -1 ? 0 : (centerIndex - _lastPreloadCenter).sign;
-    final window = _warmWindowForDelta(deltaRaw);
-    final nextRadius = _activeRadiusForDelta(deltaRaw);
+    final window = ImagePreloadWindows.warmWindowForDelta(deltaRaw);
+    final nextRadius = ImagePreloadWindows.activeRadiusForDelta(deltaRaw);
     _stripActiveRadiusCurrent = nextRadius;
     if (_stripActiveRadiusVN.value != nextRadius) {
       _stripActiveRadiusVN.value = nextRadius;
@@ -923,140 +374,48 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
   Widget _buildSingleImage(String source, {required int index}) {
     final isLightBg = _bg == Colors.white;
+    final cacheWidth = _targetCacheWidth();
+    final cacheHeight = _targetCacheHeight();
 
     Widget imageWidget;
 
     if (_isWebDavSource(source)) {
-      imageWidget = FutureBuilder(
+      imageWidget = ImageViewerRenderHelpers.buildWebDavImage(
+        context: context,
         future: _webdavFutureFor(source),
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return Center(
-                child: _LoadingThumb(progress: null, lightText: !isLightBg));
-          }
-          final resolved = snap.data;
-          if (resolved == null) {
-            return const Center(
-                child: Text('无法解析', style: TextStyle(color: Colors.white54)));
-          }
-          return Image(
-            image: _SharedImageProviderCache.network(
-              resolved.url,
-              headers: resolved.headers,
-              width: _targetCacheWidth(),
-              height: _targetCacheHeight(),
-            ),
-            fit: BoxFit.contain,
-            filterQuality: FilterQuality.medium,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => const Center(
-              child: Icon(Icons.broken_image, color: Colors.white54),
-            ),
-            loadingBuilder: (ctx, child, loading) {
-              if (loading == null) return child;
-              final expected = loading.expectedTotalBytes;
-              final loaded = loading.cumulativeBytesLoaded;
-              final p = (expected != null && expected > 0)
-                  ? (loaded / expected).clamp(0.0, 1.0)
-                  : null;
-              return Center(
-                  child: _LoadingThumb(progress: p, lightText: !isLightBg));
-            },
-          );
-        },
+        cacheWidth: cacheWidth,
+        cacheHeight: cacheHeight,
+        lightText: !isLightBg,
+        loadingBuilder: (progress, lightText) =>
+            _LoadingThumb(progress: progress, lightText: lightText),
       );
     } else if (_isEmbySource(source)) {
-      imageWidget = FutureBuilder(
+      imageWidget = ImageViewerRenderHelpers.buildEmbyImage(
+        context: context,
         future: _embyFutureFor(source),
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return Center(
-                child: _LoadingThumb(progress: null, lightText: !isLightBg));
-          }
-          final resolved = snap.data;
-          if (resolved == null) {
-            return const Center(
-                child: Text('无法解析', style: TextStyle(color: Colors.white54)));
-          }
-          // 宽度占满屏幕，高度按比例自动调整
-          final screenSize = MediaQuery.of(context).size;
-          final screenWidth = screenSize.width;
-          double imageHeight = screenSize.height; // 默认高度
-          if (resolved.aspectRatio != null && resolved.aspectRatio! > 0) {
-            imageHeight = screenWidth / resolved.aspectRatio!;
-          }
-          return SizedBox(
-            width: screenWidth,
-            height: imageHeight,
-            child: Image(
-              image: _SharedImageProviderCache.network(
-                resolved.url,
-                headers: resolved.headers,
-                width: _targetCacheWidth(),
-                height: _targetCacheHeight(),
-              ),
-              fit: BoxFit.fill,
-              filterQuality: FilterQuality.medium,
-              gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => const Center(
-                child: Icon(Icons.broken_image, color: Colors.white54),
-              ),
-              loadingBuilder: (ctx, child, loading) {
-                if (loading == null) return child;
-                final expected = loading.expectedTotalBytes;
-                final loaded = loading.cumulativeBytesLoaded;
-                final p = (expected != null && expected > 0)
-                    ? (loaded / expected).clamp(0.0, 1.0)
-                    : null;
-                return Center(
-                    child: _LoadingThumb(progress: p, lightText: !isLightBg));
-              },
-            ),
-          );
-        },
+        cacheWidth: cacheWidth,
+        cacheHeight: cacheHeight,
+        lightText: !isLightBg,
+        loadingBuilder: (progress, lightText) =>
+            _LoadingThumb(progress: progress, lightText: lightText),
       );
     } else if (source.startsWith('http://') || source.startsWith('https://')) {
-      imageWidget = Image(
-        image: _SharedImageProviderCache.network(
-          source,
-          width: _targetCacheWidth(),
-          height: _targetCacheHeight(),
-        ),
-        fit: BoxFit.contain,
-        filterQuality: FilterQuality.medium,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => const Center(
-          child: Icon(Icons.broken_image, color: Colors.white54),
-        ),
-        loadingBuilder: (ctx, child, loading) {
-          if (loading == null) return child;
-          final expected = loading.expectedTotalBytes;
-          final loaded = loading.cumulativeBytesLoaded;
-          final p = (expected != null && expected > 0)
-              ? (loaded / expected).clamp(0.0, 1.0)
-              : null;
-          return Center(
-              child: _LoadingThumb(progress: p, lightText: !isLightBg));
-        },
+      imageWidget = ImageViewerRenderHelpers.buildNetworkImage(
+        source: source,
+        cacheWidth: cacheWidth,
+        cacheHeight: cacheHeight,
+        lightText: !isLightBg,
+        loadingBuilder: (progress, lightText) =>
+            _LoadingThumb(progress: progress, lightText: lightText),
       );
     } else {
-      imageWidget = Image(
-        image: _SharedImageProviderCache.local(
-          source,
-          width: _targetCacheWidth(),
-          height: _targetCacheHeight(),
-        ),
-        fit: BoxFit.contain,
-        filterQuality: FilterQuality.medium,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => const Center(
-          child: Icon(Icons.broken_image, color: Colors.white54),
-        ),
-        frameBuilder: (ctx, child, frame, wasSyncLoaded) {
-          if (wasSyncLoaded || frame != null) return child;
-          return Center(
-              child: _LoadingThumb(progress: null, lightText: !isLightBg));
-        },
+      imageWidget = ImageViewerRenderHelpers.buildLocalImage(
+        source: source,
+        cacheWidth: cacheWidth,
+        cacheHeight: cacheHeight,
+        lightText: !isLightBg,
+        loadingBuilder: (progress, lightText) =>
+            _LoadingThumb(progress: progress, lightText: lightText),
       );
     }
 
@@ -1083,7 +442,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   Future<void> _loadViewerPrefs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      _StripImageItemState.restoreRatioCacheFromJson(
+      ImageRatioCache.restoreFromJson(
         prefs.getString(_kRatioCacheKey),
       );
       final sm = prefs.getBool(_kStripModeKey);
@@ -1128,11 +487,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     if (total == 0) return;
     final safeIdx = idx.clamp(0, total - 1);
 
-    // 与 StripImageItem.placeholderH 保持一致的估算高度。
-    // 这里不追求精准，只要能把目标拉进可视区附近即可。
-    const placeholderH = 220.0;
-    const gap = 12.0;
-    final est = safeIdx * (placeholderH + gap);
+    final est = ImageStripLayoutHelpers.estimateOffsetForIndex(safeIdx);
 
     try {
       final max = _stripController.position.maxScrollExtent;
@@ -1158,7 +513,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   Future<void> _persistRatioCache() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = _StripImageItemState.exportRatioCacheJson(maxEntries: 400);
+      final raw = ImageRatioCache.exportJson(maxEntries: 400);
       if (raw.isEmpty) {
         await prefs.remove(_kRatioCacheKey);
       } else {
@@ -1199,6 +554,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   @override
   void initState() {
     super.initState();
+    _sourceResolver = ImageSourceResolver();
 
     // 进入看图模式时中断后台任务
     // WebDavBackgroundHttpPool.instance.abortAll();
@@ -1317,7 +673,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         }
         if (!_stripController.hasClients) return;
         final direction = idx > oldIndex ? 1.0 : -1.0;
-        final delta = MediaQuery.of(context).size.height * 0.82;
+        final delta = ImageStripLayoutHelpers.pageJumpDelta(context);
         final min = _stripController.position.minScrollExtent;
         final max = _stripController.position.maxScrollExtent;
         final target =
@@ -1348,9 +704,11 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _lastWheelAt = now;
     _removeContextMenu();
     final dy = e.scrollDelta.dy;
-    if (dy > 0)
+    if (dy > 0) {
       _jumpToIndex(_index + 1);
-    else if (dy < 0) _jumpToIndex(_index - 1);
+    } else if (dy < 0) {
+      _jumpToIndex(_index - 1);
+    }
   }
 
   void _onStripScroll() {
@@ -1364,27 +722,32 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   void _syncIndexFromStripViewport() {
     final total = widget.imagePaths.length;
     if (total == 0 || !mounted) return;
-    final safeTop = MediaQuery.of(context).padding.top + 8.0;
+    final safeTop = ImageStripLayoutHelpers.safeTopOffset(context);
 
     int bestIndex = _index;
     double bestScore = double.infinity;
-    final start = (_index - 10).clamp(0, total - 1);
-    final end = (_index + 10).clamp(0, total - 1);
+    final window = ImageStripSyncHelpers.scanWindow(
+      currentIndex: _index,
+      total: total,
+    );
 
-    for (int i = start; i <= end; i++) {
+    for (int i = window.start; i <= window.end; i++) {
       final ctx = _stripKeys[i].currentContext;
       if (ctx == null) continue;
       final ro = ctx.findRenderObject();
       if (ro is! RenderBox || !ro.hasSize) continue;
       final dy = ro.localToGlobal(Offset.zero).dy;
-      final score = (dy - safeTop).abs();
+      final score = ImageStripSyncHelpers.scoreForDy(dy: dy, safeTop: safeTop);
       if (score < bestScore) {
         bestScore = score;
         bestIndex = i;
       }
     }
 
-    if (bestIndex != _index) {
+    if (ImageStripSyncHelpers.shouldCommitBestIndex(
+      currentIndex: _index,
+      bestIndex: bestIndex,
+    )) {
       _index = bestIndex;
       _indexVN.value = bestIndex;
       if (_viewerPrefsLoaded) {
@@ -1405,7 +768,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     // 尽量把当前图片滚到视窗中间附近，解决“上下拼接模式无法定位到当前图片”
     Scrollable.ensureVisible(
       ctx,
-      alignment: 0.15,
+      alignment: ImageStripLayoutHelpers.visibleAlignment,
       duration: const Duration(milliseconds: 260),
       curve: Curves.easeOut,
     );
@@ -1440,8 +803,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _sizeMenuEntry?.remove();
     _sizeMenuEntry = null;
 
-    const menuWidth = 240.0;
-    const pad = 8.0;
+    const menuWidth = ImageOverlayLayoutHelpers.sizeMenuWidth;
     final isLight = _bg == Colors.white;
     final fg = isLight ? Colors.black : Colors.white;
 
@@ -1468,9 +830,15 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       );
     }
 
-    final left = (parentLeft + parentWidth + 6.0)
-        .clamp(pad, overlaySize.width - menuWidth - pad);
-    final top = parentTop.clamp(pad, overlaySize.height - pad);
+    final left = ImageOverlayLayoutHelpers.sizeMenuLeft(
+      parentLeft: parentLeft,
+      parentWidth: parentWidth,
+      overlaySize: overlaySize,
+    );
+    final top = ImageOverlayLayoutHelpers.sizeMenuTop(
+      parentTop: parentTop,
+      overlaySize: overlaySize,
+    );
 
     _sizeMenuEntry = OverlayEntry(
       builder: (_) => Positioned(
@@ -1503,22 +871,22 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       ),
     );
 
-    Overlay.of(context, rootOverlay: true)?.insert(_sizeMenuEntry!);
+    Overlay.of(context, rootOverlay: true).insert(_sizeMenuEntry!);
   }
 
   Future<void> _showContextMenu(Offset globalPos) async {
     _removeContextMenu();
     final overlayState = Overlay.of(context, rootOverlay: true);
-    if (overlayState == null) return;
 
     void insert(Size overlaySize) {
       if (!mounted) return;
       if (_contextMenuEntry != null) return;
 
-      const menuWidth = 220.0;
-      const pad = 8.0;
-      final dx = globalPos.dx.clamp(pad, overlaySize.width - pad);
-      final dy = globalPos.dy.clamp(pad, overlaySize.height - pad);
+      const menuWidth = ImageOverlayLayoutHelpers.contextMenuWidth;
+      final dx =
+          ImageOverlayLayoutHelpers.clampPointX(globalPos.dx, overlaySize);
+      final dy =
+          ImageOverlayLayoutHelpers.clampPointY(globalPos.dy, overlaySize);
 
       final isLight = _bg == Colors.white;
       final fg = isLight ? Colors.black : Colors.white;
@@ -1547,17 +915,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         );
       }
 
-      final left = (dx + menuWidth <= overlaySize.width - pad)
-          ? dx
-          : (dx - menuWidth).clamp(pad, overlaySize.width - menuWidth - pad);
-
-      // ✅ 菜单项数量：用于估算高度，避免弹窗跑出屏幕。
       final itemCount = 1 + (_stripMode ? 1 : 0) + (_canRotate ? 1 : 0) + 1 + 1;
-      final estH = itemCount * 44.0;
-
-      final top = (dy + estH <= overlaySize.height - pad)
-          ? dy
-          : (dy - estH).clamp(pad, overlaySize.height - estH - pad);
+      final left = ImageOverlayLayoutHelpers.contextMenuLeft(dx, overlaySize);
+      final top = ImageOverlayLayoutHelpers.contextMenuTop(
+        dy: dy,
+        overlaySize: overlaySize,
+        itemCount: itemCount,
+      );
 
       _contextMenuEntry = OverlayEntry(
         builder: (_) => Stack(
@@ -1685,7 +1049,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   @override
   Widget build(BuildContext context) {
     final total = widget.imagePaths.length;
-    final fg = Colors.white;
+    const fg = Colors.white;
 
     return PopScope(
       canPop: false,
@@ -1992,624 +1356,6 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                     ),
                   ),
                 ),
-        ),
-      ),
-    );
-  }
-}
-
-/// ===============================
-/// ✅ 拼接模式专用：占位高度 -> 真实高度 AnimatedSize
-/// ===============================
-class StripImageItem extends StatefulWidget {
-  final String source;
-  final double targetW;
-  final Color bg;
-  final bool showIndexBadge;
-  final int index;
-  final double? initialRatio;
-  final double placeholderH;
-
-  final Future<({String url, Map<String, String> headers})?> Function(String)
-      webdavFutureFor;
-  final Future<
-          ({String url, Map<String, String> headers, double? aspectRatio})?>
-      Function(String) embyFutureFor;
-  final bool Function(String) isWebDavSource;
-  final bool Function(String) isEmbySource;
-  final ValueListenable<int> centerListenable;
-  final ValueListenable<int> activeRadiusListenable;
-
-  const StripImageItem({
-    super.key,
-    required this.source,
-    required this.targetW,
-    required this.bg,
-    required this.showIndexBadge,
-    required this.index,
-    this.initialRatio,
-    required this.webdavFutureFor,
-    required this.embyFutureFor,
-    required this.isWebDavSource,
-    required this.isEmbySource,
-    required this.centerListenable,
-    required this.activeRadiusListenable,
-    this.placeholderH = 220,
-  });
-
-  @override
-  State<StripImageItem> createState() => _StripImageItemState();
-}
-
-class _StripImageItemState extends State<StripImageItem>
-    with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
-  static final LinkedHashMap<String, double> _ratioCache =
-      LinkedHashMap<String, double>();
-  static const int _kRatioCacheCap = 800;
-
-  static String exportRatioCacheJson({int maxEntries = 400}) {
-    if (_ratioCache.isEmpty || maxEntries <= 0) return '';
-    final entries = _ratioCache.entries.toList();
-    final start = entries.length > maxEntries ? entries.length - maxEntries : 0;
-    final map = <String, double>{};
-    for (final entry in entries.sublist(start)) {
-      final v = entry.value;
-      if (v > 0 && v.isFinite) {
-        map[entry.key] = v;
-      }
-    }
-    if (map.isEmpty) return '';
-    return jsonEncode(map);
-  }
-
-  static void restoreRatioCacheFromJson(String? raw) {
-    if (raw == null || raw.trim().isEmpty) return;
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return;
-      for (final entry in decoded.entries) {
-        final key = entry.key.toString().trim();
-        if (key.isEmpty) continue;
-        final value = entry.value;
-        final ratio =
-            value is num ? value.toDouble() : double.tryParse('$value');
-        if (ratio == null || ratio <= 0 || !ratio.isFinite) continue;
-        _ratioCache.remove(key);
-        _ratioCache[key] = ratio;
-      }
-      while (_ratioCache.length > _kRatioCacheCap) {
-        _ratioCache.remove(_ratioCache.keys.first);
-      }
-    } catch (_) {}
-  }
-
-  double? _ratio; // w/h
-  bool _listening = false;
-  bool _hasEverLoaded = false;
-  bool _ratioProbeStarted = false;
-  late bool _eagerLoad;
-  Future<({String url, Map<String, String> headers})?>? _webdavFuture;
-  Future<({String url, Map<String, String> headers, double? aspectRatio})?>?
-      _embyFuture;
-
-  String get _sourceKey => widget.source.trim();
-
-  bool get _lightText => widget.bg != Colors.white;
-  BoxFit get _stripFit => _ratio == null ? BoxFit.contain : BoxFit.fitWidth;
-
-  double get _currentHeight {
-    if (_ratio == null || _ratio! <= 0) return widget.placeholderH;
-    final h = widget.targetW / _ratio!;
-    // 限制最大高度为屏幕高度的 2 倍，避免超宽图片占满屏幕
-    final maxH = MediaQuery.of(context).size.height * 2;
-    return h.clamp(80.0, maxH);
-  }
-
-  int _decodeWidth() {
-    final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
-    return max(256, (widget.targetW * dpr).round());
-  }
-
-  int _decodeHeight() {
-    final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
-    return max(256, (_currentHeight * dpr).round());
-  }
-
-  void _rememberRatio(double ratio) {
-    if (ratio <= 0 || !ratio.isFinite) return;
-    final key = _sourceKey;
-    if (key.isEmpty) return;
-    _ratioCache.remove(key);
-    _ratioCache[key] = ratio;
-    while (_ratioCache.length > _kRatioCacheCap) {
-      _ratioCache.remove(_ratioCache.keys.first);
-    }
-  }
-
-  bool _applyCachedRatio() {
-    final cached = _ratioCache[_sourceKey];
-    if (cached == null || cached <= 0 || !cached.isFinite) return false;
-    _ratio = cached;
-    return true;
-  }
-
-  bool _computeEagerLoad() {
-    return (widget.index - widget.centerListenable.value).abs() <=
-        widget.activeRadiusListenable.value;
-  }
-
-  void _handleEagerInputsChanged() {
-    final next = _computeEagerLoad();
-    if (next == _eagerLoad) return;
-    _eagerLoad = next;
-    if (_eagerLoad) {
-      _ensureRatioProbeStarted();
-    }
-    updateKeepAlive();
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void initState() {
-    _eagerLoad = _computeEagerLoad();
-    super.initState();
-    widget.centerListenable.addListener(_handleEagerInputsChanged);
-    widget.activeRadiusListenable.addListener(_handleEagerInputsChanged);
-    final seeded = widget.initialRatio;
-    if (seeded != null && seeded > 0 && seeded.isFinite) {
-      _ratio = seeded;
-      _rememberRatio(seeded);
-    }
-    _applyCachedRatio();
-    // 如果没有 cached ratio 且是 Emby source，尝试从 item 元数据获取 aspectRatio
-    if (_ratio == null && widget.isEmbySource(widget.source)) {
-      _fetchEmbyAspectRatio();
-    }
-    if (_eagerLoad) {
-      _ensureRatioProbeStarted();
-    }
-  }
-
-  Future<void> _fetchEmbyAspectRatio() async {
-    try {
-      final result = await widget.embyFutureFor(widget.source);
-      if (result != null &&
-          result.aspectRatio != null &&
-          result.aspectRatio! > 0 &&
-          result.aspectRatio!.isFinite) {
-        if (mounted) {
-          setState(() {
-            _ratio = result.aspectRatio;
-            _rememberRatio(result.aspectRatio!);
-          });
-        }
-      }
-    } catch (_) {}
-  }
-
-  @override
-  void didUpdateWidget(covariant StripImageItem oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.centerListenable != widget.centerListenable) {
-      oldWidget.centerListenable.removeListener(_handleEagerInputsChanged);
-      widget.centerListenable.addListener(_handleEagerInputsChanged);
-    }
-    if (oldWidget.activeRadiusListenable != widget.activeRadiusListenable) {
-      oldWidget.activeRadiusListenable
-          .removeListener(_handleEagerInputsChanged);
-      widget.activeRadiusListenable.addListener(_handleEagerInputsChanged);
-    }
-    _handleEagerInputsChanged();
-    if (oldWidget.source != widget.source) {
-      _ratio = null;
-      _listening = false;
-      _hasEverLoaded = false;
-      _ratioProbeStarted = false;
-      _webdavFuture = null;
-      _embyFuture = null;
-      final seeded = widget.initialRatio;
-      if (seeded != null && seeded > 0 && seeded.isFinite) {
-        _ratio = seeded;
-        _rememberRatio(seeded);
-      }
-      _applyCachedRatio();
-      // 如果没有 cached ratio 且是 Emby source，尝试获取 aspect ratio
-      if (_ratio == null && widget.isEmbySource(widget.source)) {
-        _fetchEmbyAspectRatio();
-      }
-      if (_eagerLoad) {
-        _ensureRatioProbeStarted();
-      }
-    }
-  }
-
-  Widget _badgeWrap(Widget child) {
-    if (!widget.showIndexBadge) return child;
-    return Stack(
-      children: [
-        Positioned.fill(child: child),
-        Positioned(
-            left: 10, top: 10, child: _IndexBadge(text: '${widget.index + 1}')),
-      ],
-    );
-  }
-
-  void _resolveSizeOnce(ImageProvider provider) {
-    if (_ratio != null && _ratio! > 0) return;
-    if (_applyCachedRatio()) {
-      return;
-    }
-    if (_listening) return;
-    _listening = true;
-
-    final stream = provider.resolve(const ImageConfiguration());
-    late final ImageStreamListener listener;
-
-    listener = ImageStreamListener((ImageInfo info, bool sync) {
-      final w = info.image.width.toDouble();
-      final h = info.image.height.toDouble();
-      if (mounted && w > 0 && h > 0) {
-        final next = w / h;
-        _rememberRatio(next);
-
-        // ✅ 关键修复：拼接模式下，图片可能“同步命中缓存”（sync=true）。
-        // 如果在 build()/FutureBuilder builder 过程中立刻 setState，
-        // Flutter 会报错：setState() called during build，并诱发偶发“叠图/需要点击才恢复”。
-        // 因此同步命中时延迟到下一帧更新高度，保证布局稳定。
-        if (sync) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            setState(() => _ratio = next);
-          });
-        } else {
-          setState(() => _ratio = next);
-        }
-      }
-      stream.removeListener(listener);
-    }, onError: (e, s) {
-      stream.removeListener(listener);
-      _listening = false;
-    });
-
-    stream.addListener(listener);
-  }
-
-  void _ensureRatioProbeStarted() {
-    if (_ratio != null && _ratio! > 0) return;
-    if (_applyCachedRatio()) return;
-    if (_ratioProbeStarted) return;
-    _ratioProbeStarted = true;
-    unawaited(_probeRatioAsync());
-  }
-
-  Future<void> _probeRatioAsync() async {
-    try {
-      final src = widget.source;
-      if (widget.isWebDavSource(src)) {
-        final future = _webdavFuture ??= widget.webdavFutureFor(src);
-        final resolved = await future;
-        if (!mounted || resolved == null) return;
-        _resolveSizeOnce(NetworkImage(resolved.url, headers: resolved.headers));
-        return;
-      }
-      if (widget.isEmbySource(src)) {
-        final future = _embyFuture ??= widget.embyFutureFor(src);
-        final resolved = await future;
-        if (!mounted || resolved == null) return;
-        _resolveSizeOnce(NetworkImage(resolved.url, headers: resolved.headers));
-        return;
-      }
-      if (src.startsWith('http://') || src.startsWith('https://')) {
-        _resolveSizeOnce(NetworkImage(src));
-        return;
-      }
-      _resolveSizeOnce(FileImage(File(src)));
-    } catch (_) {
-      _ratioProbeStarted = false;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.topCenter,
-      child: SizedBox(
-        width: widget.targetW,
-        height: _currentHeight,
-        child: ClipRect(
-          child: _badgeWrap(_buildImage()),
-        ),
-      ),
-    );
-  }
-
-  @override
-  bool get wantKeepAlive => _eagerLoad;
-
-  Widget _buildImage() {
-    if (!_eagerLoad && !_hasEverLoaded) {
-      return _LoadingThumb(progress: null, lightText: _lightText);
-    }
-
-    if (_eagerLoad) {
-      _ensureRatioProbeStarted();
-    }
-
-    final src = widget.source;
-    final decodeW = _decodeWidth();
-    final decodeH = _decodeHeight();
-
-    // WebDAV
-    if (widget.isWebDavSource(src)) {
-      final future = _webdavFuture ??= widget.webdavFutureFor(src);
-      return FutureBuilder(
-        future: future,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return _LoadingThumb(progress: null, lightText: _lightText);
-          }
-          final resolved = snap.data;
-          if (resolved == null) {
-            return const Center(
-                child: Icon(Icons.broken_image, color: Colors.white54));
-          }
-          _hasEverLoaded = true;
-
-          final provider = _SharedImageProviderCache.network(
-            resolved.url,
-            headers: resolved.headers,
-            width: decodeW,
-            height: decodeH,
-          );
-          if (_ratio == null) {
-            return _LoadingThumb(progress: null, lightText: _lightText);
-          }
-
-          return Image(
-            image: provider,
-            fit: _stripFit,
-            filterQuality: FilterQuality.medium,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => const Center(
-                child: Icon(Icons.broken_image, color: Colors.white54)),
-            loadingBuilder: (ctx, child, loading) {
-              if (loading == null) return child;
-              final expected = loading.expectedTotalBytes;
-              final loaded = loading.cumulativeBytesLoaded;
-              final p = (expected != null && expected > 0)
-                  ? (loaded / expected).clamp(0.0, 1.0)
-                  : null;
-              return _LoadingThumb(progress: p, lightText: _lightText);
-            },
-          );
-        },
-      );
-    }
-
-    // Emby
-    if (widget.isEmbySource(src)) {
-      final future = _embyFuture ??= widget.embyFutureFor(src);
-      return FutureBuilder(
-        future: future,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return _LoadingThumb(progress: null, lightText: _lightText);
-          }
-          final resolved = snap.data;
-          if (resolved == null) {
-            return const Center(
-                child: Icon(Icons.broken_image, color: Colors.white54));
-          }
-          _hasEverLoaded = true;
-
-          final provider = _SharedImageProviderCache.network(
-            resolved.url,
-            headers: resolved.headers,
-            width: decodeW,
-            height: decodeH,
-          );
-          if (_ratio == null) {
-            return _LoadingThumb(progress: null, lightText: _lightText);
-          }
-
-          return Image(
-            image: provider,
-            fit: _stripFit,
-            filterQuality: FilterQuality.medium,
-            gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => const Center(
-                child: Icon(Icons.broken_image, color: Colors.white54)),
-            loadingBuilder: (ctx, child, loading) {
-              if (loading == null) return child;
-              final expected = loading.expectedTotalBytes;
-              final loaded = loading.cumulativeBytesLoaded;
-              final p = (expected != null && expected > 0)
-                  ? (loaded / expected).clamp(0.0, 1.0)
-                  : null;
-              return _LoadingThumb(progress: p, lightText: _lightText);
-            },
-          );
-        },
-      );
-    }
-
-    // Network
-    if (src.startsWith('http://') || src.startsWith('https://')) {
-      _hasEverLoaded = true;
-      final provider = _SharedImageProviderCache.network(
-        src,
-        width: decodeW,
-        height: decodeH,
-      );
-      if (_ratio == null) {
-        return _LoadingThumb(progress: null, lightText: _lightText);
-      }
-
-      return Image(
-        image: provider,
-        fit: _stripFit,
-        filterQuality: FilterQuality.medium,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => const Center(
-            child: Icon(Icons.broken_image, color: Colors.white54)),
-        loadingBuilder: (ctx, child, loading) {
-          if (loading == null) return child;
-          final expected = loading.expectedTotalBytes;
-          final loaded = loading.cumulativeBytesLoaded;
-          final p = (expected != null && expected > 0)
-              ? (loaded / expected).clamp(0.0, 1.0)
-              : null;
-          return _LoadingThumb(progress: p, lightText: _lightText);
-        },
-      );
-    }
-
-    // Local
-    _hasEverLoaded = true;
-    final provider = _SharedImageProviderCache.local(
-      src,
-      width: decodeW,
-      height: decodeH,
-    );
-    if (_ratio == null) {
-      return _LoadingThumb(progress: null, lightText: _lightText);
-    }
-
-    return Image(
-      image: provider,
-      fit: _stripFit,
-      filterQuality: FilterQuality.medium,
-      gaplessPlayback: true,
-      errorBuilder: (_, __, ___) =>
-          const Center(child: Icon(Icons.broken_image, color: Colors.white54)),
-      frameBuilder: (ctx, child, frame, wasSyncLoaded) {
-        if (wasSyncLoaded || frame != null) return child;
-        return _LoadingThumb(progress: null, lightText: _lightText);
-      },
-    );
-  }
-
-  @override
-  void dispose() {
-    widget.centerListenable.removeListener(_handleEagerInputsChanged);
-    widget.activeRadiusListenable.removeListener(_handleEagerInputsChanged);
-    super.dispose();
-  }
-}
-
-/// ===============================
-/// 缩略图占位（图片损坏/缩略图失败）
-/// ===============================
-class _ThumbPlaceholder extends StatelessWidget {
-  const _ThumbPlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Colors.black12,
-      alignment: Alignment.center,
-      child: const Icon(Icons.broken_image_outlined),
-    );
-  }
-}
-
-/// ===============================
-/// 加载占位 + 进度条
-/// ===============================
-class _LoadingThumb extends StatelessWidget {
-  final double? progress;
-  final bool lightText;
-
-  const _LoadingThumb({
-    required this.progress,
-    required this.lightText,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final fg = lightText ? Colors.white : Colors.black;
-
-    // ✅ 必须给“安全高度”，避免 ListView 子项高度无穷导致 viewport 崩
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final boundedH =
-            constraints.hasBoundedHeight && constraints.maxHeight.isFinite;
-        final safeH = boundedH ? constraints.maxHeight : 220.0;
-
-        return SizedBox(
-          width: double.infinity,
-          height: safeH,
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 260),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.image_outlined,
-                      color: fg.withValues(alpha: 0.55), size: 52),
-                  const SizedBox(height: 12),
-                  if (progress != null) ...[
-                    LinearProgressIndicator(value: progress),
-                    const SizedBox(height: 10),
-                    Text(
-                      '${(progress! * 100).clamp(0, 100).toStringAsFixed(0)}%',
-                      style: TextStyle(
-                          color: fg.withValues(alpha: 0.75), fontSize: 13),
-                    ),
-                  ] else ...[
-                    SizedBox(
-                      width: 32,
-                      height: 32,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: fg.withValues(alpha: 0.4),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      '加载中...',
-                      style: TextStyle(
-                          color: fg.withValues(alpha: 0.75), fontSize: 13),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// ===============================
-/// 左上角数字角标（1/2/3...）
-/// ===============================
-class _IndexBadge extends StatelessWidget {
-  final String text;
-  const _IndexBadge({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.white24, width: 0.5),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        child: Text(
-          text,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 12,
-            shadows: [Shadow(blurRadius: 2, color: Colors.black)],
-          ),
         ),
       ),
     );

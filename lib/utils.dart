@@ -11,6 +11,48 @@ import 'package:path/path.dart' as p;
 import 'package:video_thumbnail/video_thumbnail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'core/logging/app_logger.dart';
+import 'core/network/http_client_factory.dart';
+import 'core/network/network_runner.dart';
+import 'core/utils/redaction.dart' as core_redaction;
+
+class AppHistoryFolderCtx {
+  final String kind;
+  final String? localDir;
+  final String? wdAccountId;
+  final String wdRel;
+  final String? embyAccountId;
+  final String embyPath;
+
+  const AppHistoryFolderCtx.local(String dir)
+      : kind = 'local',
+        localDir = dir,
+        wdAccountId = null,
+        wdRel = '',
+        embyAccountId = null,
+        embyPath = '';
+
+  const AppHistoryFolderCtx.webdav({
+    required String accountId,
+    required String rel,
+  })  : kind = 'webdav',
+        localDir = null,
+        wdAccountId = accountId,
+        wdRel = rel,
+        embyAccountId = null,
+        embyPath = '';
+
+  const AppHistoryFolderCtx.emby({
+    required String accountId,
+    String path = 'favorites',
+  })  : kind = 'emby',
+        localDir = null,
+        wdAccountId = null,
+        wdRel = '',
+        embyAccountId = accountId,
+        embyPath = path;
+}
+
 /// ===============================
 /// App Settings (新：应用级设置)
 /// ===============================
@@ -486,35 +528,112 @@ class AppHistory {
 
   static const String _kHistoryKey = 'glacier_history_v1';
   static const int _maxEntries = 200;
+  static const Duration _kSaveDebounce = Duration(milliseconds: 350);
+
+  static List<Map<String, dynamic>>? _cache;
+  static Future<void>? _loadFuture;
+  static Timer? _saveTimer;
+  static Future<void> _writeQueue = Future<void>.value();
+  static bool _dirty = false;
 
   static Future<SharedPreferences> _sp() => SharedPreferences.getInstance();
 
-  static Future<List<Map<String, dynamic>>> load() async {
-    final sp = await _sp();
-    final raw = sp.getString(_kHistoryKey);
-    if (raw == null || raw.trim().isEmpty) return <Map<String, dynamic>>[];
-    try {
-      final j = jsonDecode(raw);
-      if (j is! List) return <Map<String, dynamic>>[];
-      final list =
-          j.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
-      // ✅ 历史数据“温和修复/去噪”
-      // 说明：历史记录早期版本曾在「播放视频」前插入一条“目录(folder)记录”，
-      // 导致历史里出现“目录 + 视频”两条紧挨着的情况。
-      // 这会被用户误解为“把目录里的内容都加入历史”。
-      //
-      // 现在已在入口逻辑侧修复，但旧数据仍可能残留。
-      // 这里做一次轻量清理：若某条 media 记录后紧跟 folder 记录，且时间非常接近且来源一致，则丢弃该 folder。
-      final normalized = _normalize(list);
-      if (normalized.length != list.length) {
-        // ✅ 只在确实发生清理时回写，避免每次 load 都产生写放大。
-        // ignore: unawaited_futures
-        _save(normalized);
-      }
-      return normalized;
-    } catch (_) {
-      return <Map<String, dynamic>>[];
+  static List<Map<String, dynamic>> _cloneList(
+    List<Map<String, dynamic>> list,
+  ) {
+    return list.map((e) => Map<String, dynamic>.from(e)).toList(growable: true);
+  }
+
+  static Future<void> _ensureLoaded() async {
+    if (_cache != null) return;
+    final pending = _loadFuture;
+    if (pending != null) {
+      await pending;
+      return;
     }
+
+    final future = () async {
+      final sp = await _sp();
+      final raw = sp.getString(_kHistoryKey);
+      if (raw == null || raw.trim().isEmpty) {
+        _cache = <Map<String, dynamic>>[];
+        return;
+      }
+      try {
+        final j = jsonDecode(raw);
+        if (j is! List) {
+          _cache = <Map<String, dynamic>>[];
+          return;
+        }
+        final list =
+            j.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+        final normalized = _normalize(list);
+        _cache = normalized;
+        if (normalized.length != list.length) {
+          _scheduleSave();
+        }
+      } catch (_) {
+        _cache = <Map<String, dynamic>>[];
+      }
+    }();
+
+    _loadFuture = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_loadFuture, future)) {
+        _loadFuture = null;
+      }
+    }
+  }
+
+  static Future<void> _persistSnapshot(List<Map<String, dynamic>> list) async {
+    final sp = await _sp();
+    if (list.isEmpty) {
+      await sp.remove(_kHistoryKey);
+      return;
+    }
+    await sp.setString(_kHistoryKey, jsonEncode(list));
+  }
+
+  static void _scheduleSave() {
+    if (_cache == null) return;
+    _dirty = true;
+    _saveTimer?.cancel();
+    _saveTimer = Timer(_kSaveDebounce, () {
+      unawaited(_flushDirty());
+    });
+  }
+
+  static Future<void> _flushDirty() async {
+    _saveTimer?.cancel();
+    _saveTimer = null;
+    if (!_dirty || _cache == null) return;
+
+    final snapshot = _cloneList(_cache!);
+    _dirty = false;
+    final write = _writeQueue.then((_) => _persistSnapshot(snapshot));
+    _writeQueue = write.catchError((_) {});
+    await write;
+
+    if (_dirty && _saveTimer == null) {
+      _scheduleSave();
+    }
+  }
+
+  @visibleForTesting
+  static Future<void> debugResetForTest() async {
+    _saveTimer?.cancel();
+    _saveTimer = null;
+    _cache = null;
+    _loadFuture = null;
+    _dirty = false;
+    _writeQueue = Future<void>.value();
+  }
+
+  static Future<List<Map<String, dynamic>>> load() async {
+    await _ensureLoaded();
+    return _cloneList(_cache ?? const <Map<String, dynamic>>[]);
   }
 
   static List<Map<String, dynamic>> _normalize(
@@ -523,10 +642,10 @@ class AppHistory {
 
     const int windowMs = 10 * 1000; // 10s: 足够覆盖“点开即播放”的场景，且不至于误删太多。
 
-    bool _isEmby(String p) => p.startsWith('emby://');
-    bool _isWebDav(String p) => p.startsWith('webdav://');
+    bool isEmbyPath(String p) => p.startsWith('emby://');
+    bool isWebDavPath(String p) => p.startsWith('webdav://');
 
-    String _hostOf(String p) {
+    String hostOf(String p) {
       try {
         return Uri.parse(p).host;
       } catch (_) {
@@ -563,17 +682,17 @@ class AppHistory {
               final ctxKind = (cur['ctxKind'] ?? '').toString();
 
               // Emby：同账号即可认为同一来源（无法从 itemId 反推目录层级）
-              if (ctxKind == 'emby' && _isEmby(prevPath)) {
+              if (ctxKind == 'emby' && isEmbyPath(prevPath)) {
                 final accId = (cur['embyAccountId'] ?? '').toString();
-                if (accId.isNotEmpty && _hostOf(prevPath) == accId) {
+                if (accId.isNotEmpty && hostOf(prevPath) == accId) {
                   drop = true;
                 }
               }
 
               // WebDAV：同账号即可认为同一来源
-              if (ctxKind == 'webdav' && _isWebDav(prevPath)) {
+              if (ctxKind == 'webdav' && isWebDavPath(prevPath)) {
                 final accId = (cur['wdAccountId'] ?? '').toString();
-                if (accId.isNotEmpty && _hostOf(prevPath) == accId) {
+                if (accId.isNotEmpty && hostOf(prevPath) == accId) {
                   drop = true;
                 }
               }
@@ -602,11 +721,6 @@ class AppHistory {
     return out;
   }
 
-  static Future<void> _save(List<Map<String, dynamic>> list) async {
-    final sp = await _sp();
-    await sp.setString(_kHistoryKey, jsonEncode(list));
-  }
-
   /// 写入/更新一条历史。
   /// - path：播放源（本地路径 / webdav://... / emby://...）。
   /// - title：展示用标题（通常取文件名或媒体名）。
@@ -629,7 +743,8 @@ class AppHistory {
     if (safeTitle.length > 160) safeTitle = '${safeTitle.substring(0, 160)}…';
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    final list = await load();
+    await _ensureLoaded();
+    final list = _cache!;
 
     // 设计原因：同一资源重复播放时，只保留最新一条，避免历史刷屏。
     list.removeWhere((e) => (e['path'] ?? '') == path);
@@ -648,7 +763,7 @@ class AppHistory {
       list.removeRange(_maxEntries, list.length);
     }
 
-    await _save(list);
+    _scheduleSave();
   }
 
   /// 记录“收藏夹/目录”进入历史。
@@ -679,17 +794,17 @@ class AppHistory {
   /// - webdav：wdAccountId + wdRel（目录相对路径，建议以 / 结尾）
   /// - emby：embyAccountId + embyPath（favorites / view:xxx 等）
   static Future<void> upsertFolderCtx({
-    required dynamic ctx,
+    required AppHistoryFolderCtx ctx,
     required String title,
     String? coverPath,
   }) async {
     try {
-      // ctx 是 pages.dart 的 _NavCtx，为了最小改动这里不强依赖类型，只读取字段。
-      final kind = (ctx.kind ?? '').toString();
+      final kind = ctx.kind.trim();
       final now = DateTime.now().millisecondsSinceEpoch;
       if (!await AppSettings.getHistoryEnabled()) return;
 
-      final list = await load();
+      await _ensureLoaded();
+      final list = _cache!;
 
       // 生成一个稳定 key，用于去重。
       String path;
@@ -707,7 +822,7 @@ class AppHistory {
         entry['localDir'] = dir;
       } else if (kind.contains('webdav')) {
         final accId = (ctx.wdAccountId ?? '').toString().trim();
-        var rel = (ctx.wdRel ?? '').toString().trim();
+        var rel = ctx.wdRel.trim();
         if (accId.isEmpty) return;
         if (rel.isNotEmpty && !rel.endsWith('/')) rel = '$rel/';
         path = 'folder://webdav/$accId/$rel';
@@ -716,7 +831,7 @@ class AppHistory {
         entry['wdRel'] = rel;
       } else if (kind.contains('emby')) {
         final accId = (ctx.embyAccountId ?? '').toString().trim();
-        final pth = (ctx.embyPath ?? '').toString().trim();
+        final pth = ctx.embyPath.trim();
         if (accId.isEmpty) return;
         path = 'folder://emby/$accId/${pth.isEmpty ? 'favorites' : pth}';
         entry['ctxKind'] = 'emby';
@@ -727,28 +842,39 @@ class AppHistory {
       }
 
       entry['path'] = path;
-      if (coverPath != null && coverPath.trim().isNotEmpty)
+      if (coverPath != null && coverPath.trim().isNotEmpty) {
         entry['cover'] = coverPath;
+      }
 
       list.removeWhere((e) => (e['path'] ?? '') == path);
       list.insert(0, entry);
       if (list.length > _maxEntries) list.removeRange(_maxEntries, list.length);
-      await _save(list);
+      _scheduleSave();
     } catch (_) {
       // 历史增强是“锦上添花”，失败不影响主流程。
     }
   }
 
   static Future<void> removeAt(int index) async {
-    final list = await load();
+    await _ensureLoaded();
+    final list = _cache!;
     if (index < 0 || index >= list.length) return;
     list.removeAt(index);
-    await _save(list);
+    _scheduleSave();
+    await _flushDirty();
   }
 
   static Future<void> clear() async {
-    final sp = await _sp();
-    await sp.remove(_kHistoryKey);
+    _saveTimer?.cancel();
+    _saveTimer = null;
+    _cache = <Map<String, dynamic>>[];
+    _dirty = false;
+    final write = _writeQueue.then((_) async {
+      final sp = await _sp();
+      await sp.remove(_kHistoryKey);
+    });
+    _writeQueue = write.catchError((_) {});
+    await write;
   }
 
   /// 更新已有记录的进度（如果记录不存在则忽略）。
@@ -757,11 +883,12 @@ class AppHistory {
     if (path.trim().isEmpty) return;
     if (!await AppSettings.getHistoryEnabled()) return;
 
-    final list = await load();
+    await _ensureLoaded();
+    final list = _cache!;
     final idx = list.indexWhere((e) => (e['path'] ?? '') == path);
     if (idx < 0) return;
     list[idx]['pos'] = positionMs;
-    await _save(list);
+    _scheduleSave();
   }
 }
 
@@ -804,7 +931,10 @@ class PersistentStore {
   /// 获取本地文件句柄（无论是否存在）
   Future<File> getFile(String key, String type, String ext) async {
     final dir = await getDir(type);
-    final safeExt = ext.startsWith('.') ? ext : '.$ext';
+    final normalizedExt = ext.trim();
+    final safeExt = normalizedExt.isEmpty
+        ? ''
+        : (normalizedExt.startsWith('.') ? normalizedExt : '.$normalizedExt');
     return File(p.join(dir.path, '$key$safeExt'));
   }
 }
@@ -814,6 +944,36 @@ class PersistentStore {
 /// ===============================
 class ThumbCache {
   static final Map<String, Future<File?>> _inflight = {};
+  static final Map<String, int> _failedUntilMs = <String, int>{};
+  static const int _failureCooldownMs = 2 * 60 * 1000;
+
+  static bool _looksRemoteSource(String path) {
+    final p = path.trim().toLowerCase();
+    return p.startsWith('http://') ||
+        p.startsWith('https://') ||
+        p.startsWith('webdav://') ||
+        p.startsWith('emby://');
+  }
+
+  static bool _isFailureCoolingDown(String key) {
+    final until = _failedUntilMs[key];
+    if (until == null) return false;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (until <= now) {
+      _failedUntilMs.remove(key);
+      return false;
+    }
+    return true;
+  }
+
+  static void _rememberFailure(String key) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _failedUntilMs[key] = now + _failureCooldownMs;
+  }
+
+  static void _clearFailure(String key) {
+    _failedUntilMs.remove(key);
+  }
 
   /// Backward-compatible API used by video.dart
   /// Returns cached thumb if exists, otherwise null (no creation).
@@ -872,12 +1032,31 @@ class ThumbCache {
     final keyStr = '$videoPath|${posQ.inMilliseconds}|$width|$height';
     final key = PersistentStore.instance.makeKey(keyStr);
 
+    if (_isFailureCoolingDown(key)) return null;
+
+    if (_looksRemoteSource(videoPath)) {
+      _rememberFailure(key);
+      return null;
+    }
+
     // 从 'thumbs' 目录获取文件
     final out = await PersistentStore.instance.getFile(key, 'thumbs', '.jpg');
 
     // 1. 检查本地是否已有缓存（永久存在）
     if (await out.exists() && await out.length() > 0) {
+      _clearFailure(key);
       return out;
+    }
+
+    try {
+      final f = File(videoPath);
+      if (!await f.exists()) {
+        _rememberFailure(key);
+        return null;
+      }
+    } catch (_) {
+      _rememberFailure(key);
+      return null;
     }
 
     // 2. 防止并发重复生成
@@ -902,9 +1081,11 @@ class ThumbCache {
 
         // 写入永久目录
         await out.writeAsBytes(bytes, flush: true);
+        _clearFailure(key);
         return out;
       } catch (e) {
-        debugPrint('Thumb gen error: $e');
+        AppLogger.error('thumbnail generation failed', error: e, tag: 'thumb');
+        _rememberFailure(key);
         return null;
       } finally {
         _inflight.remove(key);
@@ -923,7 +1104,7 @@ class WebDavFileCache {
   /// 下载并缓存 WebDAV 文件（图片或视频）
   /// 返回本地 File 对象。如果已存在则直接返回。
   static Future<File> downloadAndCache(String webDavUrl,
-      {String? customName}) async {
+      {String? customName, Map<String, String>? headers}) async {
     final ext = p.extension(customName ?? webDavUrl).toLowerCase();
     final key = PersistentStore.instance.makeKey(webDavUrl);
 
@@ -931,23 +1112,77 @@ class WebDavFileCache {
     final file = await PersistentStore.instance.getFile(key, 'media', ext);
 
     if (await file.exists()) {
-      debugPrint('✅ Cache hit (WebDAV): ${file.path}');
+      AppLogger.info('webdav cache hit: ${redactSensitiveText(file.path)}',
+          tag: 'cache');
       return file;
     }
 
-    debugPrint('⬇️ Downloading WebDAV asset: $webDavUrl');
+    AppLogger.info('downloading webdav asset: $webDavUrl', tag: 'cache');
 
-    // 使用 HttpClient 下载
-    // 建议：这里可以使用 WebDavBackgroundHttpPool.instance.client (如果是后台下载)
-    // 或者新建 Client 以获得最大速度
-    final request = await HttpClient().getUrl(Uri.parse(webDavUrl));
-    final response = await request.close(); // 流式写入，防止内存溢出
-    final sink = file.openWrite();
-    await response.pipe(sink);
-    await sink.close();
+    final uri = Uri.parse(webDavUrl);
+    final requestHeaders = <String, String>{
+      if (headers != null) ...headers,
+    };
+    final userInfo = uri.userInfo.trim();
+    if (userInfo.isNotEmpty &&
+        !requestHeaders.containsKey(HttpHeaders.authorizationHeader)) {
+      final token = base64Encode(utf8.encode(userInfo));
+      requestHeaders[HttpHeaders.authorizationHeader] = 'Basic $token';
+    }
 
-    debugPrint('✅ Download complete: ${file.path}');
-    return file;
+    final tmp = File('${file.path}.download');
+    if (await tmp.exists()) {
+      await tmp.delete();
+    }
+
+    final client = HttpClientFactory.createForeground();
+    IOSink? sink;
+    try {
+      final request = await NetworkRunner.run(
+        () => client.getUrl(uri),
+        label: 'webdav-cache-open',
+      );
+      requestHeaders.forEach(request.headers.set);
+      final response = await NetworkRunner.run(
+        () => request.close(),
+        label: 'webdav-cache-close',
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException(
+          'WebDAV download failed: ${response.statusCode}',
+          uri: uri,
+        );
+      }
+
+      sink = tmp.openWrite();
+      await response.pipe(sink);
+      await sink.close();
+      sink = null;
+
+      if (await tmp.length() <= 0) {
+        throw const HttpException('WebDAV download produced empty file');
+      }
+
+      if (await file.exists()) {
+        await file.delete();
+      }
+      await tmp.rename(file.path);
+
+      AppLogger.info(
+          'webdav download complete: ${redactSensitiveText(file.path)}',
+          tag: 'cache');
+      return file;
+    } catch (_) {
+      if (sink != null) {
+        await sink.close();
+      }
+      if (await tmp.exists()) {
+        await tmp.delete();
+      }
+      rethrow;
+    } finally {
+      client.close(force: true);
+    }
   }
 }
 
@@ -959,6 +1194,7 @@ class WebDavFileCache {
 class CoverCache {
   CoverCache._();
   static final CoverCache instance = CoverCache._();
+  static const Object _nullSentinel = Object();
 
   /// 最大缓存条目数（按需调整）
   static const int maxEntries = 400;
@@ -971,13 +1207,15 @@ class CoverCache {
     final v = _lru.remove(key);
     // refresh LRU
     _lru[key] = v;
+    if (identical(v, _nullSentinel)) return null;
     return v as T;
   }
 
   Future<T?> getOrCreate<T>(String key, Future<T?> Function() loader,
       {bool cacheNull = false}) {
-    final cached = getResult<T>(key);
-    if (cached != null) return Future.value(cached);
+    if (_lru.containsKey(key)) {
+      return Future<T?>.value(getResult<T>(key));
+    }
 
     if (_inflight.containsKey(key)) return _inflight[key] as Future<T?>;
 
@@ -1007,7 +1245,7 @@ class CoverCache {
       final oldestKey = _lru.keys.first;
       _lru.remove(oldestKey);
     }
-    _lru[key] = value;
+    _lru[key] = value ?? _nullSentinel;
   }
 
   /// 为 sources 生成稳定 key（避免 key 过长）
@@ -1015,6 +1253,11 @@ class CoverCache {
     final joined = sources.join('|');
     return sha1.convert(utf8.encode(joined)).toString();
   }
+}
+
+@visibleForTesting
+void debugResetThumbCacheFailures() {
+  ThumbCache._failedUntilMs.clear();
 }
 
 // ✅ 已移除“跟随系统/深色/浅色”主题切换：
@@ -1049,20 +1292,5 @@ String safeDecodeUriComponent(String input) {
 ///   直接展示在 SnackBar / debugPrint 里（易被截图/日志收集）。
 /// - 尽量“只脱敏不改语义”，便于定位问题。
 String redactSensitiveText(String input) {
-  var s = input;
-
-  // 1) URL userInfo: scheme://user:pass@host -> scheme://***:***@host
-  s = s.replaceAllMapped(
-    RegExp(r':\/\/([^\/\s:@]+):([^\/\s@]+)@'),
-    (_) => '://***:***@',
-  );
-
-  // 2) 常见 token/api_key 参数：...?api_key=xxx -> ...?api_key=***
-  s = s.replaceAllMapped(
-    RegExp(r'([?&](?:api_key|apikey|token|access_token|x-emby-token)=)[^&\s]+',
-        caseSensitive: false),
-    (m) => '${m.group(1)}***',
-  );
-
-  return s;
+  return core_redaction.redactSensitiveText(input);
 }

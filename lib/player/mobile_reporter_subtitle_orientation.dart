@@ -311,7 +311,7 @@ extension _MobileReporterMethods on _MobileVideoPlayerPageState {
     final key = await (() async {
       final np = await _resolveEmbyNowPlaying(_currentPath);
       if (np != null) return 'emby:${np.account.id}:${np.itemId}';
-      return 'path:${_currentPath}';
+      return 'path:$_currentPath';
     })();
     if (_lastAutoSubtitleKey == key) return;
 

@@ -194,8 +194,7 @@ extension _MobileGestureHandlers on _MobileVideoPlayerPageState {
     if (!_isScreenLocked || !_lockButtonVisible) return;
     _lockButtonHideTimer = Timer(const Duration(seconds: 2), () {
       if (!mounted || !_isScreenLocked) return;
-      _lockButtonVisible = false;
-      _refreshMobileState();
+      _pageController.hideLockButton();
     });
   }
 
@@ -203,13 +202,13 @@ extension _MobileGestureHandlers on _MobileVideoPlayerPageState {
     if (!mounted) return;
     final nextLocked = !_isScreenLocked;
     _isScreenLocked = nextLocked;
-    _lockButtonVisible = true;
+    _pageController.showLockButton();
     if (nextLocked) {
-      _controlsVisible = false;
+      _pageController.hideControls();
     }
     _refreshMobileState();
     if (_isScreenLocked) {
-      _hideTimer?.cancel();
+      _pageController.cancelAutoHide();
       _autoRotateEnabled = false;
       _stopAutoRotateIfAny();
       final isLandscape =
@@ -262,27 +261,28 @@ extension _MobileGestureHandlers on _MobileVideoPlayerPageState {
   }
 
   void _scheduleAutoHide() {
-    _hideTimer?.cancel();
+    _pageController.cancelAutoHide();
     if (_isScreenLocked) return;
     if (!_controlsVisible) return;
     final c = _controller;
     if (c == null || !c.value.isPlaying) return;
-    _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (!mounted) return;
-      _controlsVisible = false;
-      _refreshMobileState();
-    });
+    _pageController.scheduleAutoHide(
+      delay: const Duration(seconds: 4),
+      enabled: true,
+      onHide: () {
+        if (!mounted) return;
+        _pageController.hideControls();
+      },
+    );
   }
 
   void _toggleControls() {
     if (_isScreenLocked) {
-      _lockButtonVisible = !_lockButtonVisible;
-      _refreshMobileState();
+      _pageController.toggleLockButtonVisible();
       _scheduleLockButtonAutoHide();
       return;
     }
-    _controlsVisible = !_controlsVisible;
-    _refreshMobileState();
+    _pageController.toggleControls();
     _scheduleAutoHide();
   }
 }
@@ -298,7 +298,7 @@ extension _DesktopGestureHandlers on _VideoPlayerPageState {
 
   void _onHorizontalDragStart(DragStartDetails details) {
     if (!_ready) return;
-    _gestureActive = true;
+    _gestureState.active = true;
     _gestureType = 'seek';
     _dragStartPos = _player.state.position;
     _dragTargetPos = _dragStartPos;
@@ -337,7 +337,7 @@ extension _DesktopGestureHandlers on _VideoPlayerPageState {
     unawaited(_reportEmbyProgress(eventName: 'TimeUpdate', interactive: true));
     Timer(const Duration(milliseconds: 300), () {
       if (!mounted) return;
-      _gestureActive = false;
+      _gestureState.active = false;
       _refreshDesktopGestureState();
     });
     _uiVisible ? _pokeUI() : null;
@@ -351,7 +351,7 @@ extension _DesktopGestureHandlers on _VideoPlayerPageState {
     }
     if (!_ready) return;
     final width = MediaQuery.of(context).size.width;
-    _gestureActive = true;
+    _gestureState.active = true;
 
     if (details.globalPosition.dx > width / 2) {
       _gestureType = 'volume';
@@ -393,7 +393,7 @@ extension _DesktopGestureHandlers on _VideoPlayerPageState {
   void _onVerticalDragEnd(DragEndDetails details) {
     Timer(const Duration(milliseconds: 300), () {
       if (!mounted) return;
-      _gestureActive = false;
+      _gestureState.active = false;
       _refreshDesktopGestureState();
     });
     _uiVisible ? _pokeUI() : null;

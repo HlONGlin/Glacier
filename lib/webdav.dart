@@ -5,10 +5,18 @@ import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+export 'features/accounts/webdav/data/webdav_account_model.dart';
+export 'features/accounts/webdav/data/webdav_store.dart';
+
+import 'core/network/background_gate.dart';
+import 'core/network/http_client_factory.dart';
+import 'core/network/network_runner.dart';
+import 'core/network/request_headers.dart';
+import 'features/accounts/webdav/data/webdav_account_model.dart';
+import 'features/accounts/webdav/data/webdav_store.dart';
 import 'ui_kit.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'image.dart';
 import 'video.dart';
 import 'tag.dart';
@@ -22,58 +30,6 @@ const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
 // ===== network_webdav.dart (auto-grouped) =====
 
 // --- from webdav.dart ---
-
-/// =========================
-/// WebDAV data models
-/// =========================
-class WebDavAccount {
-  final String id;
-  String name;
-  String baseUrl; // e.g. https://example.com/dav/  (建议以 / 结尾)
-  String username;
-  String password;
-
-  WebDavAccount({
-    required this.id,
-    required this.name,
-    required this.baseUrl,
-    required this.username,
-    required this.password,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'baseUrl': baseUrl,
-        'username': username,
-        'password': password,
-      };
-
-  static WebDavAccount fromJson(Map<String, dynamic> j) {
-    final id = (j['id'] ?? '').toString().trim();
-    return WebDavAccount(
-      id: id.isEmpty ? DateTime.now().millisecondsSinceEpoch.toString() : id,
-      name: ((j['name'] ?? '').toString().trim().isEmpty)
-          ? 'WebDAV'
-          : (j['name'] ?? '').toString(),
-      baseUrl: (j['baseUrl'] ?? '').toString(),
-      username: (j['username'] ?? '').toString(),
-      password: (j['password'] ?? '').toString(),
-    );
-  }
-
-  /// Normalize base uri (ensure trailing slash).
-  Uri get baseUri {
-    var b = baseUrl.trim();
-    if (!b.endsWith('/')) b = '$b/';
-    return Uri.parse(b);
-  }
-
-  Map<String, String> get authHeaders {
-    final token = base64Encode(utf8.encode('$username:$password'));
-    return {HttpHeaders.authorizationHeader: 'Basic $token'};
-  }
-}
 
 class WebDavItem {
   final String href; // href from server (may be absolute path like /dav/a.mp4)
@@ -91,34 +47,6 @@ class WebDavItem {
     required this.size,
     required this.modified,
   });
-}
-
-/// =========================
-/// WebDAV store (PUBLIC)
-/// =========================
-class WebDavStore {
-  static const _k = 'webdav_accounts_v1';
-
-  static Future<List<WebDavAccount>> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_k);
-    if (raw == null || raw.trim().isEmpty) return [];
-    try {
-      final list = jsonDecode(raw);
-      if (list is List) {
-        return list
-            .whereType<Map>()
-            .map((m) => WebDavAccount.fromJson(m.cast<String, dynamic>()))
-            .toList();
-      }
-    } catch (_) {}
-    return [];
-  }
-
-  static Future<void> save(List<WebDavAccount> list) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_k, jsonEncode(list.map((e) => e.toJson()).toList()));
-  }
 }
 
 /// =========================
@@ -249,17 +177,24 @@ class WebDavClient {
           '<d:displayname/><d:getcontentlength/><d:getlastmodified/><d:resourcetype/>'
           '</d:prop></d:propfind>';
 
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 15);
+      final client = HttpClientFactory.createForeground(
+        connectionTimeout: const Duration(seconds: 15),
+      );
       try {
-        final req = await client.openUrl('PROPFIND', uri);
+        final req = await NetworkRunner.run(
+          () => client.openUrl('PROPFIND', uri),
+          label: 'webdav-list-open',
+        );
         req.headers.set(HttpHeaders.authorizationHeader, _basicAuth());
         req.headers.set('Depth', '1');
         req.headers.set('Accept', '*/*');
         req.headers.set('Content-Type', 'application/xml; charset=utf-8');
         req.add(utf8.encode(body));
 
-        final res = await req.close();
+        final res = await NetworkRunner.run(
+          () => req.close(),
+          label: 'webdav-list-close',
+        );
         final text = await res.transform(utf8.decoder).join();
 
         if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -328,8 +263,9 @@ class WebDavClient {
       if (await out.exists()) {
         if (!force) {
           final len = await out.length();
-          if (len > 0 && (expectedSize == null || len == expectedSize))
+          if (len > 0 && (expectedSize == null || len == expectedSize)) {
             return out;
+          }
         }
         try {
           await out.delete();
@@ -426,12 +362,10 @@ class WebDavClient {
       }
 
       final uri = resolveHref(href);
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 20);
+      final client = HttpClientFactory.createForeground();
       try {
         final req = await client.getUrl(uri);
-        req.headers.set(HttpHeaders.authorizationHeader, _basicAuth());
-        req.headers.set('Accept', '*/*');
+        RequestHeaders.withAccept(account.authHeaders).forEach(req.headers.set);
         final res = await req.close();
 
         if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -503,7 +437,7 @@ class WebDavClient {
     int probeBytes = 2 * 1024 * 1024,
   }) async {
     if (fileSize <= 0 || probeBytes <= 0) return false;
-    final start = (fileSize - probeBytes).clamp(0, fileSize - 1);
+    final start = (fileSize - probeBytes).clamp(0, fileSize - 1).toInt();
     final end = fileSize - 1;
     final bytes = await _downloadRangeBytes(href,
         start: start, end: end, maxBytes: probeBytes);
@@ -577,13 +511,20 @@ class WebDavClient {
       {void Function(int received, int? total)? onProgress}) async {
     return _runUi(() async {
       final uri = resolveHref(href);
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 20);
+      final client = HttpClientFactory.createForeground(
+        connectionTimeout: const Duration(seconds: 20),
+      );
       try {
-        final req = await client.getUrl(uri);
+        final req = await NetworkRunner.run(
+          () => client.getUrl(uri),
+          label: 'webdav-download-open',
+        );
         req.headers.set(HttpHeaders.authorizationHeader, _basicAuth());
         req.headers.set('Accept', '*/*');
-        final res = await req.close();
+        final res = await NetworkRunner.run(
+          () => req.close(),
+          label: 'webdav-download-close',
+        );
 
         if (res.statusCode < 200 || res.statusCode >= 300) {
           throw HttpException('GET failed: ${res.statusCode}', uri: uri);
@@ -631,9 +572,10 @@ class WebDavClient {
       final gen = WebDavBackgroundHttpPool.instance.generation;
       try {
         final req = await client.getUrl(uri);
-        req.headers.set(HttpHeaders.authorizationHeader, _basicAuth());
-        req.headers.set('Accept', '*/*');
-        req.headers.set('Range', 'bytes=0-${maxBytes - 1}');
+        RequestHeaders.withPrefixRange(
+          RequestHeaders.withAccept(account.authHeaders),
+          maxBytes: maxBytes,
+        ).forEach(req.headers.set);
 
         final res = await req.close();
         if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -1042,8 +984,8 @@ class _WebDavBrowserPageState extends State<WebDavBrowserPage> {
   bool _asc = true;
 
   // auto download small videos for thumbnail (optional)
-  bool _autoVideoThumb = true;
-  int _autoThumbMaxMB = 80;
+  final bool _autoVideoThumb = true;
+  final int _autoThumbMaxMB = 80;
 
   @override
   void initState() {
@@ -1272,13 +1214,17 @@ class _WebDavBrowserPageState extends State<WebDavBrowserPage> {
   Future<void> _ctxItem(WebDavItem it, Offset pos) async {
     final items = <_CtxItem<String>>[];
     if (!it.isDir) {
-      if (_isVidName(it.name))
+      if (_isVidName(it.name)) {
         items.add(const _CtxItem('play', '播放', Icons.play_arrow));
-      if (_isImgName(it.name))
+      }
+      if (_isImgName(it.name)) {
         items.add(const _CtxItem('view', '查看', Icons.image_outlined));
+      }
       items.add(const _CtxItem('download', '下载', Icons.download));
     }
-    if (it.isDir) items.add(const _CtxItem('open', '打开', Icons.folder_open));
+    if (it.isDir) {
+      items.add(const _CtxItem('open', '打开', Icons.folder_open));
+    }
     items.add(const _CtxItem('copy', '复制链接', Icons.link));
 
     final act = await _ctxMenu<String>(context, pos, items);
@@ -1623,9 +1569,9 @@ class WebDavPickSourcePage extends StatelessWidget {
             return const Scaffold(body: AppLoadingState());
           }
           if (accs.isEmpty) {
-            return Scaffold(
-              appBar: GlassAppBar(title: const Text('选择 WebDAV')),
-              body: const AppEmptyState(
+            return const Scaffold(
+              appBar: GlassAppBar(title: Text('选择 WebDAV')),
+              body: AppEmptyState(
                 title: '还没有 WebDAV 账号',
                 subtitle: '请先在 WebDAV 页面添加',
                 icon: Icons.cloud_off_outlined,
@@ -1633,7 +1579,7 @@ class WebDavPickSourcePage extends StatelessWidget {
             );
           }
           return Scaffold(
-            appBar: GlassAppBar(title: const Text('选择 WebDAV')),
+            appBar: const GlassAppBar(title: Text('选择 WebDAV')),
             body: AppViewport(
               child: ListView.separated(
                 padding: const EdgeInsets.all(12),
@@ -1672,8 +1618,7 @@ class WebDavPickSourcePage extends StatelessWidget {
 
 class _WebDavPickBrowserPage extends StatefulWidget {
   final WebDavAccount account;
-  final String startRel;
-  const _WebDavPickBrowserPage({required this.account, this.startRel = ''});
+  const _WebDavPickBrowserPage({required this.account});
 
   @override
   State<_WebDavPickBrowserPage> createState() => _WebDavPickBrowserPageState();
@@ -1696,10 +1641,10 @@ class _WebDavPickBrowserPageState extends State<_WebDavPickBrowserPage> {
   void initState() {
     super.initState();
     _client = WebDavClient(widget.account);
-    _rel = widget.startRel;
+    _rel = '';
     _stack
       ..clear()
-      ..add(widget.startRel);
+      ..add('');
     _refresh();
   }
 

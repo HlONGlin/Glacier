@@ -1,4 +1,5 @@
 import 'emby.dart';
+import 'features/accounts/webdav/data/webdav_auth_header_builder.dart';
 import 'webdav.dart';
 
 Future<Map<String, WebDavAccount>> loadWebDavAccountsMapShared() async {
@@ -17,6 +18,10 @@ Future<Map<String, Map<String, String>>>
         'baseUrl': entry.value.baseUrl,
         'username': entry.value.username,
         'password': entry.value.password,
+        'authorization': WebDavAuthHeaderBuilder.buildAuthorization(
+          username: entry.value.username,
+          password: entry.value.password,
+        ),
       },
   };
 }

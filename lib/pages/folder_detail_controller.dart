@@ -1,4 +1,17 @@
-part of '../pages.dart';
+import 'dart:collection';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+
+import '../models/favorite_models.dart';
+import '../source_refs.dart';
+import '../tag.dart';
+import 'folder_detail_models.dart';
+
+extension _CharExt on String {
+  bool get isDigit => length == 1 && codeUnitAt(0) >= 48 && codeUnitAt(0) <= 57;
+}
 
 class FolderDetailController extends ChangeNotifier {
   FolderDetailController({required FavoriteCollection collection})
@@ -10,13 +23,13 @@ class FolderDetailController extends ChangeNotifier {
       LinkedHashMap<String, LayerSettings>();
   static const int maxPerDirectoryDisplaySettingsEntries = 500;
 
-  List<_Entry> _raw = <_Entry>[];
-  List<_Entry> _scopeSearchRaw = const <_Entry>[];
+  List<Entry> _raw = <Entry>[];
+  List<Entry> _scopeSearchRaw = const <Entry>[];
   String _query = '';
   String? _selectedTagId;
   bool _searchExpanded = false;
   bool _usingScopeSearch = false;
-  _FolderSearchScope _folderSearchScope = _FolderSearchScope.currentCollection;
+  FolderSearchScope _folderSearchScope = FolderSearchScope.currentCollection;
   String? _singleSearchCollectionId;
   bool _selectionMode = false;
   final Set<String> _selectedEntryKeys = <String>{};
@@ -80,20 +93,20 @@ class FolderDetailController extends ChangeNotifier {
     return out;
   }
 
-  String displaySettingsKeyForCtx(_NavCtx ctx) {
+  String displaySettingsKeyForCtx(NavCtx ctx) {
     switch (ctx.kind) {
-      case _CtxKind.root:
+      case CtxKind.root:
         return '';
-      case _CtxKind.local:
+      case CtxKind.local:
         final dir = normalizeLocalDirForDisplayKey(ctx.localDir ?? '');
         if (dir.isEmpty) return '';
         return 'local://$dir';
-      case _CtxKind.webdav:
+      case CtxKind.webdav:
         final accId = (ctx.wdAccountId ?? '').trim();
         if (accId.isEmpty) return '';
         final rel = normalizeWebDavDirForDisplayKey(ctx.wdRel);
-        return buildWebDavSourceWithDir(accId, rel, isDir: true);
-      case _CtxKind.emby:
+        return buildWebDavSource(accId, rel);
+      case CtxKind.emby:
         final accId = (ctx.embyAccountId ?? '').trim();
         if (accId.isEmpty) return '';
         final path = normalizeEmbyPathForDisplayKey(ctx.embyPath);
@@ -117,7 +130,7 @@ class FolderDetailController extends ChangeNotifier {
       final ref = parseWebDavSource(key);
       if (ref == null || ref.accountId.trim().isEmpty) return '';
       final rel = normalizeWebDavDirForDisplayKey(ref.relPath);
-      return buildWebDavSourceWithDir(ref.accountId, rel, isDir: true);
+      return buildWebDavSource(ref.accountId, rel);
     }
 
     if (isEmbySource(key)) {
@@ -148,15 +161,15 @@ class FolderDetailController extends ChangeNotifier {
     return out;
   }
 
-  List<_Entry> get raw => _raw;
-  set raw(List<_Entry> value) {
+  List<Entry> get raw => _raw;
+  set raw(List<Entry> value) {
     _raw = value;
     _pruneSelection();
     notifyListeners();
   }
 
-  List<_Entry> get scopeSearchRaw => _scopeSearchRaw;
-  set scopeSearchRaw(List<_Entry> value) {
+  List<Entry> get scopeSearchRaw => _scopeSearchRaw;
+  set scopeSearchRaw(List<Entry> value) {
     _scopeSearchRaw = value;
     _pruneSelection();
     notifyListeners();
@@ -192,8 +205,8 @@ class FolderDetailController extends ChangeNotifier {
     notifyListeners();
   }
 
-  _FolderSearchScope get folderSearchScope => _folderSearchScope;
-  set folderSearchScope(_FolderSearchScope value) {
+  FolderSearchScope get folderSearchScope => _folderSearchScope;
+  set folderSearchScope(FolderSearchScope value) {
     if (_folderSearchScope == value) return;
     _folderSearchScope = value;
     notifyListeners();
@@ -227,8 +240,7 @@ class FolderDetailController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleSelection(_Entry entry,
-      {required String Function(_Entry e) keyOf}) {
+  void toggleSelection(Entry entry, {required String Function(Entry e) keyOf}) {
     final key = keyOf(entry).trim();
     if (key.isEmpty) return;
     if (_selectedEntryKeys.contains(key)) {
@@ -243,15 +255,15 @@ class FolderDetailController extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool isSelected(_Entry entry, {required String Function(_Entry e) keyOf}) {
+  bool isSelected(Entry entry, {required String Function(Entry e) keyOf}) {
     final key = keyOf(entry).trim();
     if (key.isEmpty) return false;
     return _selectedEntryKeys.contains(key);
   }
 
-  List<_Entry> shown({
+  List<Entry> shown({
     required LayerSettings activeSettings,
-    required String Function(_Entry e) tagKeyOf,
+    required String Function(Entry e) tagKeyOf,
   }) {
     final q = _query.trim().toLowerCase();
     var out = _usingScopeSearch
@@ -273,17 +285,17 @@ class FolderDetailController extends ChangeNotifier {
   }
 
   int compareEntries(
-    _Entry a,
-    _Entry b, {
+    Entry a,
+    Entry b, {
     required LayerSettings activeSettings,
   }) {
     if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
 
     final asc = activeSettings.asc;
 
-    bool embyUnknownDate(_Entry e) =>
+    bool embyUnknownDate(Entry e) =>
         e.isEmby && !e.isDir && e.modified.millisecondsSinceEpoch == 0;
-    bool embyUnknownSize(_Entry e) => e.isEmby && !e.isDir && e.size == 0;
+    bool embyUnknownSize(Entry e) => e.isEmby && !e.isDir && e.size == 0;
     int byName() => naturalSort(a.name.toLowerCase(), b.name.toLowerCase());
 
     int r;
@@ -321,35 +333,7 @@ class FolderDetailController extends ChangeNotifier {
   }
 
   int naturalSort(String a, String b) {
-    var aIdx = 0;
-    var bIdx = 0;
-    final aLen = a.length;
-    final bLen = b.length;
-
-    while (aIdx < aLen && bIdx < bLen) {
-      final aChar = a[aIdx];
-      final bChar = b[bIdx];
-
-      if (aChar.isDigit && bChar.isDigit) {
-        var aNum = '';
-        var bNum = '';
-        while (aIdx < aLen && a[aIdx].isDigit) {
-          aNum += a[aIdx++];
-        }
-        while (bIdx < bLen && b[bIdx].isDigit) {
-          bNum += b[bIdx++];
-        }
-
-        final numA = int.parse(aNum);
-        final numB = int.parse(bNum);
-        if (numA != numB) return numA.compareTo(numB);
-      } else {
-        if (aChar != bChar) return aChar.compareTo(bChar);
-        aIdx++;
-        bIdx++;
-      }
-    }
-    return aLen.compareTo(bLen);
+    return compareNaturalText(a, b);
   }
 
   void _pruneSelection() {
@@ -395,4 +379,51 @@ class FolderDetailController extends ChangeNotifier {
     }
     return created;
   }
+}
+
+int compareNaturalText(String a, String b) {
+  var aIdx = 0;
+  var bIdx = 0;
+  final aLen = a.length;
+  final bLen = b.length;
+
+  while (aIdx < aLen && bIdx < bLen) {
+    final aChar = a[aIdx];
+    final bChar = b[bIdx];
+
+    if (aChar.isDigit && bChar.isDigit) {
+      final aStart = aIdx;
+      final bStart = bIdx;
+      while (aIdx < aLen && a[aIdx].isDigit) {
+        aIdx++;
+      }
+      while (bIdx < bLen && b[bIdx].isDigit) {
+        bIdx++;
+      }
+
+      final aNum = a.substring(aStart, aIdx);
+      final bNum = b.substring(bStart, bIdx);
+      final aTrimmed = aNum.replaceFirst(RegExp(r'^0+'), '');
+      final bTrimmed = bNum.replaceFirst(RegExp(r'^0+'), '');
+      final aNorm = aTrimmed.isEmpty ? '0' : aTrimmed;
+      final bNorm = bTrimmed.isEmpty ? '0' : bTrimmed;
+
+      final lenCompare = aNorm.length.compareTo(bNorm.length);
+      if (lenCompare != 0) return lenCompare;
+
+      final valueCompare = aNorm.compareTo(bNorm);
+      if (valueCompare != 0) return valueCompare;
+    } else {
+      if (aChar != bChar) return aChar.compareTo(bChar);
+      aIdx++;
+      bIdx++;
+    }
+  }
+
+  if (aIdx == aLen && bIdx == bLen) {
+    final zeroPadCompare = a.length.compareTo(b.length);
+    if (zeroPadCompare != 0) return zeroPadCompare;
+  }
+
+  return aLen.compareTo(bLen);
 }
