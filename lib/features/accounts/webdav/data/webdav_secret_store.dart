@@ -1,4 +1,4 @@
-import '../../../../secure_store.dart';
+import '../../../../core/storage/secure_store.dart';
 
 class WebDavSecretStore {
   WebDavSecretStore._();

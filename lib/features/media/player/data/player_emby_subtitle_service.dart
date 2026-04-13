@@ -1,7 +1,7 @@
 import 'package:collection/collection.dart';
 
 import '../../../../emby.dart';
-import '../../../../source_refs.dart';
+import '../../../../sources/refs.dart';
 
 class PlayerEmbyNowPlaying {
   final EmbyAccount account;

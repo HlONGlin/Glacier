@@ -18,6 +18,8 @@ class _SettingsPageState extends State<SettingsPage> {
 
   double _subtitleFontSize = 22.0;
   double _subtitleBottomOffset = 36.0;
+  double _subtitleBackgroundOpacity = 0.55;
+  bool _subtitleOutlineEnabled = true;
 
   bool _longPressSpeedEnabled = true;
   double _longPressSpeedMultiplier = 2.0;
@@ -56,6 +58,8 @@ class _SettingsPageState extends State<SettingsPage> {
       final values = await Future.wait<Object?>([
         AppSettings.getSubtitleFontSize(),
         AppSettings.getSubtitleBottomOffset(),
+        AppSettings.getSubtitleBackgroundOpacity(),
+        AppSettings.getSubtitleOutlineEnabled(),
         AppSettings.getLongPressSpeedEnabled(),
         AppSettings.getLongPressSpeedMultiplier(),
         AppSettings.getVideoMiniProgressWhenHidden(),
@@ -78,29 +82,33 @@ class _SettingsPageState extends State<SettingsPage> {
 
       final font = values[0] as double;
       final bottom = values[1] as double;
-      final lpEnabled = values[2] as bool;
-      final lpMul = values[3] as double;
-      final miniProgress = values[4] as bool;
-      final catalogEnabled = values[5] as bool;
-      final episodeNavEnabled = values[6] as bool;
-      final lockPauseSeekEnabled = values[7] as bool;
-      final locateCurrentOnOpen = values[8] as bool;
-      final imageDominantThreshold = values[9] as int;
-      final imageLibrarySimpleMode = values[10] as bool;
-      final videoResumeEnabled = values[11] as bool;
-      final videoResumeHint = values[12] as bool;
-      final imageVolumePaging = values[13] as bool;
-      final imageExitLocate = values[14] as bool;
-      final autoFav = values[15] as bool;
-      final perDirDisplay = values[16] as bool;
-      final embyExclusiveFavoritesUiEnabled = values[17] as bool;
-      final his = values[18] as bool;
-      final tagEnabled = values[19] as bool;
+      final bgOpacity = values[2] as double;
+      final outlineEnabled = values[3] as bool;
+      final lpEnabled = values[4] as bool;
+      final lpMul = values[5] as double;
+      final miniProgress = values[6] as bool;
+      final catalogEnabled = values[7] as bool;
+      final episodeNavEnabled = values[8] as bool;
+      final lockPauseSeekEnabled = values[9] as bool;
+      final locateCurrentOnOpen = values[10] as bool;
+      final imageDominantThreshold = values[11] as int;
+      final imageLibrarySimpleMode = values[12] as bool;
+      final videoResumeEnabled = values[13] as bool;
+      final videoResumeHint = values[14] as bool;
+      final imageVolumePaging = values[15] as bool;
+      final imageExitLocate = values[16] as bool;
+      final autoFav = values[17] as bool;
+      final perDirDisplay = values[18] as bool;
+      final embyExclusiveFavoritesUiEnabled = values[19] as bool;
+      final his = values[20] as bool;
+      final tagEnabled = values[21] as bool;
 
       if (!mounted) return;
       setState(() {
         _subtitleFontSize = font;
         _subtitleBottomOffset = bottom;
+        _subtitleBackgroundOpacity = bgOpacity.clamp(0.0, 1.0);
+        _subtitleOutlineEnabled = outlineEnabled;
         _longPressSpeedEnabled = lpEnabled;
         _longPressSpeedMultiplier = lpMul;
         _videoMiniProgressWhenHidden = miniProgress;
@@ -175,6 +183,29 @@ class _SettingsPageState extends State<SettingsPage> {
                 onChanged: (v) async {
                   setState(() => _subtitleBottomOffset = v);
                   await AppSettings.setSubtitleBottomOffset(v);
+                },
+              ),
+              _SettingsSliderTile(
+                title: '字幕背景透明度',
+                subtitle: '调整字幕背景板深浅，0 为完全透明，1 为完全不透明',
+                value: _subtitleBackgroundOpacity,
+                min: 0,
+                max: 1,
+                divisions: 20,
+                valueText: _subtitleBackgroundOpacity.toStringAsFixed(2),
+                onChanged: (v) async {
+                  setState(() => _subtitleBackgroundOpacity = v);
+                  await AppSettings.setSubtitleBackgroundOpacity(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('字幕描边'),
+                subtitle: const Text('开启后为字幕文字增加黑色描边，提升亮背景下可读性'),
+                value: _subtitleOutlineEnabled,
+                onChanged: (v) async {
+                  setState(() => _subtitleOutlineEnabled = v);
+                  await AppSettings.setSubtitleOutlineEnabled(v);
                 },
               ),
               const SizedBox(height: 10),

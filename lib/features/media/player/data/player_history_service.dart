@@ -1,8 +1,8 @@
 import 'package:collection/collection.dart';
 
 import '../../../../emby.dart';
-import '../../../../source_refs.dart';
-import '../../../../utils.dart';
+import '../../../../sources/refs.dart';
+import '../../../../core/utils/app_shared.dart';
 import 'play_source_resolver.dart';
 
 class PlayerHistoryService {

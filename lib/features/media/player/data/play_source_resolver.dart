@@ -4,9 +4,9 @@ import 'package:path/path.dart' as p;
 
 import '../../../../core/logging/app_logger.dart';
 import '../../../../emby.dart';
-import '../../../../source_accounts.dart';
-import '../../../../source_refs.dart';
-import '../../../../utils.dart';
+import '../../../../sources/accounts.dart';
+import '../../../../sources/refs.dart';
+import '../../../../core/utils/app_shared.dart';
 
 class ResolvedNetworkMediaSource {
   final Uri uri;

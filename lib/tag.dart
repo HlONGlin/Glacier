@@ -14,20 +14,20 @@ export 'core/network/background_gate.dart'
         webDavBgSemaphore,
         webDavUiSemaphore;
 import 'core/network/background_gate.dart';
-import 'ui_kit.dart';
+import 'ui/kit.dart';
 import 'webdav.dart';
 import 'image.dart';
-import 'remote_media_cache.dart';
-import 'source_accounts.dart';
-import 'source_refs.dart';
-import 'tag_interaction_helpers.dart';
-import 'tag_manager_filters.dart';
-import 'tag_models.dart';
-import 'tag_store_algorithms.dart';
-import 'tag_store_persistence.dart';
+import 'core/network/remote_media_cache.dart';
+import 'sources/accounts.dart';
+import 'sources/refs.dart';
+import 'tag/tag_interaction_helpers.dart';
+import 'tag/tag_manager_filters.dart';
+import 'tag/tag_models.dart';
+import 'tag/tag_store_algorithms.dart';
+import 'tag/tag_store_persistence.dart';
 import 'package:file_picker/file_picker.dart'; // 用于选择目录/导入文件
-part 'tag_files_tab_view.dart';
-part 'tag_ui_sections.dart';
+part 'tag/tag_files_tab_view.dart';
+part 'tag/tag_ui_sections.dart';
 // Android 版本不支持桌面端拖拽文件（desktop_drop / XFile）。
 // ===== core_utils.dart (auto-grouped) =====
 

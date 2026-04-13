@@ -23,6 +23,10 @@ class MainActivity : FlutterActivity() {
         )
         .setMethodCallHandler { call, result ->
           when (call.method) {
+            "enableSensorAutoRotate" -> {
+              requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+              result.success(null)
+            }
             "lockLandscape" -> {
               requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
               result.success(null)

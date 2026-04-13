@@ -2,7 +2,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-import '../../../../source_refs.dart';
+import '../../../../sources/refs.dart';
 
 class PlayerLocalSubtitleService {
   PlayerLocalSubtitleService._();

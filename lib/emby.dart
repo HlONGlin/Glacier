@@ -9,8 +9,8 @@ export 'features/accounts/emby/data/emby_store.dart';
 
 import 'features/accounts/emby/data/emby_account_model.dart';
 import 'features/accounts/emby/data/emby_store.dart';
-import 'emby_native_logic.dart';
-import 'ui_kit.dart';
+import 'emby/native_logic.dart';
+import 'ui/kit.dart';
 
 const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
   statusBarColor: Colors.transparent,

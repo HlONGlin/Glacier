@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../ui_kit.dart';
+import '../ui/kit.dart';
 import 'routes.dart';
 
 class GlacierApp extends StatelessWidget {

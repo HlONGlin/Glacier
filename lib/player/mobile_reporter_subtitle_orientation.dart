@@ -1,5 +1,13 @@
 part of '../video.dart';
 
+const int _kMobileOrientationStableSamples = 2;
+const int _kMobileOrientationApplyCooldownMs = 420;
+const int _kMobileOrientationStartupGuardMs = 450;
+
+bool _isAndroidNativeAutoRotateCapable() {
+  return !kIsWeb && Platform.isAndroid;
+}
+
 extension _MobileReporterMethods on _MobileVideoPlayerPageState {
   int _toEmbyTicks(Duration d) {
     final us = d.inMicroseconds;
@@ -152,8 +160,29 @@ extension _MobileReporterMethods on _MobileVideoPlayerPageState {
   void _startAutoRotateIfMobile() {
     if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
     _nativeOriSub?.cancel();
+    _nativeOriSub = null;
     unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
+
+    if (_isAndroidNativeAutoRotateCapable()) {
+      unawaited(() async {
+        try {
+          await _mobileOriChannel.invokeMethod('enableSensorAutoRotate');
+          _lastOriCandidate = null;
+          _oriStableCount = 0;
+          _lastOriApplyAt = DateTime.now();
+        } catch (_) {
+          _startSensorDrivenAutoRotateFallback();
+        }
+      }());
+      return;
+    }
+
+    _startSensorDrivenAutoRotateFallback();
+  }
+
+  void _startSensorDrivenAutoRotateFallback() {
     unawaited(_syncOrientationFromSensor(force: true));
+    final startupAt = DateTime.now();
     _nativeOriSub = NativeDeviceOrientationCommunicator()
         .onOrientationChanged(useSensor: true)
         .listen((ori) {
@@ -166,10 +195,17 @@ extension _MobileReporterMethods on _MobileVideoPlayerPageState {
         _lastOriCandidate = ori;
         _oriStableCount = 1;
       }
-      if (_oriStableCount < 1) return;
+      if (_oriStableCount < _kMobileOrientationStableSamples) return;
 
       final now = DateTime.now();
-      if (now.difference(_lastOriApplyAt).inMilliseconds < 180) return;
+      if (now.difference(startupAt).inMilliseconds <
+          _kMobileOrientationStartupGuardMs) {
+        return;
+      }
+      if (now.difference(_lastOriApplyAt).inMilliseconds <
+          _kMobileOrientationApplyCooldownMs) {
+        return;
+      }
       if (_appliedNativeOri == ori) return;
       _appliedNativeOri = ori;
       _lastOriApplyAt = now;
@@ -180,12 +216,20 @@ extension _MobileReporterMethods on _MobileVideoPlayerPageState {
   Future<void> _syncOrientationFromSensor({bool force = false}) async {
     if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
     if (!_autoRotateEnabled || _isScreenLocked) return;
+
+    if (_isAndroidNativeAutoRotateCapable()) {
+      try {
+        await _mobileOriChannel.invokeMethod('enableSensorAutoRotate');
+      } catch (_) {}
+      return;
+    }
+
     try {
       final ori = await NativeDeviceOrientationCommunicator()
           .orientation(useSensor: true);
       if (ori == NativeDeviceOrientation.unknown) return;
       _lastOriCandidate = ori;
-      _oriStableCount = 2;
+      _oriStableCount = _kMobileOrientationStableSamples;
       if (!force && _appliedNativeOri == ori) return;
       _appliedNativeOri = ori;
       _lastOriApplyAt = DateTime.now();

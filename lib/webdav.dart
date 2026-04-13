@@ -14,7 +14,7 @@ import 'core/network/network_runner.dart';
 import 'core/network/request_headers.dart';
 import 'features/accounts/webdav/data/webdav_account_model.dart';
 import 'features/accounts/webdav/data/webdav_store.dart';
-import 'ui_kit.dart';
+import 'ui/kit.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'image.dart';

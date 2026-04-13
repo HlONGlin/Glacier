@@ -8,18 +8,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'image_provider_helpers.dart';
-import 'image_preload_windows.dart';
-import 'image_overlay_layout_helpers.dart';
-import 'image_source_resolver.dart';
-import 'image_ratio_cache.dart';
-import 'image_strip_sync_helpers.dart';
-import 'image_strip_layout_helpers.dart';
-import 'image_viewer_render_helpers.dart';
+import 'image/provider_helpers.dart';
+import 'image/preload_windows.dart';
+import 'image/overlay_layout_helpers.dart';
+import 'image/source_resolver.dart';
+import 'image/ratio_cache.dart';
+import 'image/strip_sync_helpers.dart';
+import 'image/strip_layout_helpers.dart';
+import 'image/viewer_render_helpers.dart';
 import 'video.dart';
-import 'utils.dart';
-part 'image_tiles.dart';
-part 'image_strip_item.dart';
+import 'core/utils/app_shared.dart';
+part 'image/tiles.dart';
+part 'image/strip_item.dart';
 
 // ===== media_image.dart =====
 
