@@ -1,5 +1,102 @@
 part of '../pages.dart';
 
+class _FolderSkeletonBlock extends StatelessWidget {
+  final double width;
+  final double height;
+  final BorderRadius borderRadius;
+
+  const _FolderSkeletonBlock({
+    required this.width,
+    required this.height,
+    this.borderRadius = const BorderRadius.all(Radius.circular(14)),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        borderRadius: borderRadius,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Colors.white.withValues(alpha: 0.92),
+            const Color(0xFFEAF0FF),
+          ],
+        ),
+        border: const Border.fromBorderSide(
+          BorderSide(color: Color(0xB8FFFFFF)),
+        ),
+      ),
+    );
+  }
+}
+
+class _FolderListSkeletonItem extends StatelessWidget {
+  const _FolderListSkeletonItem();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Glass(
+      radius: 18,
+      blur: 14,
+      padding: EdgeInsets.all(10),
+      child: Row(
+        children: [
+          _FolderSkeletonBlock(width: 76, height: 76),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _FolderSkeletonBlock(width: 180, height: 16),
+                SizedBox(height: 8),
+                _FolderSkeletonBlock(width: 120, height: 12),
+                SizedBox(height: 12),
+                _FolderSkeletonBlock(width: 86, height: 26),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FolderGridSkeletonItem extends StatelessWidget {
+  final bool wide;
+
+  const _FolderGridSkeletonItem({this.wide = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Glass(
+      radius: 18,
+      blur: 14,
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: _FolderSkeletonBlock(
+              width: double.infinity,
+              height: double.infinity,
+              borderRadius: BorderRadius.circular(16),
+            ),
+          ),
+          const SizedBox(height: 10),
+          _FolderSkeletonBlock(width: wide ? 170 : 110, height: 15),
+          const SizedBox(height: 8),
+          _FolderSkeletonBlock(width: wide ? 120 : 72, height: 11),
+        ],
+      ),
+    );
+  }
+}
+
 extension _FolderDetailToolbar on _FolderDetailPageState {
   void _toggleSearchUi(bool hasQuery) {
     final showing = _searchExpanded || hasQuery;

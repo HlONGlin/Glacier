@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1258,14 +1259,16 @@ class _EmbyExclusiveFavoritesPageState
     }
 
     Widget buildDirSeed(String seedUrl) {
-      return Image.network(
-        seedUrl,
-        headers: headers,
+      return CachedNetworkImage(
+        imageUrl: seedUrl,
+        httpHeaders: headers,
         fit: BoxFit.cover,
-        cacheWidth: coverWidth,
-        filterQuality: FilterQuality.low,
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => emptyPlaceholder(),
+        memCacheWidth: coverWidth,
+        maxWidthDiskCache: coverWidth,
+        fadeInDuration: Duration.zero,
+        fadeOutDuration: Duration.zero,
+        placeholder: (_, __) => emptyPlaceholder(),
+        errorWidget: (_, __, ___) => emptyPlaceholder(),
       );
     }
 
@@ -1277,14 +1280,16 @@ class _EmbyExclusiveFavoritesPageState
     if (url.isEmpty) {
       return emptyPlaceholder();
     }
-    return Image.network(
-      url,
-      headers: headers,
+    return CachedNetworkImage(
+      imageUrl: url,
+      httpHeaders: headers,
       fit: BoxFit.cover,
-      cacheWidth: coverWidth,
-      filterQuality: isMovie ? FilterQuality.medium : FilterQuality.low,
-      gaplessPlayback: true,
-      errorBuilder: (_, __, ___) => brokenPlaceholder(),
+      memCacheWidth: coverWidth,
+      maxWidthDiskCache: coverWidth,
+      fadeInDuration: Duration.zero,
+      fadeOutDuration: Duration.zero,
+      placeholder: (_, __) => emptyPlaceholder(),
+      errorWidget: (_, __, ___) => brokenPlaceholder(),
     );
   }
 

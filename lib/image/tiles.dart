@@ -12,6 +12,58 @@ class VideoThumbImage extends StatelessWidget {
     this.cacheOnly = false,
   });
 
+  Widget _buildThumbFrame(File f, {required EdgeInsets iconPadding}) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 180),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeOutCubic,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: child,
+      ),
+      child: Stack(
+        key: ValueKey(f.path),
+        fit: StackFit.expand,
+        children: [
+          Image.file(
+            f,
+            fit: fit,
+            filterQuality: FilterQuality.medium,
+            gaplessPlayback: true,
+            frameBuilder: (_, child, frame, wasSyncLoaded) {
+              return AnimatedOpacity(
+                opacity: frame == null && !wasSyncLoaded ? 0 : 1,
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
+                child: child,
+              );
+            },
+            errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
+          ),
+          Align(
+            alignment: Alignment.bottomRight,
+            child: Padding(
+              padding: iconPadding,
+              child: Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.28),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.play_arrow_rounded,
+                  size: 16,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = videoPath.trim();
@@ -23,22 +75,9 @@ class VideoThumbImage extends StatelessWidget {
         builder: (context, snap) {
           final f = snap.data;
           if (f != null && f.existsSync() && f.lengthSync() > 0) {
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.file(f,
-                    fit: fit,
-                    filterQuality: FilterQuality.medium,
-                    gaplessPlayback: true),
-                const Align(
-                  alignment: Alignment.bottomRight,
-                  child: Padding(
-                    padding: EdgeInsets.all(4),
-                    child: Icon(Icons.play_circle_fill,
-                        size: 18, color: Colors.white70),
-                  ),
-                ),
-              ],
+            return _buildThumbFrame(
+              f,
+              iconPadding: const EdgeInsets.all(4),
             );
           }
           return const _ThumbPlaceholder();
@@ -51,25 +90,9 @@ class VideoThumbImage extends StatelessWidget {
       builder: (context, snap) {
         final f = snap.data;
         if (f != null && f.existsSync() && f.lengthSync() > 0) {
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              Image.file(
-                f,
-                fit: fit,
-                filterQuality: FilterQuality.medium,
-                gaplessPlayback: true,
-                errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
-              ),
-              const Align(
-                alignment: Alignment.bottomRight,
-                child: Padding(
-                  padding: EdgeInsets.all(6),
-                  child: Icon(Icons.play_circle_fill,
-                      size: 18, color: Colors.white70),
-                ),
-              ),
-            ],
+          return _buildThumbFrame(
+            f,
+            iconPadding: const EdgeInsets.all(6),
           );
         }
         return const _ThumbPlaceholder();

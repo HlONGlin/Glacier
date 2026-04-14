@@ -7,6 +7,8 @@ import 'core/settings/app_settings.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;
+  PaintingBinding.instance.imageCache.maximumSize = 300;
   MediaKit.ensureInitialized();
   await AppSettings.instance.init();
 

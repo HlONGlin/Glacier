@@ -14,6 +14,69 @@ class _EmbyCollectionProjection {
   Set<String> get accountIds => refs.map((e) => e.accountId).toSet();
 }
 
+class _InteractiveCard extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final BorderRadius borderRadius;
+
+  const _InteractiveCard({
+    required this.child,
+    required this.onTap,
+    required this.borderRadius,
+  });
+
+  @override
+  State<_InteractiveCard> createState() => _InteractiveCardState();
+}
+
+class _InteractiveCardState extends State<_InteractiveCard> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed == value) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scale = _pressed ? 0.985 : 1.0;
+    final overlay = _pressed ? 0.07 : 0.0;
+    return AnimatedScale(
+      scale: scale,
+      duration: const Duration(milliseconds: 110),
+      curve: Curves.easeOutCubic,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: widget.borderRadius,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: _pressed ? 0.12 : 0.18),
+              blurRadius: _pressed ? 10 : 16,
+              offset: Offset(0, _pressed ? 5 : 8),
+            ),
+          ],
+        ),
+        child: InkWell(
+          borderRadius: widget.borderRadius,
+          onTap: widget.onTap,
+          onHighlightChanged: _setPressed,
+          splashColor: Colors.white.withValues(alpha: 0.08),
+          highlightColor: Colors.white.withValues(alpha: 0.02),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 110),
+            curve: Curves.easeOutCubic,
+            decoration: BoxDecoration(
+              borderRadius: widget.borderRadius,
+              color: Colors.white.withValues(alpha: overlay),
+            ),
+            child: widget.child,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _EmbyOnlyFavoritesPage extends StatefulWidget {
   const _EmbyOnlyFavoritesPage();
 
@@ -36,6 +99,10 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
   Object? _loadError;
   String _query = '';
   int _tab = 0;
+  int _prefetchEpoch = 0;
+  final ScrollController _homeScrollController = ScrollController();
+  final ScrollController _searchScrollController = ScrollController();
+  final ScrollController _favoritesScrollController = ScrollController();
 
   List<FavoriteCollection> _allCollections = const [];
   List<_EmbyCollectionProjection> _items = const [];
@@ -44,7 +111,25 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
   @override
   void initState() {
     super.initState();
+    _homeScrollController.addListener(_onHomeScroll);
+    _searchScrollController.addListener(_onSearchScroll);
+    _favoritesScrollController.addListener(_onFavoritesScroll);
     _reload();
+  }
+
+  @override
+  void dispose() {
+    _prefetchEpoch++;
+    _homeScrollController
+      ..removeListener(_onHomeScroll)
+      ..dispose();
+    _searchScrollController
+      ..removeListener(_onSearchScroll)
+      ..dispose();
+    _favoritesScrollController
+      ..removeListener(_onFavoritesScroll)
+      ..dispose();
+    super.dispose();
   }
 
   List<_EmbyCollectionProjection> _buildProjection(
@@ -67,8 +152,8 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
     return out;
   }
 
-  Future<NavCtx?> _initialEmbyNavForProjection(
-      _EmbyCollectionProjection projection) async {
+  NavCtx? _fastInitialEmbyNavForProjection(
+      _EmbyCollectionProjection projection) {
     for (final ref in projection.refs) {
       final accountId = ref.accountId.trim();
       if (accountId.isEmpty) continue;
@@ -81,6 +166,22 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
           title: projection.base.name,
         );
       }
+
+      return null;
+    }
+    return null;
+  }
+
+  Future<NavCtx?> _resolveInitialEmbyNavForProjection(
+      _EmbyCollectionProjection projection) async {
+    final fast = _fastInitialEmbyNavForProjection(projection);
+    if (fast != null) return fast;
+
+    for (final ref in projection.refs) {
+      final accountId = ref.accountId.trim();
+      if (accountId.isEmpty) continue;
+      final rawPath = ref.path.trim();
+      if (rawPath.isNotEmpty && rawPath != 'favorites') continue;
 
       final account = _accountMap[accountId];
       if (account == null) continue;
@@ -119,6 +220,8 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
         _loadError = null;
         _loading = false;
       });
+      _scheduleViewportPrefetch(_items,
+          delay: const Duration(milliseconds: 280));
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -126,6 +229,130 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
         _loading = false;
       });
       showAppToast(context, friendlyErrorMessage(e), error: true);
+    }
+  }
+
+  void _onSearchScroll() {
+    if (_tab != 1) return;
+    _scheduleViewportPrefetch(_filtered(),
+        delay: const Duration(milliseconds: 90));
+  }
+
+  void _onHomeScroll() {
+    if (_tab != 0) return;
+    _scheduleViewportPrefetch(_filtered(),
+        delay: const Duration(milliseconds: 90));
+  }
+
+  void _onFavoritesScroll() {
+    if (_tab != 2) return;
+    _scheduleViewportPrefetch(_filtered(),
+        delay: const Duration(milliseconds: 90));
+  }
+
+  void _scheduleViewportPrefetch(
+    List<_EmbyCollectionProjection> items, {
+    Duration delay = const Duration(milliseconds: 120),
+  }) {
+    final epoch = ++_prefetchEpoch;
+    final snapshot =
+        List<_EmbyCollectionProjection>.from(items, growable: false);
+    unawaited(() async {
+      await Future<void>.delayed(delay);
+      if (!mounted || epoch != _prefetchEpoch) return;
+      _prefetchForCurrentViewport(snapshot);
+    }());
+  }
+
+  void _prefetchForCurrentViewport(List<_EmbyCollectionProjection> items) {
+    if (!mounted || _loading || _loadError != null || items.isEmpty) return;
+    switch (_tab) {
+      case 1:
+        _prefetchSearchViewport(items);
+        return;
+      case 2:
+        _prefetchFavoritesViewport(items);
+        return;
+      default:
+        _prefetchHomeViewport(items);
+        return;
+    }
+  }
+
+  void _prefetchHomeViewport(List<_EmbyCollectionProjection> items) {
+    final groupedEntries =
+        _groupByAccount(items).entries.toList(growable: false);
+    final buckets = <List<_EmbyCollectionProjection>>[
+      items.take(8).toList(growable: false),
+      items.take(2).toList(growable: false),
+      for (final entry in groupedEntries)
+        entry.value.take(8).toList(growable: false),
+    ];
+    if (buckets.isEmpty) return;
+
+    final offset =
+        _homeScrollController.hasClients ? _homeScrollController.offset : 0;
+    final viewport = _homeScrollController.hasClients
+        ? _homeScrollController.position.viewportDimension
+        : (MediaQuery.of(context).size.height - 140).clamp(260.0, 1400.0);
+    const sectionExtent = 224.0;
+    final firstBucket = max(0, (offset / sectionExtent).floor());
+    final visibleBuckets = max(1, (viewport / sectionExtent).ceil());
+    final start = max(0, firstBucket - 1);
+    final end = min(buckets.length, firstBucket + visibleBuckets + 2);
+    for (var i = start; i < end; i++) {
+      _prefetchItems(buckets[i]);
+    }
+  }
+
+  void _prefetchSearchViewport(List<_EmbyCollectionProjection> items) {
+    const itemExtent = 78.0;
+    final offset =
+        _searchScrollController.hasClients ? _searchScrollController.offset : 0;
+    final viewport = _searchScrollController.hasClients
+        ? _searchScrollController.position.viewportDimension
+        : (MediaQuery.of(context).size.height - 180).clamp(200.0, 1200.0);
+    final first = (offset / itemExtent).floor();
+    final visible = max(1, (viewport / itemExtent).ceil());
+    _prefetchRange(items, first - 4, first + visible + 8);
+  }
+
+  void _prefetchFavoritesViewport(List<_EmbyCollectionProjection> items) {
+    const columns = 2;
+    const horizontalPadding = 24.0;
+    const crossAxisSpacing = 10.0;
+    const mainAxisSpacing = 12.0;
+    const childAspectRatio = 0.95;
+    final width = MediaQuery.of(context).size.width;
+    final usableWidth = max(1.0, width - horizontalPadding - crossAxisSpacing);
+    final tileWidth = usableWidth / columns;
+    final tileHeight = tileWidth / childAspectRatio;
+    final rowExtent = tileHeight + mainAxisSpacing;
+    final offset = _favoritesScrollController.hasClients
+        ? _favoritesScrollController.offset
+        : 0;
+    final viewport = _favoritesScrollController.hasClients
+        ? _favoritesScrollController.position.viewportDimension
+        : (MediaQuery.of(context).size.height - 160).clamp(240.0, 1400.0);
+    final firstRow = (offset / rowExtent).floor();
+    final visibleRows = max(1, (viewport / rowExtent).ceil());
+    final start = max(0, (firstRow - 1) * columns);
+    final end = min(items.length, (firstRow + visibleRows + 2) * columns);
+    _prefetchRange(items, start, end);
+  }
+
+  void _prefetchRange(
+      List<_EmbyCollectionProjection> items, int start, int end) {
+    final safeStart = max(0, start);
+    final safeEnd = min(items.length, end);
+    for (var i = safeStart; i < safeEnd; i++) {
+      unawaited(_resolveSharedPreview(items[i].embySources));
+    }
+  }
+
+  void _prefetchItems(List<_EmbyCollectionProjection> items) {
+    for (final item in items) {
+      unawaited(_resolveSharedPreview(item.embySources));
     }
   }
 
@@ -143,9 +370,12 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
   }
 
   Future<void> _openProjection(_EmbyCollectionProjection p) async {
-    await AppSettings.setLastFavoriteId(p.base.id);
+    unawaited(AppSettings.setLastFavoriteId(p.base.id));
+    unawaited(_resolveSharedPreview(p.embySources, highPriority: true));
     final embyOnly = p.base.copy()..sources = List<String>.from(p.embySources);
-    final initialNav = await _initialEmbyNavForProjection(p);
+    final initialNav = _fastInitialEmbyNavForProjection(p);
+    final deferredInitialNav =
+        initialNav == null ? _resolveInitialEmbyNavForProjection(p) : null;
     if (!mounted) return;
     final updated = await Navigator.push<FavoriteCollection>(
       context,
@@ -153,6 +383,7 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
         builder: (_) => FolderDetailPage(
           collection: embyOnly,
           initialNav: initialNav,
+          deferredInitialNav: deferredInitialNav,
         ),
       ),
     );
@@ -271,41 +502,43 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
   Widget _shelfCard(_EmbyCollectionProjection p, {double width = 175}) {
     final accountNames =
         p.accountIds.map((id) => _accountMap[id]?.name ?? id).toList();
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: () => _openProjection(p),
-      child: SizedBox(
-        width: width,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AspectRatio(
-              aspectRatio: 1.62,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: _panel,
-                  borderRadius: BorderRadius.circular(12),
+    return RepaintBoundary(
+      child: _InteractiveCard(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _openProjection(p),
+        child: SizedBox(
+          width: width,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AspectRatio(
+                aspectRatio: 1.62,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: _panel,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: _cover(p.embySources),
                 ),
-                child: _cover(p.embySources),
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              p.base.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: _text, fontSize: 15),
-            ),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                _chip('来源 ${p.embySources.length}'),
-                if (accountNames.isNotEmpty) _chip(accountNames.first),
-              ],
-            ),
-          ],
+              const SizedBox(height: 6),
+              Text(
+                p.base.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: _text, fontSize: 15),
+              ),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  _chip('来源 ${p.embySources.length}'),
+                  if (accountNames.isNotEmpty) _chip(accountNames.first),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -349,65 +582,97 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
   }
 
   Widget _homeTab(List<_EmbyCollectionProjection> shown) {
-    final grouped = _groupByAccount(shown);
+    final groupedEntries =
+        _groupByAccount(shown).entries.toList(growable: false);
     return RefreshIndicator(
       onRefresh: _reload,
-      child: ListView(
+      child: ListView.builder(
+        controller: _homeScrollController,
+        cacheExtent: 900,
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 26),
-        children: [
-          _headerBar(),
-          const SizedBox(height: 10),
-          _sectionTitle('媒体库'),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 170,
-            child: shown.isEmpty
-                ? const Center(
-                    child: Text('暂无媒体库',
-                        style: TextStyle(color: _sub, fontSize: 13)))
-                : ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: shown.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 10),
-                    itemBuilder: (_, i) => _shelfCard(shown[i]),
-                  ),
-          ),
-          const SizedBox(height: 8),
-          _sectionTitle('继续观看'),
-          const SizedBox(height: 8),
-          if (shown.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 18),
-              child: Text('暂无可继续观看内容',
-                  style: TextStyle(color: _sub, fontSize: 13)),
-            )
-          else
-            Row(
+        itemCount: 2 + groupedEntries.length,
+        itemBuilder: (_, index) {
+          if (index == 0) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                    child: _shelfCard(shown.first, width: double.infinity)),
-                if (shown.length > 1) ...[
-                  const SizedBox(width: 10),
-                  Expanded(child: _shelfCard(shown[1], width: double.infinity)),
-                ],
+                _headerBar(),
+                const SizedBox(height: 10),
+                _sectionTitle('媒体库'),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 170,
+                  child: shown.isEmpty
+                      ? const Center(
+                          child: Text('暂无媒体库',
+                              style: TextStyle(color: _sub, fontSize: 13)))
+                      : ListView.separated(
+                          cacheExtent: 480,
+                          scrollDirection: Axis.horizontal,
+                          itemCount: shown.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(width: 10),
+                          itemBuilder: (_, i) => _shelfCard(shown[i]),
+                        ),
+                ),
+                const SizedBox(height: 8),
+              ],
+            );
+          }
+
+          if (index == 1) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _sectionTitle('继续观看'),
+                const SizedBox(height: 8),
+                if (shown.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 18),
+                    child: Text('暂无可继续观看内容',
+                        style: TextStyle(color: _sub, fontSize: 13)),
+                  )
+                else
+                  Row(
+                    children: [
+                      Expanded(
+                          child:
+                              _shelfCard(shown.first, width: double.infinity)),
+                      if (shown.length > 1) ...[
+                        const SizedBox(width: 10),
+                        Expanded(
+                            child:
+                                _shelfCard(shown[1], width: double.infinity)),
+                      ],
+                    ],
+                  ),
+                const SizedBox(height: 14),
+              ],
+            );
+          }
+
+          final entry = groupedEntries[index - 2];
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _sectionTitle(entry.key),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 170,
+                  child: ListView.separated(
+                    cacheExtent: 480,
+                    scrollDirection: Axis.horizontal,
+                    itemCount: entry.value.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (_, i) => _shelfCard(entry.value[i]),
+                  ),
+                ),
               ],
             ),
-          const SizedBox(height: 14),
-          for (final entry in grouped.entries) ...[
-            _sectionTitle(entry.key),
-            const SizedBox(height: 8),
-            SizedBox(
-              height: 170,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: entry.value.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 10),
-                itemBuilder: (_, i) => _shelfCard(entry.value[i]),
-              ),
-            ),
-            const SizedBox(height: 10),
-          ],
-        ],
+          );
+        },
       ),
     );
   }
@@ -423,7 +688,10 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
               const SizedBox(height: 10),
               TextField(
                 style: const TextStyle(color: _text),
-                onChanged: (v) => setState(() => _query = v),
+                onChanged: (v) {
+                  setState(() => _query = v);
+                  _scheduleViewportPrefetch(_filtered());
+                },
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: _panel,
@@ -433,7 +701,10 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
                   suffixIcon: _query.trim().isEmpty
                       ? null
                       : IconButton(
-                          onPressed: () => setState(() => _query = ''),
+                          onPressed: () {
+                            setState(() => _query = '');
+                            _scheduleViewportPrefetch(_filtered());
+                          },
                           icon: const Icon(Icons.close, color: _sub),
                         ),
                   border: OutlineInputBorder(
@@ -453,42 +724,46 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
                   subtitle: '试试其他关键词',
                 )
               : ListView.separated(
+                  controller: _searchScrollController,
+                  cacheExtent: 640,
                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
                   itemCount: shown.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 10),
                   itemBuilder: (_, i) {
                     final it = shown[i];
-                    return InkWell(
-                      borderRadius: BorderRadius.circular(12),
-                      onTap: () => _openProjection(it),
-                      child: Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: _panel,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Row(
-                          children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(10),
-                              child: SizedBox(
-                                width: 96,
-                                height: 60,
-                                child: _MultiSourcePreview(it.embySources),
+                    return RepaintBoundary(
+                      child: _InteractiveCard(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => _openProjection(it),
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: _panel,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: SizedBox(
+                                  width: 96,
+                                  height: 60,
+                                  child: _MultiSourcePreview(it.embySources),
+                                ),
                               ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                it.base.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style:
-                                    const TextStyle(color: _text, fontSize: 15),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  it.base.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      color: _text, fontSize: 15),
+                                ),
                               ),
-                            ),
-                            const Icon(Icons.chevron_right, color: _sub),
-                          ],
+                              const Icon(Icons.chevron_right, color: _sub),
+                            ],
+                          ),
                         ),
                       ),
                     );
@@ -514,6 +789,8 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
                   subtitle: '去收藏夹里添加 Emby 来源后再回来',
                 )
               : GridView.builder(
+                  controller: _favoritesScrollController,
+                  cacheExtent: 820,
                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
                   itemCount: shown.length,
                   gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -524,28 +801,30 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
                   ),
                   itemBuilder: (_, i) {
                     final it = shown[i];
-                    return InkWell(
-                      borderRadius: BorderRadius.circular(12),
-                      onTap: () => _openProjection(it),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: _panel,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        padding: const EdgeInsets.all(8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(child: _cover(it.embySources)),
-                            const SizedBox(height: 8),
-                            Text(
-                              it.base.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  const TextStyle(color: _text, fontSize: 14),
-                            ),
-                          ],
+                    return RepaintBoundary(
+                      child: _InteractiveCard(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => _openProjection(it),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: _panel,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.all(8),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(child: _cover(it.embySources)),
+                              const SizedBox(height: 8),
+                              Text(
+                                it.base.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style:
+                                    const TextStyle(color: _text, fontSize: 14),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     );
@@ -611,7 +890,10 @@ class _EmbyOnlyFavoritesPageState extends State<_EmbyOnlyFavoritesPage> {
               unselectedItemColor: _sub,
               selectedFontSize: 13,
               unselectedFontSize: 13,
-              onTap: (i) => setState(() => _tab = i),
+              onTap: (i) {
+                setState(() => _tab = i);
+                _scheduleViewportPrefetch(_filtered());
+              },
               items: const [
                 BottomNavigationBarItem(
                     icon: Icon(Icons.home_outlined), label: '主页'),

@@ -1,5 +1,90 @@
 part of '../pages.dart';
 
+class _FavoritesInteractiveCard extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final GestureTapDownCallback? onSecondaryTapDown;
+  final VoidCallback? onLongPress;
+  final BorderRadius borderRadius;
+
+  const _FavoritesInteractiveCard({
+    required this.child,
+    required this.onTap,
+    required this.onSecondaryTapDown,
+    required this.onLongPress,
+    required this.borderRadius,
+  });
+
+  @override
+  State<_FavoritesInteractiveCard> createState() =>
+      _FavoritesInteractiveCardState();
+}
+
+class _FavoritesInteractiveCardState extends State<_FavoritesInteractiveCard> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed == value) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedScale(
+      scale: _pressed ? 0.987 : 1,
+      duration: const Duration(milliseconds: 110),
+      curve: Curves.easeOutCubic,
+      child: InkWell(
+        onTap: widget.onTap,
+        onSecondaryTapDown: widget.onSecondaryTapDown,
+        onLongPress: widget.onLongPress,
+        onHighlightChanged: _setPressed,
+        borderRadius: widget.borderRadius,
+        splashColor: Colors.white.withValues(alpha: 0.08),
+        highlightColor: Colors.white.withValues(alpha: 0.03),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+Widget _fadeInFavoriteImage(Widget child, {Object? keySeed}) {
+  return AnimatedSwitcher(
+    duration: const Duration(milliseconds: 180),
+    switchInCurve: Curves.easeOutCubic,
+    switchOutCurve: Curves.easeOutCubic,
+    transitionBuilder: (child, animation) => FadeTransition(
+      opacity: animation,
+      child: child,
+    ),
+    child: KeyedSubtree(
+      key: ValueKey(keySeed ?? child.runtimeType),
+      child: child,
+    ),
+  );
+}
+
+Widget _animatedFavoriteFileImage(
+  File file, {
+  required Widget errorFallback,
+  BoxFit fit = BoxFit.cover,
+}) {
+  return Image.file(
+    file,
+    fit: fit,
+    gaplessPlayback: true,
+    frameBuilder: (_, child, frame, wasSyncLoaded) {
+      return AnimatedOpacity(
+        opacity: frame == null && !wasSyncLoaded ? 0 : 1,
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOutCubic,
+        child: child,
+      );
+    },
+    errorBuilder: (_, __, ___) => errorFallback,
+  );
+}
+
 /// =========================
 /// FavoritesPage (Collections)
 /// =========================
@@ -603,9 +688,14 @@ Widget _collectionCover(FavoriteCollection c) {
   final custom = c.coverPath;
   if (custom != null && custom.trim().isNotEmpty && File(custom).existsSync()) {
     return isPageImagePath(custom)
-        ? Image.file(File(custom),
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => const _CoverPlaceholder())
+        ? _fadeInFavoriteImage(
+            _animatedFavoriteFileImage(
+              File(custom),
+              fit: BoxFit.cover,
+              errorFallback: const _CoverPlaceholder(),
+            ),
+            keySeed: custom,
+          )
         : (isPageVideoPath(custom)
             ? VideoThumbImage(videoPath: custom)
             : const _CoverPlaceholder());
@@ -635,7 +725,7 @@ class _CollectionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final subtitle = _collectionSubtitle(c);
 
-    return InkWell(
+    return _FavoritesInteractiveCard(
       onTap: onOpen,
       onSecondaryTapDown: (d) => onSecondary(d.globalPosition),
       onLongPress: () {
@@ -692,7 +782,7 @@ class _CollectionListTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final subtitle = _collectionSubtitle(c);
-    return InkWell(
+    return _FavoritesInteractiveCard(
       onTap: onOpen,
       onSecondaryTapDown: (d) => onSecondary(d.globalPosition),
       onLongPress: () {

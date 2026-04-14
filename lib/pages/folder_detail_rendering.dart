@@ -1,6 +1,150 @@
 part of '../pages.dart';
 
+class _FolderEntryInteractive extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+  final GestureTapDownCallback? onSecondaryTapDown;
+  final BorderRadius borderRadius;
+
+  const _FolderEntryInteractive({
+    required this.child,
+    required this.onTap,
+    required this.onLongPress,
+    required this.onSecondaryTapDown,
+    required this.borderRadius,
+  });
+
+  @override
+  State<_FolderEntryInteractive> createState() =>
+      _FolderEntryInteractiveState();
+}
+
+class _FolderEntryInteractiveState extends State<_FolderEntryInteractive> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed == value) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scale = _pressed ? 0.988 : 1.0;
+    return AnimatedScale(
+      scale: scale,
+      duration: const Duration(milliseconds: 105),
+      curve: Curves.easeOutCubic,
+      child: InkWell(
+        borderRadius: widget.borderRadius,
+        onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
+        onSecondaryTapDown: widget.onSecondaryTapDown,
+        onHighlightChanged: _setPressed,
+        splashColor: Colors.white.withValues(alpha: 0.08),
+        highlightColor: Colors.white.withValues(alpha: 0.03),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
 extension _FolderDetailRendering on _FolderDetailPageState {
+  Widget _fadeInPreview(Widget child, {Object? keySeed}) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 170),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeOutCubic,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: child,
+      ),
+      child: KeyedSubtree(
+        key: ValueKey(keySeed ?? child.runtimeType),
+        child: child,
+      ),
+    );
+  }
+
+  Widget _animatedImageFile(
+    File file, {
+    required Widget errorFallback,
+    BoxFit fit = BoxFit.cover,
+  }) {
+    return Image.file(
+      file,
+      fit: fit,
+      gaplessPlayback: true,
+      frameBuilder: (_, child, frame, wasSyncLoaded) {
+        return AnimatedOpacity(
+          opacity: frame == null && !wasSyncLoaded ? 0 : 1,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
+          child: child,
+        );
+      },
+      errorBuilder: (_, __, ___) => errorFallback,
+    );
+  }
+
+  Widget _animatedNetworkImage(
+    String url, {
+    required Widget errorFallback,
+    Map<String, String>? headers,
+    BoxFit fit = BoxFit.cover,
+  }) {
+    return CachedNetworkImage(
+      imageUrl: url,
+      httpHeaders: headers,
+      fit: fit,
+      fadeInDuration: const Duration(milliseconds: 160),
+      fadeOutDuration: const Duration(milliseconds: 80),
+      placeholder: (_, __) => errorFallback,
+      errorWidget: (_, __, ___) => errorFallback,
+    );
+  }
+
+  Widget _buildImmersiveLoadingBody({bool compact = false}) {
+    switch (_active.viewMode) {
+      case ViewMode.list:
+        return ListView.builder(
+          physics: const NeverScrollableScrollPhysics(),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          itemCount: compact ? 4 : 7,
+          itemBuilder: (_, __) => const Padding(
+            padding: EdgeInsets.only(bottom: 10),
+            child: _FolderListSkeletonItem(),
+          ),
+        );
+      case ViewMode.gallery:
+        return GridView.builder(
+          physics: const NeverScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(12),
+          itemCount: compact ? 4 : 6,
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 420,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: 1.45,
+          ),
+          itemBuilder: (_, __) => const _FolderGridSkeletonItem(wide: true),
+        );
+      case ViewMode.grid:
+        return GridView.builder(
+          physics: const NeverScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(12),
+          itemCount: compact ? 6 : 10,
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 220,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            childAspectRatio: 0.95,
+          ),
+          itemBuilder: (_, __) => const _FolderGridSkeletonItem(),
+        );
+    }
+  }
+
   Widget _buildByMode(List<Entry> l, List<String> imgs, List<String> vids) {
     _syncEntryAnchorKeys(l);
     final usedAnchorKeys = <String>{};
@@ -64,12 +208,14 @@ extension _FolderDetailRendering on _FolderDetailPageState {
     if (url == null || url.trim().isEmpty) {
       return const _CoverPlaceholder();
     }
-    return _ProportionalPreviewBox(
-      child: Image.network(
-        url,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => const _CoverPlaceholder(),
+    return _fadeInPreview(
+      _ProportionalPreviewBox(
+        child: _animatedNetworkImage(
+          url,
+          errorFallback: const _CoverPlaceholder(),
+        ),
       ),
+      keySeed: url,
     );
   }
 
@@ -91,23 +237,15 @@ extension _FolderDetailRendering on _FolderDetailPageState {
 
     if (_isImgName(e.name)) {
       final uri = client.resolveHref(href);
-      return _ProportionalPreviewBox(
-        child: Image.network(
-          uri.toString(),
-          headers: acc.authHeaders,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => const _CoverPlaceholder(),
-          loadingBuilder: (ctx, child, loading) {
-            if (loading == null) return child;
-            return const Center(
-              child: SizedBox(
-                width: 26,
-                height: 26,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            );
-          },
+      return _fadeInPreview(
+        _ProportionalPreviewBox(
+          child: _animatedNetworkImage(
+            uri.toString(),
+            headers: acc.authHeaders,
+            errorFallback: const _CoverPlaceholder(),
+          ),
         ),
+        keySeed: uri.toString(),
       );
     }
 
@@ -129,12 +267,15 @@ extension _FolderDetailRendering on _FolderDetailPageState {
         future: fut,
         builder: (_, snap) {
           if (snap.data != null) {
-            return _ProportionalPreviewBox(
-              child: Image.file(
-                snap.data!,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const _VideoPlaceholder(),
+            return _fadeInPreview(
+              _ProportionalPreviewBox(
+                child: _animatedImageFile(
+                  snap.data!,
+                  fit: BoxFit.cover,
+                  errorFallback: const _VideoPlaceholder(),
+                ),
               ),
+              keySeed: snap.data!.path,
             );
           }
           return const _VideoPlaceholder();
@@ -148,19 +289,21 @@ extension _FolderDetailRendering on _FolderDetailPageState {
   Widget _embyFolderThumb(Entry e) {
     final url = e.embyCoverUrl;
     if (url != null && url.trim().isNotEmpty) {
-      return _ProportionalPreviewBox(
-        child: Image.network(
-          url,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => Container(
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.06),
-              borderRadius: BorderRadius.circular(12),
+      return _fadeInPreview(
+        _ProportionalPreviewBox(
+          child: _animatedNetworkImage(
+            url,
+            errorFallback: Container(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Center(
+                  child: Icon(Icons.video_library_outlined, size: 28)),
             ),
-            child: const Center(
-                child: Icon(Icons.video_library_outlined, size: 28)),
           ),
         ),
+        keySeed: url,
       );
     }
 
@@ -190,12 +333,14 @@ extension _FolderDetailRendering on _FolderDetailPageState {
         if (info.source == 'emby') {
           final url = (info.embyCoverUrl ?? '').trim();
           if (url.isNotEmpty) {
-            return _ProportionalPreviewBox(
-              child: Image.network(
-                url,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => _embyFolderThumb(e),
+            return _fadeInPreview(
+              _ProportionalPreviewBox(
+                child: _animatedNetworkImage(
+                  url,
+                  errorFallback: _embyFolderThumb(e),
+                ),
               ),
+              keySeed: url,
             );
           }
           return _embyFolderThumb(e);
@@ -217,15 +362,22 @@ extension _FolderDetailRendering on _FolderDetailPageState {
         }
 
         if (info.isVideo) {
-          return _ProportionalPreviewBox(
-              child: VideoThumbImage(videoPath: info.localPath!));
+          return _fadeInPreview(
+            _ProportionalPreviewBox(
+              child: VideoThumbImage(videoPath: info.localPath!),
+            ),
+            keySeed: info.localPath,
+          );
         }
-        return _ProportionalPreviewBox(
-          child: Image.file(
-            File(info.localPath!),
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => const _FolderCoverPlaceholder(),
+        return _fadeInPreview(
+          _ProportionalPreviewBox(
+            child: _animatedImageFile(
+              File(info.localPath!),
+              fit: BoxFit.cover,
+              errorFallback: const _FolderCoverPlaceholder(),
+            ),
           ),
+          keySeed: info.localPath,
         );
       },
     );
@@ -323,41 +475,50 @@ extension _FolderDetailRendering on _FolderDetailPageState {
       leading = _webDavThumb(e);
     } else if ((e.localPath ?? '').trim().isNotEmpty &&
         isPageImagePath(e.localPath!)) {
-      leading = _ProportionalPreviewBox(
-        child: Image.file(
-          File(e.localPath!),
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => const _CoverPlaceholder(),
+      leading = _fadeInPreview(
+        _ProportionalPreviewBox(
+          child: _animatedImageFile(
+            File(e.localPath!),
+            fit: BoxFit.cover,
+            errorFallback: const _CoverPlaceholder(),
+          ),
         ),
+        keySeed: e.localPath,
       );
     } else if ((e.localPath ?? '').trim().isNotEmpty &&
         isPageVideoPath(e.localPath!)) {
-      leading = _ProportionalPreviewBox(
-        child: VideoThumbImage(videoPath: e.localPath!),
+      leading = _fadeInPreview(
+        _ProportionalPreviewBox(
+          child: VideoThumbImage(videoPath: e.localPath!),
+        ),
+        keySeed: e.localPath,
       );
     } else {
       leading = const _CoverPlaceholder();
     }
 
-    return GestureDetector(
-      onSecondaryTapDown: (d) => _ctxEntryMenu(e, d.globalPosition),
-      onLongPress: () => _onEntryLongPress(e),
-      child: Card(
-        color: selected
-            ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.10)
-            : null,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: selected
-              ? BorderSide(
-                  color: Theme.of(context)
-                      .colorScheme
-                      .primary
-                      .withValues(alpha: 0.55),
-                  width: 1.3,
-                )
-              : BorderSide.none,
-        ),
+    return Card(
+      color: selected
+          ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.10)
+          : null,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: selected
+            ? BorderSide(
+                color: Theme.of(context)
+                    .colorScheme
+                    .primary
+                    .withValues(alpha: 0.55),
+                width: 1.3,
+              )
+            : BorderSide.none,
+      ),
+      child: _FolderEntryInteractive(
+        borderRadius: BorderRadius.circular(12),
+        onSecondaryTapDown: (d) => _ctxEntryMenu(e, d.globalPosition),
+        onLongPress: () => _onEntryLongPress(e),
+        onTap: () => _onEntryTap(e,
+            visibleEntries: visibleEntries, imgs: imgs, vids: vids),
         child: ListTile(
           leading: SizedBox(
             width: 56,
@@ -386,8 +547,6 @@ extension _FolderDetailRendering on _FolderDetailPageState {
           trailing: _selectionMode && selectable && !selected
               ? const Icon(Icons.radio_button_unchecked, size: 20)
               : null,
-          onTap: () => _onEntryTap(e,
-              visibleEntries: visibleEntries, imgs: imgs, vids: vids),
         ),
       ),
     );
@@ -465,41 +624,50 @@ extension _FolderDetailRendering on _FolderDetailPageState {
               ? Icons.play_circle_outline
               : Icons.insert_drive_file_outlined);
     } else if (isPageImagePath(e.localPath!)) {
-      preview = _ProportionalPreviewBox(
-        child: Image.file(File(e.localPath!),
-            errorBuilder: (_, __, ___) => const _CoverPlaceholder()),
+      preview = _fadeInPreview(
+        _ProportionalPreviewBox(
+          child: _animatedImageFile(
+            File(e.localPath!),
+            errorFallback: const _CoverPlaceholder(),
+          ),
+        ),
+        keySeed: e.localPath,
       );
       badge = Icons.image_outlined;
     } else if (isPageVideoPath(e.localPath!)) {
-      preview = _ProportionalPreviewBox(
-          child: VideoThumbImage(videoPath: e.localPath!));
+      preview = _fadeInPreview(
+        _ProportionalPreviewBox(
+          child: VideoThumbImage(videoPath: e.localPath!),
+        ),
+        keySeed: e.localPath,
+      );
       badge = Icons.play_circle_outline;
     } else {
       preview = const _CoverPlaceholder();
       badge = Icons.insert_drive_file_outlined;
     }
 
-    return InkWell(
-      onSecondaryTapDown: (d) => _ctxEntryMenu(e, d.globalPosition),
-      onLongPress: () => _onEntryLongPress(e),
-      onTap: () => _onEntryTap(e,
-          visibleEntries: visibleEntries, imgs: imgs, vids: vids),
-      borderRadius: radius,
-      child: Card(
-        elevation: 1,
-        clipBehavior: Clip.antiAlias,
-        shape: RoundedRectangleBorder(
-          borderRadius: radius,
-          side: selected
-              ? BorderSide(
-                  color: Theme.of(context)
-                      .colorScheme
-                      .primary
-                      .withValues(alpha: 0.6),
-                  width: 1.4,
-                )
-              : BorderSide.none,
-        ),
+    return Card(
+      elevation: 1,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: radius,
+        side: selected
+            ? BorderSide(
+                color: Theme.of(context)
+                    .colorScheme
+                    .primary
+                    .withValues(alpha: 0.6),
+                width: 1.4,
+              )
+            : BorderSide.none,
+      ),
+      child: _FolderEntryInteractive(
+        onSecondaryTapDown: (d) => _ctxEntryMenu(e, d.globalPosition),
+        onLongPress: () => _onEntryLongPress(e),
+        onTap: () => _onEntryTap(e,
+            visibleEntries: visibleEntries, imgs: imgs, vids: vids),
+        borderRadius: radius,
         child: Column(
           children: [
             Expanded(

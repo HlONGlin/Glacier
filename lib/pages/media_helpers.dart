@@ -7,6 +7,7 @@ import '../models/favorite_models.dart';
 import 'tag_source_helpers.dart';
 import '../sources/refs.dart';
 import '../core/utils/app_shared.dart';
+import '../emby.dart';
 import '../webdav.dart';
 
 const kPageImageExts = <String>{
@@ -99,6 +100,70 @@ Future<Map<String, WebDavAccount>> loadPageWebDavAccountsMap() async {
     await WebDavManager.instance.reload(notify: false);
   }
   return WebDavManager.instance.accountsMap;
+}
+
+const Duration _kPageAccountMapReuseWindow = Duration(seconds: 12);
+
+Future<Map<String, WebDavAccount>>? _pageWebDavAccountsMapFuture;
+Map<String, WebDavAccount>? _pageWebDavAccountsMapCache;
+DateTime? _pageWebDavAccountsMapCachedAt;
+
+Future<Map<String, WebDavAccount>> loadPageWebDavAccountsMapShared() async {
+  final cached = _pageWebDavAccountsMapCache;
+  final cachedAt = _pageWebDavAccountsMapCachedAt;
+  if (cached != null &&
+      cachedAt != null &&
+      DateTime.now().difference(cachedAt) <= _kPageAccountMapReuseWindow) {
+    return cached;
+  }
+
+  final inFlight = _pageWebDavAccountsMapFuture;
+  if (inFlight != null) return inFlight;
+
+  final future = loadPageWebDavAccountsMap();
+  _pageWebDavAccountsMapFuture = future;
+  try {
+    final map = await future;
+    _pageWebDavAccountsMapCache = map;
+    _pageWebDavAccountsMapCachedAt = DateTime.now();
+    return map;
+  } finally {
+    if (identical(_pageWebDavAccountsMapFuture, future)) {
+      _pageWebDavAccountsMapFuture = null;
+    }
+  }
+}
+
+Future<Map<String, EmbyAccount>>? _pageEmbyAccountsMapFuture;
+Map<String, EmbyAccount>? _pageEmbyAccountsMapCache;
+DateTime? _pageEmbyAccountsMapCachedAt;
+
+Future<Map<String, EmbyAccount>> loadPageEmbyAccountsMapShared() async {
+  final cached = _pageEmbyAccountsMapCache;
+  final cachedAt = _pageEmbyAccountsMapCachedAt;
+  if (cached != null &&
+      cachedAt != null &&
+      DateTime.now().difference(cachedAt) <= _kPageAccountMapReuseWindow) {
+    return cached;
+  }
+
+  final inFlight = _pageEmbyAccountsMapFuture;
+  if (inFlight != null) return inFlight;
+
+  final future = EmbyStore.load().then((accounts) => <String, EmbyAccount>{
+        for (final account in accounts) account.id: account,
+      });
+  _pageEmbyAccountsMapFuture = future;
+  try {
+    final map = await future;
+    _pageEmbyAccountsMapCache = map;
+    _pageEmbyAccountsMapCachedAt = DateTime.now();
+    return map;
+  } finally {
+    if (identical(_pageEmbyAccountsMapFuture, future)) {
+      _pageEmbyAccountsMapFuture = null;
+    }
+  }
 }
 
 Future<File?> getPageWebDavVideoThumbFile(

@@ -1,5 +1,47 @@
 part of '../pages.dart';
 
+class _HistoryInteractiveCard extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final BorderRadius borderRadius;
+
+  const _HistoryInteractiveCard({
+    required this.child,
+    required this.onTap,
+    required this.borderRadius,
+  });
+
+  @override
+  State<_HistoryInteractiveCard> createState() =>
+      _HistoryInteractiveCardState();
+}
+
+class _HistoryInteractiveCardState extends State<_HistoryInteractiveCard> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed == value) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedScale(
+      scale: _pressed ? 0.988 : 1,
+      duration: const Duration(milliseconds: 110),
+      curve: Curves.easeOutCubic,
+      child: InkWell(
+        borderRadius: widget.borderRadius,
+        onTap: widget.onTap,
+        onHighlightChanged: _setPressed,
+        splashColor: Colors.white.withValues(alpha: 0.08),
+        highlightColor: Colors.white.withValues(alpha: 0.03),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
 /// =========================
 /// HistoryPage (新：播放历史)
 /// =========================
@@ -77,6 +119,54 @@ class _HistoryPageState extends State<HistoryPage> {
   bool _isWebDavPath(String path) => isWebDavSource(path);
   bool _isEmbyPath(String path) => isEmbySource(path);
 
+  Widget _fadeInImage(Widget child, {Object? keySeed}) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 180),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeOutCubic,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: child,
+      ),
+      child: KeyedSubtree(
+        key: ValueKey(keySeed ?? child.runtimeType),
+        child: child,
+      ),
+    );
+  }
+
+  Widget _animatedFileImage(
+    File file, {
+    required Widget errorFallback,
+    BoxFit fit = BoxFit.cover,
+  }) {
+    return Image.file(
+      file,
+      fit: fit,
+      gaplessPlayback: true,
+      frameBuilder: (_, child, frame, wasSyncLoaded) {
+        return AnimatedOpacity(
+          opacity: frame == null && !wasSyncLoaded ? 0 : 1,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
+          child: child,
+        );
+      },
+      errorBuilder: (_, __, ___) => errorFallback,
+    );
+  }
+
+  Widget _animatedNetworkImage(String url, {required Widget errorFallback}) {
+    return CachedNetworkImage(
+      imageUrl: url,
+      fit: BoxFit.cover,
+      fadeInDuration: const Duration(milliseconds: 160),
+      fadeOutDuration: const Duration(milliseconds: 80),
+      placeholder: (_, __) => errorFallback,
+      errorWidget: (_, __, ___) => errorFallback,
+    );
+  }
+
   Widget _historyCover(String kind, String path, String? coverPath) {
     final radius = BorderRadius.circular(10);
 
@@ -84,11 +174,16 @@ class _HistoryPageState extends State<HistoryPage> {
       final cp = (coverPath ?? '').trim();
       if (cp.isNotEmpty) {
         if (isPageImagePath(cp)) {
-          return ClipRRect(
-            borderRadius: radius,
-            child: Image.file(File(cp),
+          return _fadeInImage(
+            ClipRRect(
+              borderRadius: radius,
+              child: _animatedFileImage(
+                File(cp),
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const _FolderPreviewBox()),
+                errorFallback: const _FolderPreviewBox(),
+              ),
+            ),
+            keySeed: cp,
           );
         }
         if (isPageVideoPath(cp)) {
@@ -114,11 +209,15 @@ class _HistoryPageState extends State<HistoryPage> {
             final client = EmbyClient(a);
             final url = client.coverUrl(itemId,
                 type: 'Primary', maxWidth: 320, quality: 85);
-            return ClipRRect(
-              borderRadius: radius,
-              child: Image.network(url,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const _CoverPlaceholder()),
+            return _fadeInImage(
+              ClipRRect(
+                borderRadius: radius,
+                child: _animatedNetworkImage(
+                  url,
+                  errorFallback: const _CoverPlaceholder(),
+                ),
+              ),
+              keySeed: url,
             );
           },
         );
@@ -174,8 +273,17 @@ class _HistoryPageState extends State<HistoryPage> {
         builder: (c, snap) {
           final f = snap.data;
           if (f != null) {
-            return ClipRRect(
-                borderRadius: radius, child: Image.file(f, fit: BoxFit.cover));
+            return _fadeInImage(
+              ClipRRect(
+                borderRadius: radius,
+                child: _animatedFileImage(
+                  f,
+                  fit: BoxFit.cover,
+                  errorFallback: const _CoverPlaceholder(),
+                ),
+              ),
+              keySeed: f.path,
+            );
           }
           return const _CoverPlaceholder();
         },
@@ -184,11 +292,17 @@ class _HistoryPageState extends State<HistoryPage> {
 
     final isImg = isPageImagePath(path);
     if (isImg) {
-      return ClipRRect(
+      return _fadeInImage(
+        ClipRRect(
           borderRadius: radius,
-          child: Image.file(File(path),
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => const _CoverPlaceholder()));
+          child: _animatedFileImage(
+            File(path),
+            fit: BoxFit.cover,
+            errorFallback: const _CoverPlaceholder(),
+          ),
+        ),
+        keySeed: path,
+      );
     }
     if (isPageVideoPath(path)) {
       return ClipRRect(
@@ -253,7 +367,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
                               return Card(
                                 elevation: 0,
-                                child: InkWell(
+                                child: _HistoryInteractiveCard(
                                   borderRadius: BorderRadius.circular(14),
                                   onTap: () {
                                     if (path.isEmpty) return;

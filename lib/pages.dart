@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -95,11 +96,13 @@ class FolderDetailPage extends StatelessWidget {
   /// - 用户希望“点击图片后，把上级目录记入历史”，因此历史点击需要能还原到对应目录。
   /// - 为了最小改动，这里复用现有 FolderDetailPage 的导航栈，而不是新建一套页面。
   final NavCtx? initialNav;
+  final Future<NavCtx?>? deferredInitialNav;
   final bool exitOnInitialContextBack;
   const FolderDetailPage(
       {super.key,
       required this.collection,
       this.initialNav,
+      this.deferredInitialNav,
       this.exitOnInitialContextBack = false});
 
   @override
@@ -107,6 +110,7 @@ class FolderDetailPage extends StatelessWidget {
     return _FolderDetailPageHost(
       collection: collection,
       initialNav: initialNav,
+      deferredInitialNav: deferredInitialNav,
       exitOnInitialContextBack: exitOnInitialContextBack,
     );
   }

@@ -13,6 +13,10 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
   final Map<int, double> _scrollOffsets = {};
 
   final List<NavCtx> _stack = const [NavCtx.root()].toList();
+  int _deferredInitialNavToken = 0;
+  bool _contentHasAppeared = false;
+  int _previewPrefetchEpoch = 0;
+  bool _previewWarmupRunning = false;
   bool _loading = true;
   List<Entry> _raw = [];
 
@@ -893,12 +897,31 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
     if (initNav != null && initNav.kind != CtxKind.root) {
       _stack.add(initNav);
     }
+    _attachDeferredInitialNav(widget.deferredInitialNav);
 
     _reloadDynamicSettings();
     _refresh();
     _initFolderCoverCache();
     TagStore.I.ensureLoaded().then((_) => mounted ? setState(() {}) : null);
     TagStore.I.addListener(_onTagStoreChanged);
+  }
+
+  void _attachDeferredInitialNav(Future<NavCtx?>? future) {
+    if (future == null) return;
+    final token = ++_deferredInitialNavToken;
+    unawaited(() async {
+      try {
+        final nav = await future;
+        if (!mounted || token != _deferredInitialNavToken) return;
+        if (nav == null || nav.kind == CtxKind.root) return;
+        if (_stack.length != 1 || _stack.last.kind != CtxKind.root) return;
+        setState(() {
+          _stack.add(nav);
+          _loading = true;
+        });
+        await _refresh(showGlobalLoading: false);
+      } catch (_) {}
+    }());
   }
 
   Future<void> _initFolderCoverCache() async {
@@ -925,8 +948,125 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
     if (mounted) setState(() {});
   }
 
+  void _schedulePreviewWarmup(List<Entry> list) {
+    if (_previewWarmupRunning) return;
+    final epoch = ++_previewPrefetchEpoch;
+    final snapshot = List<Entry>.from(list, growable: false);
+    unawaited(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      if (!mounted || epoch != _previewPrefetchEpoch) return;
+      _previewWarmupRunning = true;
+      await _warmVisibleEntryPreviews(snapshot);
+      _previewWarmupRunning = false;
+    }());
+  }
+
+  Future<void> _warmVisibleEntryPreviews(List<Entry> list) async {
+    if (!mounted || list.isEmpty) return;
+
+    final candidates = <Entry>[];
+    for (final entry in list) {
+      if (entry.isLoading) continue;
+      if (entry.typeKey == 'hint' ||
+          entry.typeKey == 'emby_login' ||
+          entry.typeKey == 'emby_empty' ||
+          entry.typeKey == 'wd_error') {
+        continue;
+      }
+      if (entry.isDir) continue;
+      candidates.add(entry);
+      if (candidates.length >= 6) break;
+    }
+    if (candidates.isEmpty) return;
+
+    for (final entry in candidates) {
+      if (!mounted || _previewPrefetchEpoch == 0) return;
+      await _warmPreviewForEntry(entry);
+      if (!mounted) return;
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
+  Future<void> _warmPreviewForEntry(Entry e) async {
+    final imageContext = context;
+    try {
+      if (e.isEmby) {
+        final url = (e.embyCoverUrl ?? '').trim();
+        if (url.isEmpty) return;
+        if (!mounted) return;
+        await precacheImage(
+          CachedNetworkImageProvider(url),
+          imageContext,
+        );
+        return;
+      }
+
+      if (e.isWebDav) {
+        final accId = e.wdAccountId;
+        if (accId == null) return;
+        final acc = _wdAccMap[accId];
+        final client =
+            _wdClientMap[accId] ?? (acc == null ? null : WebDavClient(acc));
+        if (client == null) return;
+
+        final href = (e.wdHref != null && e.wdHref!.trim().isNotEmpty)
+            ? e.wdHref!.trim()
+            : (e.wdRelPath != null
+                ? client.resolveRel(e.wdRelPath!).toString()
+                : '');
+        if (href.isEmpty) return;
+
+        if (_isImgName(e.name)) {
+          final cached = await client.ensureCoverCached(href, e.name);
+          if (await cached.exists()) {
+            if (!imageContext.mounted) return;
+            await precacheImage(FileImage(cached), imageContext);
+          }
+          return;
+        }
+
+        if (_isVidName(e.name)) {
+          final thumb = await getPageWebDavVideoThumbFile(
+            client,
+            href,
+            e.name,
+            maxBytes: _wdVideoThumbMaxBytes,
+            expectedSize: e.size,
+          );
+          if (thumb != null && await thumb.exists()) {
+            if (!imageContext.mounted) return;
+            await precacheImage(FileImage(thumb), imageContext);
+          }
+          return;
+        }
+        return;
+      }
+
+      final local = (e.localPath ?? '').trim();
+      if (local.isEmpty) return;
+      if (_isImg(local)) {
+        final file = File(local);
+        if (await file.exists()) {
+          if (!imageContext.mounted) return;
+          await precacheImage(FileImage(file), imageContext);
+        }
+        return;
+      }
+      if (_isVid(local)) {
+        final thumb = await ThumbCache.getOrCreateVideoThumb(local);
+        if (thumb != null && await thumb.exists()) {
+          if (!imageContext.mounted) return;
+          await precacheImage(FileImage(thumb), imageContext);
+        }
+      }
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
+    _deferredInitialNavToken++;
+    _previewPrefetchEpoch = 0;
+    _previewWarmupRunning = false;
     _controller.dispose();
     WebDavManager.instance.removeListener(_onWebDavAccountsChanged);
     TagStore.I.removeListener(_onTagStoreChanged);
@@ -983,6 +1123,7 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
       _raw = list;
       _controller.raw = list;
       _loading = false;
+      _contentHasAppeared = true;
       if (_selectionMode) {
         final keys = list
             .map(_entrySelectionKeyRaw)
@@ -994,6 +1135,7 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
         }
       }
     });
+    _schedulePreviewWarmup(list);
     _scopeSearchCache.clear();
     _hydrateEmbySizesIfNeeded();
   }
@@ -1301,9 +1443,9 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
     final selectedCount = selectedVisible.length;
 
     final body = _loading
-        ? const AppLoadingState()
+        ? _buildImmersiveLoadingBody()
         : (scopedLoading && list.isEmpty)
-            ? const AppLoadingState()
+            ? _buildImmersiveLoadingBody(compact: true)
             : (scopedError != null && list.isEmpty)
                 ? AppErrorState(
                     title: '搜索失败',
@@ -1328,7 +1470,12 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
                       )
                     : RefreshIndicator(
                         onRefresh: _refresh,
-                        child: _buildByMode(list, imgs, vids),
+                        child: AnimatedOpacity(
+                          opacity: _contentHasAppeared ? 1 : 0.92,
+                          duration: const Duration(milliseconds: 140),
+                          curve: Curves.easeOutCubic,
+                          child: _buildByMode(list, imgs, vids),
+                        ),
                       );
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
