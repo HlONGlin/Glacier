@@ -238,6 +238,7 @@ extension _FolderDetailOpenActions on _FolderDetailPageState {
 
   Future<void> _openFolder(Entry e) async {
     if (!e.isDir) return;
+    if (_loading) return;
 
     if (_scrollController.hasClients) {
       _scrollOffsets[_stack.length - 1] = _scrollController.offset;
@@ -273,9 +274,14 @@ extension _FolderDetailOpenActions on _FolderDetailPageState {
       _clearSelection();
     }
 
+    _loading = true;
+    _raw = const <Entry>[];
+    _controller.raw = const <Entry>[];
+    _contentHasAppeared = false;
+    _previewPrefetchEpoch++;
+    _previewWarmupRunning = false;
     _refreshFolderDetailState();
 
-    _prefillSkeletonForFolder(e);
     await _refresh(showGlobalLoading: false);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
