@@ -282,6 +282,10 @@ extension _FolderDetailOpenActions on _FolderDetailPageState {
     _previewWarmupRunning = false;
     _refreshFolderDetailState();
 
+    if (_scrollController.hasClients) {
+      _scrollController.jumpTo(0);
+    }
+
     await _refresh(showGlobalLoading: false);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {

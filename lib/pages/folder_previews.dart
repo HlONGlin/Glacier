@@ -217,6 +217,27 @@ Future<_PreviewTarget?> _pickPreviewTargetFromEmbySource(String source) async {
         if (target != null) return target;
       }
     } catch (_) {}
+
+    try {
+      final items = await client.listFavorites();
+      for (final item in items) {
+        if (item.id.trim().isEmpty) continue;
+        if (item.isFolder) {
+          final target = await _embyPreviewTargetForItem(client, item.id);
+          if (target != null) return target;
+          continue;
+        }
+        final url =
+            client.bestCoverUrl(item, maxWidth: 1400, quality: 95).trim();
+        if (url.isNotEmpty) {
+          return _PreviewTarget.network(
+            url,
+            isImage: true,
+            headers: client.imageHeaders(),
+          );
+        }
+      }
+    } catch (_) {}
     return null;
   }
 
@@ -237,8 +258,8 @@ Future<_PreviewTarget?> _embyPreviewTargetForItem(
     if (item.isFolder) {
       final folderUrl = await client.pickAutoFolderCoverUrl(
         folderId: item.id,
-        maxWidth: 720,
-        quality: 85,
+        maxWidth: 1400,
+        quality: 95,
         fallbackToVideo: true,
       );
       final resolved = (folderUrl ?? '').trim();
@@ -251,7 +272,7 @@ Future<_PreviewTarget?> _embyPreviewTargetForItem(
       }
     }
 
-    final url = client.bestCoverUrl(item, maxWidth: 720, quality: 85).trim();
+    final url = _embyBestPreviewUrl(client, item).trim();
     if (url.isEmpty) return null;
     return _PreviewTarget.network(
       url,
@@ -261,6 +282,25 @@ Future<_PreviewTarget?> _embyPreviewTargetForItem(
   } catch (_) {
     return null;
   }
+}
+
+String _embyBestPreviewUrl(EmbyClient client, EmbyItem item) {
+  if (_embyTypeLooksImage(item)) {
+    final image = client.bestImageUrl(item).trim();
+    if (image.isNotEmpty) return image;
+  }
+  return client.bestCoverUrl(item, maxWidth: 1400, quality: 95).trim();
+}
+
+bool _embyTypeLooksImage(EmbyItem item) {
+  final type = item.type.trim().toLowerCase();
+  final mediaType = (item.mediaType ?? '').trim().toLowerCase();
+  return mediaType == 'photo' ||
+      mediaType == 'image' ||
+      type == 'photo' ||
+      type == 'image' ||
+      type == 'picture' ||
+      type == 'photobubble';
 }
 
 Future<_PreviewTarget?> _pickPreviewTargetFromWebDavSource(
@@ -578,8 +618,8 @@ class _MultiSourcePreviewState extends State<_MultiSourcePreview>
           imageUrl: t.path,
           httpHeaders: t.headers,
           fit: BoxFit.cover,
-          memCacheWidth: 720,
-          maxWidthDiskCache: 720,
+          memCacheWidth: 1400,
+          maxWidthDiskCache: 1800,
           fadeInDuration: const Duration(milliseconds: 160),
           fadeOutDuration: const Duration(milliseconds: 80),
           placeholder: (_, __) => const _CoverPlaceholder(),

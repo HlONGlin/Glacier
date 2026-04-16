@@ -17,6 +17,7 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
   bool _contentHasAppeared = false;
   int _previewPrefetchEpoch = 0;
   bool _previewWarmupRunning = false;
+  int _postLoadWorkEpoch = 0;
   bool _loading = true;
   List<Entry> _raw = [];
 
@@ -961,6 +962,17 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
     }());
   }
 
+  void _schedulePostLoadWork(List<Entry> list) {
+    final epoch = ++_postLoadWorkEpoch;
+    final snapshot = List<Entry>.from(list, growable: false);
+    unawaited(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      if (!mounted || epoch != _postLoadWorkEpoch || _loading) return;
+      _schedulePreviewWarmup(snapshot);
+      unawaited(_hydrateEmbySizesIfNeeded());
+    }());
+  }
+
   Future<void> _warmVisibleEntryPreviews(List<Entry> list) async {
     if (!mounted || list.isEmpty) return;
 
@@ -1067,6 +1079,7 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
     _deferredInitialNavToken++;
     _previewPrefetchEpoch = 0;
     _previewWarmupRunning = false;
+    _postLoadWorkEpoch++;
     _controller.dispose();
     WebDavManager.instance.removeListener(_onWebDavAccountsChanged);
     TagStore.I.removeListener(_onTagStoreChanged);
@@ -1135,9 +1148,8 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
         }
       }
     });
-    _schedulePreviewWarmup(list);
     _scopeSearchCache.clear();
-    _hydrateEmbySizesIfNeeded();
+    _schedulePostLoadWork(list);
   }
 
   Future<void> _hydrateEmbySizesIfNeeded({int maxItems = 60}) async {

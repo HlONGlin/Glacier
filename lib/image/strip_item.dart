@@ -15,6 +15,7 @@ class StripImageItem extends StatefulWidget {
   final bool Function(String) isEmbySource;
   final ValueListenable<int> centerListenable;
   final ValueListenable<int> activeRadiusListenable;
+  final ValueChanged<bool>? onZoomChanged;
 
   const StripImageItem({
     super.key,
@@ -30,6 +31,7 @@ class StripImageItem extends StatefulWidget {
     required this.isEmbySource,
     required this.centerListenable,
     required this.activeRadiusListenable,
+    this.onZoomChanged,
     this.placeholderH = 220,
   });
 
@@ -46,6 +48,8 @@ class _StripImageItemState extends State<StripImageItem>
   late bool _eagerLoad;
   Future<ResolvedImageSource?>? _webdavFuture;
   Future<ResolvedEmbyImageSource?>? _embyFuture;
+  final TransformationController _zoomController = TransformationController();
+  bool _zoomed = false;
 
   String get _sourceKey => widget.source.trim();
 
@@ -222,6 +226,32 @@ class _StripImageItemState extends State<StripImageItem>
     unawaited(_probeRatioAsync());
   }
 
+  void _syncZoomState() {
+    final next = _zoomController.value.getMaxScaleOnAxis() > 1.01;
+    if (_zoomed == next) return;
+    _zoomed = next;
+    widget.onZoomChanged?.call(next);
+  }
+
+  Widget _wrapZoomable(Widget child) {
+    return InteractiveViewer(
+      transformationController: _zoomController,
+      minScale: 1.0,
+      maxScale: 5.0,
+      panEnabled: true,
+      scaleEnabled: true,
+      onInteractionStart: (_) {
+        if (!_zoomed) {
+          _zoomed = true;
+          widget.onZoomChanged?.call(true);
+        }
+      },
+      onInteractionUpdate: (_) => _syncZoomState(),
+      onInteractionEnd: (_) => _syncZoomState(),
+      child: child,
+    );
+  }
+
   Future<void> _probeRatioAsync() async {
     try {
       final src = widget.source;
@@ -260,7 +290,7 @@ class _StripImageItemState extends State<StripImageItem>
         width: widget.targetW,
         height: _currentHeight,
         child: ClipRect(
-          child: _badgeWrap(_buildImage()),
+          child: _badgeWrap(_wrapZoomable(_buildImage())),
         ),
       ),
     );
@@ -430,6 +460,10 @@ class _StripImageItemState extends State<StripImageItem>
 
   @override
   void dispose() {
+    if (_zoomed) {
+      widget.onZoomChanged?.call(false);
+    }
+    _zoomController.dispose();
     widget.centerListenable.removeListener(_handleEagerInputsChanged);
     widget.activeRadiusListenable.removeListener(_handleEagerInputsChanged);
     super.dispose();

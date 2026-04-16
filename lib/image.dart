@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
+import 'package:photo_view/photo_view.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'image/provider_helpers.dart';
@@ -48,6 +49,10 @@ class ImageViewerPage extends StatefulWidget {
 class _ImageViewerPageState extends State<ImageViewerPage> {
   late final PageController _controller;
   late int _index;
+  final Map<int, TransformationController> _viewerControllers =
+      <int, TransformationController>{};
+  bool _currentViewerZoomed = false;
+  bool _stripViewerZoomed = false;
 
   // 是否显示角标
   bool _showIndexBadge = false;
@@ -120,6 +125,11 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     return widget.imagePaths[i].trim();
   }
 
+  bool _defaultUiVisibleForMode(bool stripMode) {
+    if (_isMobile) return false;
+    return !stripMode;
+  }
+
   void _ensureKeyFocus() {
     if (!_isMobile || !mounted) return;
     if (_keyFocusNode.hasFocus) return;
@@ -148,15 +158,49 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   int _targetCacheWidth() {
     if (!mounted) return 1920;
     final mq = MediaQuery.of(context);
-    final dpr = mq.devicePixelRatio.clamp(1.0, 2.0);
-    return max(512, (mq.size.width * dpr).round());
+    final dpr = mq.devicePixelRatio.clamp(1.0, 3.0);
+    return max(720, (mq.size.width * dpr).round());
   }
 
   int _targetCacheHeight() {
     if (!mounted) return 1920;
     final mq = MediaQuery.of(context);
-    final dpr = mq.devicePixelRatio.clamp(1.0, 2.0);
-    return max(512, (mq.size.height * dpr).round());
+    final dpr = mq.devicePixelRatio.clamp(1.0, 3.0);
+    return max(720, (mq.size.height * dpr).round());
+  }
+
+  TransformationController _viewerControllerFor(int index) {
+    return _viewerControllers.putIfAbsent(
+      index,
+      TransformationController.new,
+    );
+  }
+
+  bool _isViewerZoomed(int index) {
+    final controller = _viewerControllers[index];
+    if (controller == null) return false;
+    return controller.value.getMaxScaleOnAxis() > 1.01;
+  }
+
+  void _syncCurrentViewerZoomState([int? targetIndex]) {
+    final idx = targetIndex ?? _index;
+    final zoomed = _isViewerZoomed(idx);
+    if (_currentViewerZoomed == zoomed) return;
+    setState(() => _currentViewerZoomed = zoomed);
+  }
+
+  void _beginViewerInteraction(int index) {
+    if (!_currentViewerZoomed) {
+      setState(() => _currentViewerZoomed = true);
+    }
+    _syncCurrentViewerZoomState(index);
+  }
+
+  void _resetViewerScale(int index) {
+    final controller = _viewerControllers[index];
+    if (controller == null) return;
+    controller.value = Matrix4.identity();
+    _syncCurrentViewerZoomState(index);
   }
 
   void _markPreloaded(int index) {
@@ -167,6 +211,31 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     while (_preloadedOrder.length > _kMaxPreloadedEntries) {
       final oldest = _preloadedOrder.removeFirst();
       _preloadedIndices.remove(oldest);
+    }
+  }
+
+  Future<ImageProvider?> _providerForSource(String source) async {
+    try {
+      if (_isWebDavSource(source)) {
+        final resolved = await _webdavFutureFor(source);
+        if (resolved == null) return null;
+        final provider = NetworkImage(resolved.url, headers: resolved.headers);
+        return provider;
+      }
+      if (_isEmbySource(source)) {
+        final resolved = await _embyFutureFor(source);
+        if (resolved == null) return null;
+        final provider = NetworkImage(resolved.url, headers: resolved.headers);
+        return provider;
+      }
+      if (source.startsWith('http://') || source.startsWith('https://')) {
+        final provider = NetworkImage(source);
+        return provider;
+      }
+      final provider = FileImage(File(source));
+      return provider;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -202,8 +271,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         provider = SharedImageProviderCache.network(
           r.url,
           headers: r.headers,
-          width: cacheWidth,
-          height: cacheHeight,
+          width: max(cacheWidth, 1600),
+          height: max(cacheHeight, 1600),
         );
       } else if (src.startsWith('http://') || src.startsWith('https://')) {
         provider = SharedImageProviderCache.network(
@@ -380,39 +449,82 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     Widget imageWidget;
 
     if (_isWebDavSource(source)) {
-      imageWidget = ImageViewerRenderHelpers.buildWebDavImage(
-        context: context,
-        future: _webdavFutureFor(source),
-        cacheWidth: cacheWidth,
-        cacheHeight: cacheHeight,
-        lightText: !isLightBg,
-        loadingBuilder: (progress, lightText) =>
-            _LoadingThumb(progress: progress, lightText: lightText),
+      final future = _webdavFutureFor(source);
+      imageWidget = FutureBuilder<ResolvedImageSource?>(
+        future: future,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return Center(
+              child: _LoadingThumb(progress: null, lightText: !isLightBg),
+            );
+          }
+          final resolved = snap.data;
+          if (resolved == null) {
+            return const Center(
+              child: Text('无法解析', style: TextStyle(color: Colors.white54)),
+            );
+          }
+          return ImageViewerRenderHelpers.buildAlbumImageFrame(
+            provider: SharedImageProviderCache.network(
+              resolved.url,
+              headers: resolved.headers,
+              width: cacheWidth,
+              height: cacheHeight,
+            ),
+            lightText: !isLightBg,
+            loadingBuilder: (progress, lightText) =>
+                _LoadingThumb(progress: progress, lightText: lightText),
+          );
+        },
       );
     } else if (_isEmbySource(source)) {
-      imageWidget = ImageViewerRenderHelpers.buildEmbyImage(
-        context: context,
-        future: _embyFutureFor(source),
-        cacheWidth: cacheWidth,
-        cacheHeight: cacheHeight,
-        lightText: !isLightBg,
-        loadingBuilder: (progress, lightText) =>
-            _LoadingThumb(progress: progress, lightText: lightText),
+      final future = _embyFutureFor(source);
+      imageWidget = FutureBuilder<ResolvedEmbyImageSource?>(
+        future: future,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return Center(
+              child: _LoadingThumb(progress: null, lightText: !isLightBg),
+            );
+          }
+          final resolved = snap.data;
+          if (resolved == null) {
+            return const Center(
+              child: Text('无法解析', style: TextStyle(color: Colors.white54)),
+            );
+          }
+          return ImageViewerRenderHelpers.buildAlbumImageFrame(
+            provider: SharedImageProviderCache.network(
+              resolved.url,
+              headers: resolved.headers,
+              width: cacheWidth,
+              height: cacheHeight,
+            ),
+            lightText: !isLightBg,
+            loadingBuilder: (progress, lightText) =>
+                _LoadingThumb(progress: progress, lightText: lightText),
+            filterQuality: FilterQuality.high,
+          );
+        },
       );
     } else if (source.startsWith('http://') || source.startsWith('https://')) {
-      imageWidget = ImageViewerRenderHelpers.buildNetworkImage(
-        source: source,
-        cacheWidth: cacheWidth,
-        cacheHeight: cacheHeight,
+      imageWidget = ImageViewerRenderHelpers.buildAlbumImageFrame(
+        provider: SharedImageProviderCache.network(
+          source,
+          width: cacheWidth,
+          height: cacheHeight,
+        ),
         lightText: !isLightBg,
         loadingBuilder: (progress, lightText) =>
             _LoadingThumb(progress: progress, lightText: lightText),
       );
     } else {
-      imageWidget = ImageViewerRenderHelpers.buildLocalImage(
-        source: source,
-        cacheWidth: cacheWidth,
-        cacheHeight: cacheHeight,
+      imageWidget = ImageViewerRenderHelpers.buildAlbumImageFrame(
+        provider: SharedImageProviderCache.local(
+          source,
+          width: cacheWidth,
+          height: cacheHeight,
+        ),
         lightText: !isLightBg,
         loadingBuilder: (progress, lightText) =>
             _LoadingThumb(progress: progress, lightText: lightText),
@@ -423,13 +535,64 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     // 主要原因是 PageView 在快速滑动/高并发解码时可能复用 Element，
     // 而 InteractiveViewer 内部又有变换状态，导致旧帧残留。
     // 这里用 ValueKey 强制每张图的 Viewer 组件独立，避免状态串页。
+    if (_isMobile) {
+      return FutureBuilder<ImageProvider?>(
+        future: _providerForSource(source),
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return Center(
+              child: _LoadingThumb(progress: null, lightText: !isLightBg),
+            );
+          }
+          final provider = snap.data;
+          if (provider == null) {
+            return const Center(
+              child: Icon(Icons.broken_image, color: Colors.white54),
+            );
+          }
+
+          final result = PhotoView(
+            key: ValueKey<String>('img_view_$source'),
+            imageProvider: provider,
+            backgroundDecoration: BoxDecoration(color: _bg),
+            minScale: PhotoViewComputedScale.contained,
+            initialScale: PhotoViewComputedScale.contained,
+            maxScale: PhotoViewComputedScale.contained * 5,
+            loadingBuilder: (_, __) => Center(
+              child: _LoadingThumb(progress: null, lightText: !isLightBg),
+            ),
+            errorBuilder: (_, __, ___) => const Center(
+              child: Icon(Icons.broken_image, color: Colors.white54),
+            ),
+            scaleStateChangedCallback: (state) {
+              final zoomed = state != PhotoViewScaleState.initial &&
+                  state != PhotoViewScaleState.originalSize;
+              if (_currentViewerZoomed != zoomed && mounted) {
+                setState(() => _currentViewerZoomed = zoomed);
+              }
+            },
+          );
+
+          return _wrapWithIndexBadge(child: result, index: index);
+        },
+      );
+    }
+
     final result = KeyedSubtree(
       key: ValueKey<String>('img_view_$source'),
       child: InteractiveViewer(
-        transformationController: TransformationController(),
+        transformationController: _viewerControllerFor(index),
         minScale: 1.0,
         maxScale: 5.0,
-        child: Center(child: imageWidget),
+        panEnabled: true,
+        scaleEnabled: true,
+        boundaryMargin: const EdgeInsets.all(48),
+        onInteractionStart: (_) => _beginViewerInteraction(index),
+        onInteractionUpdate: (_) => _syncCurrentViewerZoomState(index),
+        onInteractionEnd: (_) => _syncCurrentViewerZoomState(index),
+        child: SizedBox.expand(
+          child: Center(child: imageWidget),
+        ),
       ),
     );
 
@@ -453,6 +616,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       setState(() {
         if (sm != null) _stripMode = sm;
         if (ss != null) _stripScale = ss;
+        _uiVisible = _defaultUiVisibleForMode(_stripMode);
 
         // ✅ 如果没存过，就保持默认 false（无角标）
         if (ib != null) _showIndexBadge = ib;
@@ -578,6 +742,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _indexVN = ValueNotifier<int>(_index);
     _stripActiveRadiusVN = ValueNotifier<int>(_stripActiveRadiusCurrent);
     _controller = PageController(initialPage: _index);
+    _uiVisible = _defaultUiVisibleForMode(_stripMode);
 
     _stripKeys =
         List<GlobalKey>.generate(widget.imagePaths.length, (_) => GlobalKey());
@@ -644,6 +809,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _hardwareKeySub?.cancel();
     _hardwareKeySub = null;
     _controller.dispose();
+    for (final controller in _viewerControllers.values) {
+      controller.dispose();
+    }
+    _viewerControllers.clear();
     _stripController.dispose();
     _indexVN.dispose();
     _stripActiveRadiusVN.dispose();
@@ -954,7 +1123,12 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                             : Icons.view_carousel,
                         onTap: () {
                           final wasStripMode = _stripMode;
-                          setState(() => _stripMode = !_stripMode);
+                          final nextStripMode = !_stripMode;
+                          setState(() {
+                            _stripMode = nextStripMode;
+                            _uiVisible =
+                                _defaultUiVisibleForMode(nextStripMode);
+                          });
                           if (wasStripMode && _controller.hasClients) {
                             _controller.jumpToPage(_index);
                           }
@@ -1098,10 +1272,12 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                     },
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
-                      onTap: () {
-                        setState(() => _uiVisible = !_uiVisible);
-                        _ensureKeyFocus();
-                      },
+                      onTap: !_stripMode
+                          ? () {
+                              setState(() => _uiVisible = !_uiVisible);
+                              _ensureKeyFocus();
+                            }
+                          : null,
                       onSecondaryTapDown: (d) =>
                           _showContextMenu(d.globalPosition),
                       onLongPressStart: (d) =>
@@ -1112,10 +1288,16 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                           if (!_stripMode)
                             PageView.builder(
                               controller: _controller,
-                              physics: const BouncingScrollPhysics(),
+                              physics: _currentViewerZoomed
+                                  ? const NeverScrollableScrollPhysics()
+                                  : const BouncingScrollPhysics(),
                               itemCount: total,
                               onPageChanged: (i) {
-                                setState(() => _index = i);
+                                _resetViewerScale(_index);
+                                setState(() {
+                                  _index = i;
+                                  _currentViewerZoomed = false;
+                                });
                                 _indexVN.value = i;
                                 _updatePreloadWindow(i);
                               },
@@ -1132,6 +1314,9 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                           else
                             ListView.builder(
                               controller: _stripController,
+                              physics: _stripViewerZoomed
+                                  ? const NeverScrollableScrollPhysics()
+                                  : const BouncingScrollPhysics(),
                               padding: EdgeInsets.zero,
                               itemCount: total,
                               cacheExtent:
@@ -1150,13 +1335,13 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                                       behavior: HitTestBehavior.opaque,
                                       onTap: () {
                                         if (_index != i) {
-                                          _index = i;
-                                          _indexVN.value = i;
+                                          setState(() {
+                                            _index = i;
+                                            _indexVN.value = i;
+                                          });
                                         }
                                         // ✅ 点击条目时主动滚到当前项附近，避免“点击后跳回第一张/找不到当前位置”。
                                         _ensureStripVisible(i);
-                                        setState(
-                                            () => _uiVisible = !_uiVisible);
                                       },
                                       child: Center(
                                         child: StripImageItem(
@@ -1180,6 +1365,14 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                                           centerListenable: _indexVN,
                                           activeRadiusListenable:
                                               _stripActiveRadiusVN,
+                                          onZoomChanged: (zoomed) {
+                                            if (_stripViewerZoomed == zoomed) {
+                                              return;
+                                            }
+                                            setState(() {
+                                              _stripViewerZoomed = zoomed;
+                                            });
+                                          },
                                           placeholderH: 220, // ✅ 你要的“默认高度”
                                         ),
                                       ),
