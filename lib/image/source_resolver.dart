@@ -5,6 +5,7 @@ import 'dart:io';
 import '../emby.dart';
 import '../sources/accounts.dart';
 import '../sources/refs.dart';
+import 'remote_quality.dart';
 
 typedef ResolvedImageSource = ({String url, Map<String, String> headers});
 typedef ResolvedEmbyImageSource = ({
@@ -128,7 +129,11 @@ class ImageSourceResolver {
     );
   }
 
-  Future<ResolvedEmbyImageSource?> _resolveEmby(String source) async {
+  Future<ResolvedEmbyImageSource?> _resolveEmby(
+    String source, {
+    RemoteImageQualityMode qualityMode = RemoteImageQualityMode.original,
+    int viewportWidth = 0,
+  }) async {
     try {
       final ref = parseEmbySourceRef(source);
       if (ref == null) return null;
@@ -139,7 +144,47 @@ class ImageSourceResolver {
       final item = await embyItemFutureFor(client, ref.itemId);
       var url = '';
       if (item != null) {
-        url = client.bestImageUrl(item).trim();
+        final maxWidth = qualityMode.embyMaxWidth(viewportWidth);
+        final quality = qualityMode.embyQuality;
+        if (maxWidth == null && quality == null) {
+          url = client.bestImageUrl(item).trim();
+        } else {
+          if (item.primaryTag != null) {
+            url = client
+                .coverUrl(
+                  item.id,
+                  type: 'Primary',
+                  tag: item.primaryTag,
+                  maxWidth: maxWidth,
+                  quality: quality,
+                )
+                .trim();
+          }
+          if (url.isEmpty) {
+            url = client
+                .coverUrl(
+                  item.id,
+                  type: 'Primary',
+                  maxWidth: maxWidth,
+                  quality: quality,
+                )
+                .trim();
+          }
+          if (url.isEmpty && item.thumbTag != null) {
+            url = client
+                .coverUrl(
+                  item.id,
+                  type: 'Thumb',
+                  tag: item.thumbTag,
+                  maxWidth: maxWidth,
+                  quality: quality,
+                )
+                .trim();
+          }
+          if (url.isEmpty) {
+            url = client.bestImageUrl(item).trim();
+          }
+        }
       }
       if (url.isEmpty) {
         url = client.originalImageUrl(ref.itemId).trim();
@@ -155,10 +200,21 @@ class ImageSourceResolver {
     }
   }
 
-  Future<ResolvedEmbyImageSource?> embyFutureFor(String source) {
+  Future<ResolvedEmbyImageSource?> embyFutureFor(
+    String source, {
+    RemoteImageQualityMode qualityMode = RemoteImageQualityMode.original,
+    int viewportWidth = 0,
+  }) {
+    final key = '$source|${qualityMode.storageValue}|$viewportWidth';
     return _embyResolveFutureCache.putIfAbsent(
-      source,
-      () => remoteResolveLimiter.run(() => _resolveEmby(source)),
+      key,
+      () => remoteResolveLimiter.run(
+        () => _resolveEmby(
+          source,
+          qualityMode: qualityMode,
+          viewportWidth: viewportWidth,
+        ),
+      ),
     );
   }
 }

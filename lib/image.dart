@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'image/provider_helpers.dart';
 import 'image/preload_windows.dart';
 import 'image/overlay_layout_helpers.dart';
+import 'image/remote_quality.dart';
 import 'image/source_resolver.dart';
 import 'image/ratio_cache.dart';
 import 'image/strip_sync_helpers.dart';
@@ -51,11 +52,22 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   late int _index;
   final Map<int, TransformationController> _viewerControllers =
       <int, TransformationController>{};
+  final Map<String, Future<ImageProvider?>> _singlePageProviderFutures =
+      <String, Future<ImageProvider?>>{};
+  final Map<String, ImageProvider> _singlePageProviderCache =
+      <String, ImageProvider>{};
+  final Map<String, Future<ImageProvider?>> _embySinglePageProviderFutures =
+      <String, Future<ImageProvider?>>{};
+  final Map<String, ImageProvider> _embySinglePageProviderCache =
+      <String, ImageProvider>{};
   bool _currentViewerZoomed = false;
   bool _stripViewerZoomed = false;
+  int? _savedImageCacheMaxEntries;
+  int? _savedImageCacheMaxBytes;
 
   // 是否显示角标
   bool _showIndexBadge = false;
+  RemoteImageQualityMode _remoteQualityMode = RemoteImageQualityMode.original;
 
   // 拼接模式
   bool _stripMode = false;
@@ -96,6 +108,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   static const _kStripModeKey = 'img_view_strip_mode_v1';
   static const _kStripScaleKey = 'img_view_strip_scale_v1';
   static const _kIndexBadgeKey = 'img_view_index_badge_v1';
+  static const _kRemoteQualityModeKey = 'img_view_remote_quality_mode_v1';
   static const _kRatioCacheKey = 'img_view_ratio_cache_v1';
 
   // WebDAV 解析缓存
@@ -153,7 +166,11 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       _sourceResolver.webdavFutureFor(source);
 
   Future<ResolvedEmbyImageSource?> _embyFutureFor(String source) =>
-      _sourceResolver.embyFutureFor(source);
+      _sourceResolver.embyFutureFor(
+        source,
+        qualityMode: _remoteQualityMode,
+        viewportWidth: _targetCacheWidth(),
+      );
 
   int _targetCacheWidth() {
     if (!mounted) return 1920;
@@ -215,28 +232,129 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   }
 
   Future<ImageProvider?> _providerForSource(String source) async {
+    final viewportWidth = _targetCacheWidth();
+    final viewportHeight = _targetCacheHeight();
+    final remoteWidth = _remoteQualityMode.scaledWidth(viewportWidth);
+    final remoteHeight = _remoteQualityMode.scaledHeight(viewportHeight);
     try {
       if (_isWebDavSource(source)) {
         final resolved = await _webdavFutureFor(source);
         if (resolved == null) return null;
-        final provider = NetworkImage(resolved.url, headers: resolved.headers);
+        final provider = SharedImageProviderCache.network(
+          resolved.url,
+          headers: resolved.headers,
+          width: remoteWidth,
+          height: remoteHeight,
+        );
         return provider;
       }
       if (_isEmbySource(source)) {
         final resolved = await _embyFutureFor(source);
         if (resolved == null) return null;
-        final provider = NetworkImage(resolved.url, headers: resolved.headers);
+        final provider = NetworkImage(
+          resolved.url,
+          headers: resolved.headers,
+        );
         return provider;
       }
       if (source.startsWith('http://') || source.startsWith('https://')) {
-        final provider = NetworkImage(source);
+        final provider = SharedImageProviderCache.network(
+          source,
+          width: remoteWidth,
+          height: remoteHeight,
+        );
         return provider;
       }
-      final provider = FileImage(File(source));
+      final provider = SharedImageProviderCache.local(
+        source,
+        width: max(viewportWidth, 1600),
+        height: max(viewportHeight, 1600),
+      );
       return provider;
     } catch (_) {
       return null;
     }
+  }
+
+  Future<ImageProvider?> _singlePageProviderFutureFor(String source) {
+    final key = source.trim();
+    if (_isEmbySource(source)) {
+      return _embySinglePageProviderFutures.putIfAbsent(
+        key,
+        () async {
+          final provider = await _providerForSource(source);
+          if (provider != null) {
+            _embySinglePageProviderCache[key] = provider;
+          }
+          return provider;
+        },
+      );
+    }
+    return _singlePageProviderFutures.putIfAbsent(
+      key,
+      () async {
+        final provider = await _providerForSource(source);
+        if (provider != null) {
+          _singlePageProviderCache[key] = provider;
+        }
+        return provider;
+      },
+    );
+  }
+
+  ImageProvider? _cachedSinglePageProvider(String source) {
+    if (_isEmbySource(source)) {
+      return _embySinglePageProviderCache[source.trim()];
+    }
+    return _singlePageProviderCache[source.trim()];
+  }
+
+  void _warmSinglePageProvidersAround(int centerIndex) {
+    final currentSource = widget.imagePaths[centerIndex];
+    final plan = _isEmbySource(currentSource)
+        ? <int>[
+            centerIndex,
+            centerIndex + 1,
+            centerIndex + 2,
+            centerIndex - 1,
+            centerIndex + 3,
+          ]
+        : <int>[
+            centerIndex,
+            centerIndex - 1,
+            centerIndex + 1,
+            centerIndex - 2,
+            centerIndex + 2,
+          ];
+    for (final idx in plan) {
+      if (idx < 0 || idx >= widget.imagePaths.length) continue;
+      final source = widget.imagePaths[idx];
+      final future = _singlePageProviderFutureFor(source);
+      unawaited(() async {
+        try {
+          final provider = await future;
+          if (!mounted || provider == null) return;
+          await _precacheLimiter.run(() => precacheImage(provider, context));
+        } catch (_) {}
+      }());
+    }
+  }
+
+  void _configureViewerImageCache() {
+    final imageCache = PaintingBinding.instance.imageCache;
+    _savedImageCacheMaxEntries ??= imageCache.maximumSize;
+    _savedImageCacheMaxBytes ??= imageCache.maximumSizeBytes;
+    imageCache.maximumSize = max(imageCache.maximumSize, 600);
+    imageCache.maximumSizeBytes =
+        max(imageCache.maximumSizeBytes, 512 * 1024 * 1024);
+  }
+
+  void _restoreViewerImageCache() {
+    final imageCache = PaintingBinding.instance.imageCache;
+    final savedEntries = _savedImageCacheMaxEntries;
+    final savedBytes = _savedImageCacheMaxBytes;
+    if (savedEntries != null) imageCache.maximumSize = savedEntries;
+    if (savedBytes != null) imageCache.maximumSizeBytes = savedBytes;
   }
 
   // ============================
@@ -536,8 +654,81 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     // 而 InteractiveViewer 内部又有变换状态，导致旧帧残留。
     // 这里用 ValueKey 强制每张图的 Viewer 组件独立，避免状态串页。
     if (_isMobile) {
+      if (_isEmbySource(source)) {
+        return FutureBuilder<ResolvedEmbyImageSource?>(
+          future: _embyFutureFor(source),
+          builder: (context, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return Center(
+                child: _LoadingThumb(progress: null, lightText: !isLightBg),
+              );
+            }
+            final resolved = snap.data;
+            if (resolved == null) {
+              return const Center(
+                child: Icon(Icons.broken_image, color: Colors.white54),
+              );
+            }
+
+            final result = PhotoView(
+              key: ValueKey<String>('img_view_$source'),
+              imageProvider: NetworkImage(
+                resolved.url,
+                headers: resolved.headers,
+              ),
+              backgroundDecoration: BoxDecoration(color: _bg),
+              minScale: PhotoViewComputedScale.contained,
+              initialScale: PhotoViewComputedScale.contained,
+              maxScale: PhotoViewComputedScale.contained * 5,
+              loadingBuilder: (_, __) => Center(
+                child: _LoadingThumb(progress: null, lightText: !isLightBg),
+              ),
+              errorBuilder: (_, __, ___) => const Center(
+                child: Icon(Icons.broken_image, color: Colors.white54),
+              ),
+              scaleStateChangedCallback: (state) {
+                final zoomed = state != PhotoViewScaleState.initial &&
+                    state != PhotoViewScaleState.originalSize;
+                if (_currentViewerZoomed != zoomed && mounted) {
+                  setState(() => _currentViewerZoomed = zoomed);
+                }
+              },
+            );
+
+            return _wrapWithIndexBadge(child: result, index: index);
+          },
+        );
+      }
+
+      final cachedProvider = _cachedSinglePageProvider(source);
+      if (cachedProvider != null) {
+        final result = PhotoView(
+          key: ValueKey<String>('img_view_$source'),
+          imageProvider: cachedProvider,
+          backgroundDecoration: BoxDecoration(color: _bg),
+          minScale: PhotoViewComputedScale.contained,
+          initialScale: PhotoViewComputedScale.contained,
+          maxScale: PhotoViewComputedScale.contained * 5,
+          loadingBuilder: (_, __) => Center(
+            child: _LoadingThumb(progress: null, lightText: !isLightBg),
+          ),
+          errorBuilder: (_, __, ___) => const Center(
+            child: Icon(Icons.broken_image, color: Colors.white54),
+          ),
+          scaleStateChangedCallback: (state) {
+            final zoomed = state != PhotoViewScaleState.initial &&
+                state != PhotoViewScaleState.originalSize;
+            if (_currentViewerZoomed != zoomed && mounted) {
+              setState(() => _currentViewerZoomed = zoomed);
+            }
+          },
+        );
+
+        return _wrapWithIndexBadge(child: result, index: index);
+      }
+
       return FutureBuilder<ImageProvider?>(
-        future: _providerForSource(source),
+        future: _singlePageProviderFutureFor(source),
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
             return Center(
@@ -611,12 +802,16 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       final sm = prefs.getBool(_kStripModeKey);
       final ss = prefs.getDouble(_kStripScaleKey);
       final ib = prefs.getBool(_kIndexBadgeKey); // ✅ 角标
+      final remoteMode = remoteImageQualityModeFromStorage(
+        prefs.getString(_kRemoteQualityModeKey),
+      );
 
       if (!mounted) return;
       setState(() {
         if (sm != null) _stripMode = sm;
         if (ss != null) _stripScale = ss;
         _uiVisible = _defaultUiVisibleForMode(_stripMode);
+        _remoteQualityMode = remoteMode;
 
         // ✅ 如果没存过，就保持默认 false（无角标）
         if (ib != null) _showIndexBadge = ib;
@@ -671,6 +866,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
       // ✅ 保存角标状态
       await prefs.setBool(_kIndexBadgeKey, _showIndexBadge);
+      await prefs.setString(
+        _kRemoteQualityModeKey,
+        _remoteQualityMode.storageValue,
+      );
     } catch (_) {}
   }
 
@@ -743,6 +942,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _stripActiveRadiusVN = ValueNotifier<int>(_stripActiveRadiusCurrent);
     _controller = PageController(initialPage: _index);
     _uiVisible = _defaultUiVisibleForMode(_stripMode);
+    _configureViewerImageCache();
 
     _stripKeys =
         List<GlobalKey>.generate(widget.imagePaths.length, (_) => GlobalKey());
@@ -751,6 +951,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _loadImageSettings();
     _stripController.addListener(_onStripScroll);
     _applyImmersiveAndOrientation(landscape: false);
+    _warmSinglePageProvidersAround(_index);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _ensureKeyFocus();
@@ -813,6 +1014,11 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
       controller.dispose();
     }
     _viewerControllers.clear();
+    _singlePageProviderFutures.clear();
+    _singlePageProviderCache.clear();
+    _embySinglePageProviderFutures.clear();
+    _embySinglePageProviderCache.clear();
+    _restoreViewerImageCache();
     _stripController.dispose();
     _indexVN.dispose();
     _stripActiveRadiusVN.dispose();
@@ -1043,6 +1249,87 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     Overlay.of(context, rootOverlay: true).insert(_sizeMenuEntry!);
   }
 
+  Future<void> _showRemoteQualitySubMenu({
+    required Offset globalPos,
+    required Size overlaySize,
+    required double parentLeft,
+    required double parentTop,
+    required double parentWidth,
+  }) async {
+    _sizeMenuEntry?.remove();
+    _sizeMenuEntry = null;
+
+    const menuWidth = ImageOverlayLayoutHelpers.sizeMenuWidth;
+    final isLight = _bg == Colors.white;
+    final fg = isLight ? Colors.black : Colors.white;
+
+    Widget item(RemoteImageQualityMode mode) {
+      final selected = _remoteQualityMode == mode;
+      return InkWell(
+        onTap: () {
+          setState(() {
+            _remoteQualityMode = mode;
+            _singlePageProviderFutures.clear();
+            _singlePageProviderCache.clear();
+            _embySinglePageProviderFutures.clear();
+            _embySinglePageProviderCache.clear();
+          });
+          _warmSinglePageProvidersAround(_index);
+          _saveViewerPrefs();
+          _removeContextMenu();
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              Icon(selected ? Icons.check : Icons.photo_filter,
+                  size: 18, color: fg),
+              const SizedBox(width: 10),
+              Expanded(child: Text(mode.label, style: TextStyle(color: fg))),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final left = ImageOverlayLayoutHelpers.sizeMenuLeft(
+      parentLeft: parentLeft,
+      parentWidth: parentWidth,
+      overlaySize: overlaySize,
+    );
+    final top = ImageOverlayLayoutHelpers.sizeMenuTop(
+      parentTop: parentTop,
+      overlaySize: overlaySize,
+    );
+
+    _sizeMenuEntry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: left,
+        top: top,
+        child: Material(
+          type: MaterialType.card,
+          color: isLight ? Colors.white : const Color(0xFF111111),
+          elevation: 10,
+          borderRadius: BorderRadius.circular(10),
+          child: SizedBox(
+            width: menuWidth,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                item(RemoteImageQualityMode.original),
+                item(RemoteImageQualityMode.balanced),
+                item(RemoteImageQualityMode.compressed),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Overlay.of(context, rootOverlay: true).insert(_sizeMenuEntry!);
+  }
+
   Future<void> _showContextMenu(Offset globalPos) async {
     _removeContextMenu();
     final overlayState = Overlay.of(context, rootOverlay: true);
@@ -1084,7 +1371,19 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
         );
       }
 
-      final itemCount = 1 + (_stripMode ? 1 : 0) + (_canRotate ? 1 : 0) + 1 + 1;
+      final currentSource = (_index >= 0 && _index < widget.imagePaths.length)
+          ? widget.imagePaths[_index]
+          : '';
+      final supportsRemoteQuality = _isEmbySource(currentSource) ||
+          _isWebDavSource(currentSource) ||
+          currentSource.startsWith('http://') ||
+          currentSource.startsWith('https://');
+      final itemCount = 1 +
+          (_stripMode ? 1 : 0) +
+          (supportsRemoteQuality ? 1 : 0) +
+          (_canRotate ? 1 : 0) +
+          1 +
+          1;
       final left = ImageOverlayLayoutHelpers.contextMenuLeft(dx, overlaySize);
       final top = ImageOverlayLayoutHelpers.contextMenuTop(
         dy: dy,
@@ -1140,6 +1439,18 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                           label: '图片宽度 ▶ (${(_stripScale * 100).round()}%)',
                           icon: Icons.tune,
                           onTap: () => _showSizeSubMenu(
+                            globalPos: globalPos,
+                            overlaySize: overlaySize,
+                            parentLeft: left,
+                            parentTop: top,
+                            parentWidth: menuWidth,
+                          ),
+                        ),
+                      if (supportsRemoteQuality)
+                        item(
+                          label: '${_remoteQualityMode.label} ▶',
+                          icon: Icons.high_quality,
+                          onTap: () => _showRemoteQualitySubMenu(
                             globalPos: globalPos,
                             overlaySize: overlaySize,
                             parentLeft: left,
@@ -1299,6 +1610,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                                   _currentViewerZoomed = false;
                                 });
                                 _indexVN.value = i;
+                                _warmSinglePageProvidersAround(i);
                                 _updatePreloadWindow(i);
                               },
                               itemBuilder: (_, i) {
