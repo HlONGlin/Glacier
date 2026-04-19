@@ -235,11 +235,16 @@ class _FavoritesPageState extends State<FavoritesPage> {
       return;
     }
 
+    final embySources = live.sources.where(isPageEmbySource).toList(growable: false);
+    final defaultCollection = embySources.isNotEmpty
+        ? (live.copy()..sources = embySources)
+        : live.copy();
+
     if (!mounted) return;
     final updated = await Navigator.push<FavoriteCollection>(
       context,
       MaterialPageRoute(
-        builder: (_) => FolderDetailPage(collection: live.copy()),
+        builder: (_) => FolderDetailPage(collection: defaultCollection),
       ),
     );
     if (updated == null) return;

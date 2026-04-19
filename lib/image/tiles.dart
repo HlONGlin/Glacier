@@ -227,7 +227,10 @@ class _LoadingThumb extends StatelessWidget {
       builder: (context, constraints) {
         final boundedH =
             constraints.hasBoundedHeight && constraints.maxHeight.isFinite;
-        final safeH = boundedH ? constraints.maxHeight : 220.0;
+        final screenH = MediaQuery.of(context).size.height;
+        final safeH = boundedH
+            ? constraints.maxHeight
+            : (screenH * 0.14).clamp(48.0, 120.0);
 
         return SizedBox(
           width: double.infinity,

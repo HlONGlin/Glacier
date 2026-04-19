@@ -51,6 +51,28 @@ extension RemoteImageQualityModeX on RemoteImageQualityMode {
     }
   }
 
+  int stripDecodeWidth(int viewportWidth) {
+    switch (this) {
+      case RemoteImageQualityMode.original:
+        return max(viewportWidth, 1280);
+      case RemoteImageQualityMode.balanced:
+        return max(viewportWidth, 1080);
+      case RemoteImageQualityMode.compressed:
+        return max(viewportWidth, 720);
+    }
+  }
+
+  int stripDecodeHeight(int viewportHeight) {
+    switch (this) {
+      case RemoteImageQualityMode.original:
+        return max(viewportHeight, 1600);
+      case RemoteImageQualityMode.balanced:
+        return max(viewportHeight, 1280);
+      case RemoteImageQualityMode.compressed:
+        return max(viewportHeight, 960);
+    }
+  }
+
   int? embyMaxWidth(int viewportWidth) {
     switch (this) {
       case RemoteImageQualityMode.original:

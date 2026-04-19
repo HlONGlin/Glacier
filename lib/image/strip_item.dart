@@ -11,6 +11,7 @@ class StripImageItem extends StatefulWidget {
 
   final Future<ResolvedImageSource?> Function(String) webdavFutureFor;
   final Future<ResolvedEmbyImageSource?> Function(String) embyFutureFor;
+  final RemoteImageQualityMode remoteQualityMode;
   final bool Function(String) isWebDavSource;
   final bool Function(String) isEmbySource;
   final ValueListenable<int> centerListenable;
@@ -27,6 +28,7 @@ class StripImageItem extends StatefulWidget {
     this.initialRatio,
     required this.webdavFutureFor,
     required this.embyFutureFor,
+    required this.remoteQualityMode,
     required this.isWebDavSource,
     required this.isEmbySource,
     required this.centerListenable,
@@ -48,27 +50,37 @@ class _StripImageItemState extends State<StripImageItem>
   late bool _eagerLoad;
   Future<ResolvedImageSource?>? _webdavFuture;
   Future<ResolvedEmbyImageSource?>? _embyFuture;
-  final TransformationController _zoomController = TransformationController();
-  bool _zoomed = false;
 
   String get _sourceKey => widget.source.trim();
 
   bool get _lightText => widget.bg != Colors.white;
-  BoxFit get _stripFit => _ratio == null ? BoxFit.contain : BoxFit.fitWidth;
+  BoxFit get _stripFit => BoxFit.fill;
+
+  double get _placeholderHeight {
+    return 1.0;
+  }
 
   double get _currentHeight {
-    if (_ratio == null || _ratio! <= 0) return widget.placeholderH;
+    if (_ratio == null || _ratio! <= 0) return _placeholderHeight;
     final h = widget.targetW / _ratio!;
     final maxH = MediaQuery.of(context).size.height * 2;
     return h.clamp(80.0, maxH);
   }
 
   int _decodeWidth() {
+    if (widget.isEmbySource(widget.source) ||
+        widget.isWebDavSource(widget.source)) {
+      return widget.remoteQualityMode.stripDecodeWidth(widget.targetW.round());
+    }
     final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
     return max(256, (widget.targetW * dpr).round());
   }
 
   int _decodeHeight() {
+    if (widget.isEmbySource(widget.source) ||
+        widget.isWebDavSource(widget.source)) {
+      return widget.remoteQualityMode.stripDecodeHeight(_currentHeight.round());
+    }
     final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0);
     return max(256, (_currentHeight * dpr).round());
   }
@@ -226,32 +238,6 @@ class _StripImageItemState extends State<StripImageItem>
     unawaited(_probeRatioAsync());
   }
 
-  void _syncZoomState() {
-    final next = _zoomController.value.getMaxScaleOnAxis() > 1.01;
-    if (_zoomed == next) return;
-    _zoomed = next;
-    widget.onZoomChanged?.call(next);
-  }
-
-  Widget _wrapZoomable(Widget child) {
-    return InteractiveViewer(
-      transformationController: _zoomController,
-      minScale: 1.0,
-      maxScale: 5.0,
-      panEnabled: true,
-      scaleEnabled: true,
-      onInteractionStart: (_) {
-        if (!_zoomed) {
-          _zoomed = true;
-          widget.onZoomChanged?.call(true);
-        }
-      },
-      onInteractionUpdate: (_) => _syncZoomState(),
-      onInteractionEnd: (_) => _syncZoomState(),
-      child: child,
-    );
-  }
-
   Future<void> _probeRatioAsync() async {
     try {
       final src = widget.source;
@@ -282,17 +268,10 @@ class _StripImageItemState extends State<StripImageItem>
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.topCenter,
-      child: SizedBox(
-        width: widget.targetW,
-        height: _currentHeight,
-        child: ClipRect(
-          child: _badgeWrap(_wrapZoomable(_buildImage())),
-        ),
-      ),
+    return SizedBox(
+      width: widget.targetW,
+      height: _currentHeight,
+      child: _badgeWrap(_buildImage()),
     );
   }
 
@@ -301,7 +280,7 @@ class _StripImageItemState extends State<StripImageItem>
 
   Widget _buildImage() {
     if (!_eagerLoad && !_hasEverLoaded) {
-      return _LoadingThumb(progress: null, lightText: _lightText);
+      return const SizedBox.shrink();
     }
 
     if (_eagerLoad) {
@@ -334,7 +313,7 @@ class _StripImageItemState extends State<StripImageItem>
             height: decodeH,
           );
           if (_ratio == null) {
-            return _LoadingThumb(progress: null, lightText: _lightText);
+            return const SizedBox.shrink();
           }
 
           return Image(
@@ -380,7 +359,7 @@ class _StripImageItemState extends State<StripImageItem>
             height: decodeH,
           );
           if (_ratio == null) {
-            return _LoadingThumb(progress: null, lightText: _lightText);
+            return const SizedBox.shrink();
           }
 
           return Image(
@@ -412,7 +391,7 @@ class _StripImageItemState extends State<StripImageItem>
         height: decodeH,
       );
       if (_ratio == null) {
-        return _LoadingThumb(progress: null, lightText: _lightText);
+        return const SizedBox.shrink();
       }
 
       return Image(
@@ -441,7 +420,7 @@ class _StripImageItemState extends State<StripImageItem>
       height: decodeH,
     );
     if (_ratio == null) {
-      return _LoadingThumb(progress: null, lightText: _lightText);
+      return const SizedBox.shrink();
     }
 
     return Image(
@@ -460,10 +439,7 @@ class _StripImageItemState extends State<StripImageItem>
 
   @override
   void dispose() {
-    if (_zoomed) {
-      widget.onZoomChanged?.call(false);
-    }
-    _zoomController.dispose();
+    widget.onZoomChanged?.call(false);
     widget.centerListenable.removeListener(_handleEagerInputsChanged);
     widget.activeRadiusListenable.removeListener(_handleEagerInputsChanged);
     super.dispose();
