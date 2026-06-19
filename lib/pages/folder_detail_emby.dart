@@ -1,29 +1,31 @@
 part of '../pages.dart';
 
-class _FolderEmbyCoverLimiter {
-  int _running = 0;
-  final List<Completer<void>> _waiters = <Completer<void>>[];
-
-  Future<T> run<T>(Future<T> Function() task) async {
-    if (_running >= 4) {
-      final gate = Completer<void>();
-      _waiters.add(gate);
-      await gate.future;
-    }
-    _running++;
-    try {
-      return await task();
-    } finally {
-      _running--;
-      if (_waiters.isNotEmpty) {
-        final next = _waiters.removeAt(0);
-        if (!next.isCompleted) next.complete();
-      }
-    }
-  }
-}
+final Map<String, ({DateTime at, List<Entry> list})> _sharedEmbyListCache =
+    <String, ({DateTime at, List<Entry> list})>{};
+final Map<String, Future<List<Entry>>> _sharedEmbyListFutures =
+    <String, Future<List<Entry>>>{};
 
 extension _FolderDetailEmby on _FolderDetailPageState {
+  String _embyListCacheKey(String accountId, String path) =>
+      '${accountId.trim()}|${path.trim()}|${_active.viewMode.name}';
+
+  List<Entry>? _getCachedEmbyList(String accountId, String path) {
+    final cached = _sharedEmbyListCache[_embyListCacheKey(accountId, path)];
+    if (cached == null) return null;
+    if (DateTime.now().difference(cached.at) > const Duration(minutes: 3)) {
+      _sharedEmbyListCache.remove(_embyListCacheKey(accountId, path));
+      return null;
+    }
+    return cached.list;
+  }
+
+  void _putCachedEmbyList(String accountId, String path, List<Entry> list) {
+    _sharedEmbyListCache[_embyListCacheKey(accountId, path)] = (
+      at: DateTime.now(),
+      list: List<Entry>.from(list, growable: false),
+    );
+  }
+
   bool _embyTypeIsDir(String t) {
     final s = t.trim().toLowerCase();
     if (s.isEmpty) return false;
@@ -188,6 +190,28 @@ extension _FolderDetailEmby on _FolderDetailPageState {
   }
 
   Future<List<Entry>> _loadEmby(String accountId, String path) async {
+    final cached = _getCachedEmbyList(accountId, path);
+    if (cached != null) return cached;
+
+    final cacheKey = _embyListCacheKey(accountId, path);
+    final existing = _sharedEmbyListFutures[cacheKey];
+    if (existing != null) return existing;
+
+    final future = _loadEmbyFresh(accountId, path);
+    _sharedEmbyListFutures[cacheKey] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_sharedEmbyListFutures[cacheKey], future)) {
+        _sharedEmbyListFutures.remove(cacheKey);
+      }
+    }
+  }
+
+  Future<List<Entry>> _loadEmbyFresh(String accountId, String path) async {
+    final cached = _getCachedEmbyList(accountId, path);
+    if (cached != null) return cached;
+
     final accMap = await _loadEmbyAccountsMap();
     final a = accMap[accountId];
     if (a == null) {
@@ -204,7 +228,6 @@ extension _FolderDetailEmby on _FolderDetailPageState {
       ];
     }
     final client = EmbyClient(a);
-    final coverLimiter = _FolderEmbyCoverLimiter();
 
     final out = <Entry>[];
 
@@ -213,41 +236,30 @@ extension _FolderDetailEmby on _FolderDetailPageState {
           (a, b) => _controller.compareEntries(a, b, activeSettings: _active));
     }
 
-    Future<String> folderCoverFor(EmbyItem it) {
-      return coverLimiter.run(() async {
-        return ((await client.pickAutoFolderCoverUrl(
-                  folderId: it.id,
-                  maxWidth: 720,
-                  quality: 90,
-                  fallbackToVideo: true,
-                ) ??
-                client.bestCoverUrl(it, maxWidth: 720, quality: 90))
-            .trim());
-      });
+    String folderCoverFor(EmbyItem it) {
+      return client.bestCoverUrl(it, maxWidth: 720, quality: 90).trim();
     }
 
     try {
       if (path == 'favorites') {
         final views = await client.listViews();
         if (views.isNotEmpty) {
-          final entries = await Future.wait(
-            views.map((v) async {
-              final cover = await folderCoverFor(v);
-              return Entry(
-                isDir: true,
-                name: v.name.isEmpty ? '未命名库' : v.name,
-                size: 0,
-                modified: DateTime.fromMillisecondsSinceEpoch(0),
-                typeKey: 'emby_folder',
-                origin: 'Emby：${a.name}',
-                embyAccountId: a.id,
-                embyItemId: v.id,
-                embyCoverUrl: cover,
-              );
-            }),
-          );
+          final entries = views
+              .map((v) => Entry(
+                    isDir: true,
+                    name: v.name.isEmpty ? '未命名库' : v.name,
+                    size: 0,
+                    modified: DateTime.fromMillisecondsSinceEpoch(0),
+                    typeKey: 'emby_folder',
+                    origin: 'Emby：${a.name}',
+                    embyAccountId: a.id,
+                    embyItemId: v.id,
+                    embyCoverUrl: folderCoverFor(v),
+                  ))
+              .toList(growable: false);
           out.addAll(entries);
           sortEmbyOut();
+          _putCachedEmbyList(accountId, path, out);
           return out;
         }
 
@@ -267,36 +279,38 @@ extension _FolderDetailEmby on _FolderDetailPageState {
           return out;
         }
 
-        final entries = await Future.wait(
-          items.map((it) async {
-            final isDir = _embyTypeIsDir(it.type);
-            final isImg = _embyTypeIsImage(it.type);
-            final cover = isDir
-                ? await folderCoverFor(it)
-                : client.bestCoverUrl(
-                    it,
-                    maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-                  );
+        final entries = items
+            .map((it) {
+              final isDir = _embyTypeIsDir(it.type);
+              final isImg = _embyTypeIsImage(it.type);
+              final cover = isDir
+                  ? folderCoverFor(it)
+                  : client.bestCoverUrl(
+                      it,
+                      maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
+                    );
 
-            return Entry(
-              isDir: isDir,
-              name: it.name.isEmpty ? '未命名' : it.name,
-              size: isDir ? 0 : it.size,
-              modified: it.dateCreated ??
-                  it.dateModified ??
-                  DateTime.fromMillisecondsSinceEpoch(0),
-              typeKey:
-                  isDir ? 'emby_folder' : (isImg ? 'emby_image' : 'emby_video'),
-              origin: null,
-              embyAccountId: accountId,
-              embyItemId: it.id,
-              embyCoverUrl: cover,
-              embyAspectRatio: it.primaryImageAspectRatio,
-            );
-          }),
-        );
+              return Entry(
+                isDir: isDir,
+                name: it.name.isEmpty ? '未命名' : it.name,
+                size: isDir ? 0 : it.size,
+                modified: it.dateCreated ??
+                    it.dateModified ??
+                    DateTime.fromMillisecondsSinceEpoch(0),
+                typeKey: isDir
+                    ? 'emby_folder'
+                    : (isImg ? 'emby_image' : 'emby_video'),
+                origin: null,
+                embyAccountId: accountId,
+                embyItemId: it.id,
+                embyCoverUrl: cover,
+                embyAspectRatio: it.primaryImageAspectRatio,
+              );
+            })
+            .toList(growable: false);
         out.addAll(entries);
         sortEmbyOut();
+        _putCachedEmbyList(accountId, path, out);
         return out;
       }
 
@@ -305,12 +319,48 @@ extension _FolderDetailEmby on _FolderDetailPageState {
         if (parentId.isEmpty) return out;
 
         final children = await client.listChildren(parentId: parentId);
-        final entries = await Future.wait(
-          children.map((it) async {
+        final entries = children
+            .map((it) {
+              final isDir = _embyTypeIsDir(it.type);
+              final isImg = _embyTypeIsImage(it.type);
+              final cover = isDir
+                  ? folderCoverFor(it)
+                  : client.bestCoverUrl(
+                      it,
+                      maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
+                    );
+
+              return Entry(
+                isDir: isDir,
+                name: it.name.isEmpty ? '未命名' : it.name,
+                size: isDir ? 0 : it.size,
+                modified: it.dateCreated ??
+                    it.dateModified ??
+                    DateTime.fromMillisecondsSinceEpoch(0),
+                typeKey: isDir
+                    ? 'emby_folder'
+                    : (isImg ? 'emby_image' : 'emby_video'),
+                origin: null,
+                embyAccountId: a.id,
+                embyItemId: it.id,
+                embyCoverUrl: cover,
+                embyAspectRatio: it.primaryImageAspectRatio,
+              );
+            })
+            .toList(growable: false);
+        out.addAll(entries);
+        sortEmbyOut();
+        _putCachedEmbyList(accountId, path, out);
+        return out;
+      }
+
+      final items = await client.listFavorites();
+      final entries = items
+          .map((it) {
             final isDir = _embyTypeIsDir(it.type);
             final isImg = _embyTypeIsImage(it.type);
             final cover = isDir
-                ? await folderCoverFor(it)
+                ? folderCoverFor(it)
                 : client.bestCoverUrl(
                     it,
                     maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
@@ -323,52 +373,20 @@ extension _FolderDetailEmby on _FolderDetailPageState {
               modified: it.dateCreated ??
                   it.dateModified ??
                   DateTime.fromMillisecondsSinceEpoch(0),
-              typeKey:
-                  isDir ? 'emby_folder' : (isImg ? 'emby_image' : 'emby_video'),
+              typeKey: isDir
+                  ? 'emby_folder'
+                  : (isImg ? 'emby_image' : 'emby_video'),
               origin: null,
-              embyAccountId: a.id,
+              embyAccountId: accountId,
               embyItemId: it.id,
               embyCoverUrl: cover,
               embyAspectRatio: it.primaryImageAspectRatio,
             );
-          }),
-        );
-        out.addAll(entries);
-        sortEmbyOut();
-        return out;
-      }
-
-      final items = await client.listFavorites();
-      final entries = await Future.wait(
-        items.map((it) async {
-          final isDir = _embyTypeIsDir(it.type);
-          final isImg = _embyTypeIsImage(it.type);
-          final cover = isDir
-              ? await folderCoverFor(it)
-              : client.bestCoverUrl(
-                  it,
-                  maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-                );
-
-          return Entry(
-            isDir: isDir,
-            name: it.name.isEmpty ? '未命名' : it.name,
-            size: isDir ? 0 : it.size,
-            modified: it.dateCreated ??
-                it.dateModified ??
-                DateTime.fromMillisecondsSinceEpoch(0),
-            typeKey:
-                isDir ? 'emby_folder' : (isImg ? 'emby_image' : 'emby_video'),
-            origin: null,
-            embyAccountId: accountId,
-            embyItemId: it.id,
-            embyCoverUrl: cover,
-            embyAspectRatio: it.primaryImageAspectRatio,
-          );
-        }),
-      );
+          })
+          .toList(growable: false);
       out.addAll(entries);
       sortEmbyOut();
+      _putCachedEmbyList(accountId, path, out);
       return out;
     } catch (e) {
       out.add(

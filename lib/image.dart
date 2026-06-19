@@ -61,7 +61,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   final Map<String, ImageProvider> _embySinglePageProviderCache =
       <String, ImageProvider>{};
   bool _currentViewerZoomed = false;
-  bool _stripViewerZoomed = false;
+  double _stripScaleFactor = 1.0;
+  double _stripScaleStart = 1.0;
   int? _savedImageCacheMaxEntries;
   int? _savedImageCacheMaxBytes;
 
@@ -73,8 +74,6 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   bool _stripMode = false;
   double _stripScale = 1.0;
   final ScrollController _stripController = ScrollController();
-  final TransformationController _stripTransformController =
-      TransformationController();
   late final List<GlobalKey> _stripKeys;
 
   // 平台判定
@@ -1141,7 +1140,6 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     _embySinglePageProviderCache.clear();
     _restoreViewerImageCache();
     _stripTapTimer?.cancel();
-    _stripTransformController.dispose();
     _stripController.dispose();
     _indexVN.dispose();
     _stripActiveRadiusVN.dispose();
@@ -1219,7 +1217,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
   void _syncIndexFromStripViewport() {
     final total = widget.imagePaths.length;
-    if (total == 0 || !mounted || _stripViewerZoomed) return;
+    if (total == 0 || !mounted) return;
     final safeTop = ImageStripLayoutHelpers.safeTopOffset(context);
 
     int bestIndex = _index;
@@ -1665,6 +1663,25 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     );
   }
 
+  void _handleStripScaleStart(ScaleStartDetails details) {
+    _stripScaleStart = _stripScaleFactor;
+  }
+
+  void _handleStripScaleUpdate(ScaleUpdateDetails details) {
+    final next = (_stripScaleStart * details.scale).clamp(1.0, 2.2);
+    if (_stripScaleFactor == next) return;
+    setState(() {
+      _stripScaleFactor = next;
+    });
+  }
+
+  void _handleStripScaleEnd(ScaleEndDetails details) {
+    final next = _stripScaleFactor.clamp(1.0, 2.2);
+    setState(() {
+      _stripScaleFactor = next;
+    });
+  }
+
   void _handleMobileStripTap(Offset localPosition) {
     final size = MediaQuery.of(context).size;
     final y = localPosition.dy;
@@ -1786,108 +1803,66 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                           else
                             GestureDetector(
                               behavior: HitTestBehavior.opaque,
+                              onScaleStart:
+                                  _isMobile ? _handleStripScaleStart : null,
+                              onScaleUpdate:
+                                  _isMobile ? _handleStripScaleUpdate : null,
+                              onScaleEnd:
+                                  _isMobile ? _handleStripScaleEnd : null,
                               onTapUp: _isMobile
                                   ? (details) =>
                                       _handleMobileStripTap(details.localPosition)
                                   : null,
-                              child: InteractiveViewer(
-                                transformationController:
-                                    _stripTransformController,
-                                minScale: 1.0,
-                                maxScale: 4.0,
-                                panEnabled: true,
-                                scaleEnabled: true,
-                                boundaryMargin: const EdgeInsets.symmetric(
-                                  vertical: 120,
-                                  horizontal: 0,
-                                ),
-                                clipBehavior: Clip.hardEdge,
-                                onInteractionStart: (_) {
-                                  if (!_stripViewerZoomed) {
-                                    setState(() => _stripViewerZoomed = true);
-                                  }
-                                },
-                                onInteractionUpdate: (_) {
-                                  final zoomed = _stripTransformController.value
-                                          .getMaxScaleOnAxis() >
-                                      1.01;
-                                  final matrix = _stripTransformController.value;
-                                  final currentDx = matrix.storage[12];
-                                  if (currentDx != 0) {
-                                    matrix.storage[12] = 0;
-                                    _stripTransformController.value = matrix;
-                                  }
-                                  if (_stripViewerZoomed != zoomed) {
-                                    setState(() => _stripViewerZoomed = zoomed);
-                                  }
-                                },
-                                onInteractionEnd: (_) {
-                                  final zoomed = _stripTransformController.value
-                                          .getMaxScaleOnAxis() >
-                                      1.01;
-                                  final matrix = _stripTransformController.value;
-                                  final currentDx = matrix.storage[12];
-                                  if (currentDx != 0) {
-                                    matrix.storage[12] = 0;
-                                    _stripTransformController.value = matrix;
-                                  }
-                                  if (_stripViewerZoomed != zoomed) {
-                                    setState(() => _stripViewerZoomed = zoomed);
-                                  }
-                                },
-                                child: ListView.builder(
-                                  controller: _stripController,
-                                  physics: _stripViewerZoomed
-                                      ? const NeverScrollableScrollPhysics()
-                                      : const BouncingScrollPhysics(),
-                                  padding: EdgeInsets.zero,
-                                  itemCount: total,
-                                  cacheExtent:
-                                      MediaQuery.of(context).size.height * 2,
-                                  itemBuilder: (_, i) {
-                                    final path = widget.imagePaths[i];
-                                    final screenW =
-                                        MediaQuery.of(context).size.width;
-                                    final targetW = _isMobile
-                                        ? screenW
-                                        : (screenW * _stripScale)
-                                            .clamp(1.0, screenW);
+                              child: ListView.builder(
+                                controller: _stripController,
+                                physics: const BouncingScrollPhysics(),
+                                padding: EdgeInsets.zero,
+                                itemCount: total,
+                                cacheExtent:
+                                    MediaQuery.of(context).size.height * 2,
+                                itemBuilder: (_, i) {
+                                  final path = widget.imagePaths[i];
+                                  final screenW =
+                                      MediaQuery.of(context).size.width;
+                                  final targetW = _isMobile
+                                      ? (screenW * _stripScaleFactor)
+                                          .clamp(screenW, screenW * 2.2)
+                                      : (screenW * _stripScale)
+                                          .clamp(1.0, screenW);
 
-                                    return RepaintBoundary(
-                                      child: KeyedSubtree(
-                                        key: _stripKeys[i],
-                                        child: Center(
-                                          child: StripImageItem(
-                                            source: path,
-                                            targetW: targetW,
-                                            bg: _bg,
-                                            showIndexBadge: _showIndexBadge,
-                                            index: i,
-                                            initialRatio: (widget
-                                                            .sourceAspectRatios !=
-                                                        null &&
-                                                    i <
-                                                        widget.sourceAspectRatios!
-                                                            .length)
-                                                ? widget.sourceAspectRatios![i]
-                                                : null,
-                                            isWebDavSource: _isWebDavSource,
-                                            webdavFutureFor: _webdavFutureFor,
-                                            isEmbySource: _isEmbySource,
-                                            embyFutureFor: _embyFutureFor,
-                                            remoteQualityMode:
-                                                _remoteQualityMode,
-                                            centerListenable: _indexVN,
-                                            activeRadiusListenable:
-                                                _stripActiveRadiusVN,
-                                            onZoomChanged: (_) {},
-                                            placeholderH: 220,
-                                          ),
+                                  return RepaintBoundary(
+                                    child: KeyedSubtree(
+                                      key: _stripKeys[i],
+                                      child: Center(
+                                        child: StripImageItem(
+                                          source: path,
+                                          targetW: targetW,
+                                          bg: _bg,
+                                          showIndexBadge: _showIndexBadge,
+                                          index: i,
+                                          initialRatio: (widget
+                                                          .sourceAspectRatios !=
+                                                      null &&
+                                                  i <
+                                                      widget.sourceAspectRatios!
+                                                          .length)
+                                              ? widget.sourceAspectRatios![i]
+                                              : null,
+                                          isWebDavSource: _isWebDavSource,
+                                          webdavFutureFor: _webdavFutureFor,
+                                          isEmbySource: _isEmbySource,
+                                          embyFutureFor: _embyFutureFor,
+                                          remoteQualityMode: _remoteQualityMode,
+                                          centerListenable: _indexVN,
+                                          activeRadiusListenable:
+                                              _stripActiveRadiusVN,
+                                          onZoomChanged: (_) {},
+                                          placeholderH: 220,
                                         ),
                                       ),
-                                    );
-                                  },
-                                ),
+                                    ),
+                                  );
+                                },
                               ),
                             ),
 

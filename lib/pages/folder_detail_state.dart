@@ -18,6 +18,7 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
   int _previewPrefetchEpoch = 0;
   bool _previewWarmupRunning = false;
   int _postLoadWorkEpoch = 0;
+  int _embyDirCoverRefreshEpoch = 0;
   bool _loading = true;
   List<Entry> _raw = [];
 
@@ -969,14 +970,83 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
       await Future<void>.delayed(const Duration(milliseconds: 180));
       if (!mounted || epoch != _postLoadWorkEpoch || _loading) return;
       _schedulePreviewWarmup(snapshot);
+      _scheduleEmbyDirectoryCoverRefresh(snapshot);
       unawaited(_hydrateEmbySizesIfNeeded());
+    }());
+  }
+
+  void _scheduleEmbyDirectoryCoverRefresh(List<Entry> list) {
+    final epoch = ++_embyDirCoverRefreshEpoch;
+    final snapshot = List<Entry>.from(list, growable: false);
+    unawaited(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      if (!mounted || epoch != _embyDirCoverRefreshEpoch || _loading) return;
+
+      final targets = snapshot
+          .where((e) => e.isDir && e.isEmby)
+          .take(6)
+          .toList(growable: false);
+      if (targets.isEmpty) return;
+
+      final updates = <String, String>{};
+      for (final entry in targets) {
+        if (!mounted || epoch != _embyDirCoverRefreshEpoch) return;
+        final info = await _getFolderCoverInfo(entry);
+        final url = (info?.embyCoverUrl ?? '').trim();
+        if (url.isEmpty) continue;
+        final key = _imageSourceKeyForEntry(entry);
+        if (key.isEmpty) continue;
+        if ((entry.embyCoverUrl ?? '').trim() == url) continue;
+        updates[key] = url;
+      }
+
+      if (!mounted || epoch != _embyDirCoverRefreshEpoch || updates.isEmpty) {
+        return;
+      }
+
+      var changed = false;
+      final next = <Entry>[];
+      for (final entry in _raw) {
+        final key = _imageSourceKeyForEntry(entry);
+        final url = key.isEmpty ? null : updates[key];
+        if (url == null) {
+          next.add(entry);
+          continue;
+        }
+        changed = true;
+        next.add(Entry(
+          isDir: entry.isDir,
+          name: entry.name,
+          size: entry.size,
+          modified: entry.modified,
+          typeKey: entry.typeKey,
+          origin: entry.origin,
+          localPath: entry.localPath,
+          wdAccountId: entry.wdAccountId,
+          wdRelPath: entry.wdRelPath,
+          wdHref: entry.wdHref,
+          embyAccountId: entry.embyAccountId,
+          embyItemId: entry.embyItemId,
+          embyCoverUrl: url,
+          embyAspectRatio: entry.embyAspectRatio,
+          searchCollectionId: entry.searchCollectionId,
+          searchCollectionName: entry.searchCollectionName,
+        ));
+      }
+      if (!changed) return;
+
+      setState(() {
+        _raw = next;
+        _controller.raw = next;
+      });
     }());
   }
 
   Future<void> _warmVisibleEntryPreviews(List<Entry> list) async {
     if (!mounted || list.isEmpty) return;
 
-    final candidates = <Entry>[];
+    final dirCandidates = <Entry>[];
+    final mediaCandidates = <Entry>[];
     for (final entry in list) {
       if (entry.isLoading) continue;
       if (entry.typeKey == 'hint' ||
@@ -985,10 +1055,27 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
           entry.typeKey == 'wd_error') {
         continue;
       }
-      if (entry.isDir) continue;
-      candidates.add(entry);
-      if (candidates.length >= 6) break;
+
+      if (entry.isDir) {
+        if (entry.isEmby) {
+          dirCandidates.add(entry);
+          if (dirCandidates.length >= 3 && mediaCandidates.length >= 5) {
+            break;
+          }
+        }
+        continue;
+      }
+
+      mediaCandidates.add(entry);
+      if (dirCandidates.length >= 3 && mediaCandidates.length >= 5) {
+        break;
+      }
     }
+
+    final candidates = <Entry>[
+      ...dirCandidates.take(3),
+      ...mediaCandidates.take(5),
+    ];
     if (candidates.isEmpty) return;
 
     for (final entry in candidates) {
@@ -1002,6 +1089,18 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
   Future<void> _warmPreviewForEntry(Entry e) async {
     final imageContext = context;
     try {
+      if (e.isDir) {
+        if (!e.isEmby) return;
+        final cover = await _getFolderCoverInfo(e);
+        final url = (cover?.embyCoverUrl ?? '').trim();
+        if (url.isEmpty || !imageContext.mounted) return;
+        await precacheImage(
+          CachedNetworkImageProvider(url),
+          imageContext,
+        );
+        return;
+      }
+
       if (e.isEmby) {
         final url = (e.embyCoverUrl ?? '').trim();
         if (url.isEmpty) return;
@@ -1080,6 +1179,7 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
     _previewPrefetchEpoch = 0;
     _previewWarmupRunning = false;
     _postLoadWorkEpoch++;
+    _embyDirCoverRefreshEpoch++;
     _controller.dispose();
     WebDavManager.instance.removeListener(_onWebDavAccountsChanged);
     TagStore.I.removeListener(_onTagStoreChanged);
@@ -1124,6 +1224,24 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
       setState(() => _loading = true);
     }
     final cur = _stack.last;
+    if (cur.kind == CtxKind.emby) {
+      final accId = cur.embyAccountId!;
+      final path = cur.embyPath;
+      final cached = _getCachedEmbyList(accId, path);
+      if (cached != null && mounted) {
+        setState(() {
+          _raw = List<Entry>.from(cached, growable: false);
+          _controller.raw = _raw;
+          _loading = false;
+          _contentHasAppeared = true;
+        });
+        _scopeSearchCache.clear();
+        _schedulePostLoadWork(_raw);
+        unawaited(_refreshEmbyInBackground(accId, path));
+        return;
+      }
+    }
+
     final list = switch (cur.kind) {
       CtxKind.root => await _loadVirtual(),
       CtxKind.local => await _loadLocalDir(cur.localDir!),
@@ -1150,6 +1268,39 @@ class _FolderDetailPageState extends State<_FolderDetailPageHost> {
     });
     _scopeSearchCache.clear();
     _schedulePostLoadWork(list);
+  }
+
+  Future<void> _refreshEmbyInBackground(String accountId, String path) async {
+    try {
+      final latest = await _loadEmby(accountId, path);
+      if (!mounted || _stack.isEmpty) return;
+      final cur = _stack.last;
+      if (cur.kind != CtxKind.emby ||
+          cur.embyAccountId != accountId ||
+          cur.embyPath != path) {
+        return;
+      }
+
+      final sameLength = latest.length == _raw.length;
+      final unchanged = sameLength &&
+          Iterable<int>.generate(latest.length).every((i) {
+            final a = latest[i];
+            final b = _raw[i];
+            return a.name == b.name &&
+                a.typeKey == b.typeKey &&
+                a.embyItemId == b.embyItemId &&
+                a.embyCoverUrl == b.embyCoverUrl;
+          });
+      if (unchanged) return;
+
+      _updateFolderCountCacheFromList(cur, latest);
+      setState(() {
+        _raw = latest;
+        _controller.raw = latest;
+      });
+      _scopeSearchCache.clear();
+      _schedulePostLoadWork(latest);
+    } catch (_) {}
   }
 
   Future<void> _hydrateEmbySizesIfNeeded({int maxItems = 60}) async {

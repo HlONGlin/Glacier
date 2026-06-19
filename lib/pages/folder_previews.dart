@@ -69,8 +69,8 @@ class _PreviewTarget {
         );
 }
 
-const int _kMaxSharedPreviewFutureEntries = 180;
-const int _kMaxSharedPreviewResultEntries = 180;
+const int _kMaxSharedPreviewFutureEntries = 320;
+const int _kMaxSharedPreviewResultEntries = 320;
 const int _kMaxSharedPreviewConcurrentJobs = 3;
 const int _kMaxSharedWebDavCoverFutureEntries = 120;
 const int _kMaxSharedWebDavCoverFileEntries = 120;

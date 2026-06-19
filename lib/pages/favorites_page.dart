@@ -105,6 +105,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
   bool _favoritesSearchExpanded = false;
   bool _favoritesGrid = true;
   bool _autoEnteredLast = false;
+  int _favoritesCoverWarmEpoch = 0;
 
   @override
   void initState() {
@@ -130,6 +131,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
         _loadError = null;
         _loading = false;
       });
+      _primeFavoriteCollectionCovers(list);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -147,6 +149,29 @@ class _FavoritesPageState extends State<FavoritesPage> {
       _autoEnteredLast = true;
       await _tryAutoEnterLastFavorite();
     }
+  }
+
+  static List<String> _orderedCollectionSources(FavoriteCollection c) => <String>[
+        ...c.sources.where(isPageEmbySource),
+        ...c.sources.where(isPageWebDavSource),
+        ...c.sources.where(
+          (s) => !isPageEmbySource(s) && !isPageWebDavSource(s),
+        ),
+      ];
+
+  void _primeFavoriteCollectionCovers(List<FavoriteCollection> collections) {
+    final epoch = ++_favoritesCoverWarmEpoch;
+    final snapshot = List<FavoriteCollection>.from(collections, growable: false);
+    unawaited(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      if (!mounted || epoch != _favoritesCoverWarmEpoch) return;
+      final visible = min(snapshot.length, _favoritesGrid ? 8 : 6);
+      for (var i = 0; i < visible; i++) {
+        final orderedSources = _orderedCollectionSources(snapshot[i]);
+        if (orderedSources.isEmpty) continue;
+        unawaited(_resolveSharedPreview(orderedSources, highPriority: true));
+      }
+    }());
   }
 
   Future<void> _openEmbyOnlyFavorites({
@@ -236,6 +261,9 @@ class _FavoritesPageState extends State<FavoritesPage> {
     }
 
     final embySources = live.sources.where(isPageEmbySource).toList(growable: false);
+    if (embySources.isNotEmpty) {
+      unawaited(_resolveSharedPreview(embySources, highPriority: true));
+    }
     final defaultCollection = embySources.isNotEmpty
         ? (live.copy()..sources = embySources)
         : live.copy();
@@ -705,7 +733,9 @@ Widget _collectionCover(FavoriteCollection c) {
             ? VideoThumbImage(videoPath: custom)
             : const _CoverPlaceholder());
   }
-  return _MultiSourcePreview(c.sources);
+
+  final orderedSources = _FavoritesPageState._orderedCollectionSources(c);
+  return _MultiSourcePreview(orderedSources);
 }
 
 String _collectionSubtitle(FavoriteCollection c) {
