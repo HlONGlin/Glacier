@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../logging/app_logger.dart';
+
 class SecureStore {
   SecureStore._();
 
@@ -13,6 +15,17 @@ class SecureStore {
 
   static final Map<String, String> _memoryFallback = <String, String>{};
   static bool _useMemoryFallback = false;
+  static final ValueNotifier<bool> fallbackStatus = ValueNotifier<bool>(false);
+
+  static void _activateMemoryFallback() {
+    if (_useMemoryFallback) return;
+    _useMemoryFallback = true;
+    fallbackStatus.value = true;
+    AppLogger.warning(
+      'secure storage unavailable; credentials will not persist after restart',
+      tag: 'storage',
+    );
+  }
 
   static Future<T> _withBackend<T>(
     Future<T> Function() action,
@@ -22,16 +35,16 @@ class SecureStore {
     try {
       return await action();
     } on MissingPluginException {
-      _useMemoryFallback = true;
+      _activateMemoryFallback();
       return fallback();
     } on PlatformException catch (e) {
       if (e.code == 'MissingPluginException') {
-        _useMemoryFallback = true;
+        _activateMemoryFallback();
         return fallback();
       }
       rethrow;
     } on AssertionError {
-      _useMemoryFallback = true;
+      _activateMemoryFallback();
       return fallback();
     }
   }
@@ -66,6 +79,7 @@ class SecureStore {
   @visibleForTesting
   static Future<void> debugResetForTest() async {
     _useMemoryFallback = false;
+    fallbackStatus.value = false;
     _memoryFallback.clear();
   }
 }

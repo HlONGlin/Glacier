@@ -13,6 +13,8 @@ import '../image.dart';
 import '../sources/refs.dart';
 import '../ui/kit.dart';
 import '../core/utils/app_shared.dart';
+import '../core/utils/app_settings.dart';
+import '../core/logging/app_logger.dart';
 import '../video.dart';
 import 'cover_layout.dart';
 import 'exclusive_folder_cover_helpers.dart';
@@ -100,23 +102,31 @@ const _EmbyPalette _kExclusivePalette = _EmbyPalette(
   statusStyle: _kStatusStyleDark,
 );
 
-const _EmbyPalette _kClassicPalette = _EmbyPalette(
-  bg: AppThemeColors.bg,
-  panel: Colors.white,
-  text: AppThemeColors.text,
-  sub: AppThemeColors.subtext,
-  coverPlaceholderBg: Color(0xFFE6EDF5),
-  coverPlaceholderIcon: Color(0xFF7689A0),
-  chipBg: Color(0xFFE3EAF2),
-  chipSelectedBg: Color(0xFFCAD8E8),
-  progress: AppThemeColors.seed,
-  statusStyle: _kStatusStyleLight,
-);
+_EmbyPalette _classicPalette() => _EmbyPalette(
+      bg: AppThemeColors.bg,
+      panel: AppThemeColors.glass,
+      text: AppThemeColors.text,
+      sub: AppThemeColors.subtext,
+      coverPlaceholderBg: AppThemeColors.dark
+          ? const Color(0xFF34434F)
+          : const Color(0xFFE6EDF5),
+      coverPlaceholderIcon: AppThemeColors.dark
+          ? const Color(0xFFB7C0D9)
+          : const Color(0xFF7689A0),
+      chipBg: AppThemeColors.dark
+          ? const Color(0xFF2A3843)
+          : const Color(0xFFE3EAF2),
+      chipSelectedBg: AppThemeColors.dark
+          ? const Color(0xFF40515E)
+          : const Color(0xFFCAD8E8),
+      progress: AppThemeColors.seed,
+      statusStyle: AppThemeColors.dark ? _kStatusStyleDark : _kStatusStyleLight,
+    );
 
 _EmbyPalette _paletteForMode(_EmbyPaletteMode mode) {
   switch (mode) {
     case _EmbyPaletteMode.classic:
-      return _kClassicPalette;
+      return _classicPalette();
     case _EmbyPaletteMode.exclusive:
       return _kExclusivePalette;
   }
@@ -2118,9 +2128,21 @@ class _EmbyExclusiveFavoritesPageState
       }
       if (_loadError != null) {
         return Center(
-          child: Text(
-            friendlyErrorMessage(_loadError!),
-            style: TextStyle(color: _palette.sub),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                friendlyErrorMessage(_loadError!),
+                textAlign: TextAlign.center,
+                style: TextStyle(color: _palette.sub),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _reload,
+                icon: const Icon(Icons.refresh),
+                label: const Text('重试'),
+              ),
+            ],
           ),
         );
       }
@@ -2455,10 +2477,9 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   List<_UiItem> _recursiveImages = const <_UiItem>[];
   _LibraryKind _libraryKind = _LibraryKind.unknown;
   _FolderTopTab _topTab = _FolderTopTab.videos;
-  String _displayItemsCacheToken = '';
-  List<_UiItem> _displayItemsCache = const <_UiItem>[];
-  int _dominantAspectCacheKey = 0;
-  double _dominantAspectCacheValue = 0.67;
+  final _displayItemsCache =
+      <_FolderTopTab, ({String token, List<_UiItem> items})>{};
+  final _dominantAspectCache = Expando<double>();
   bool _topTabTouchedSinceReload = false;
   bool _applyEntryTopTabPriority = true;
   _FolderSortKind _sort = _FolderSortKind.title;
@@ -2483,12 +2504,18 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
   @override
   void initState() {
     super.initState();
+    AppSettings.instance.addListener(_onDeletionSettingsChanged);
     _applyInitialSeed();
     unawaited(_bootstrap());
   }
 
+  void _onDeletionSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    AppSettings.instance.removeListener(_onDeletionSettingsChanged);
     _coverBatchTimer?.cancel();
     super.dispose();
   }
@@ -2884,9 +2911,9 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         collapsedSeriesVideoItems: _collapsedSeriesVideoItems,
       );
 
-  List<_UiItem> _baseItemsForTab() =>
+  List<_UiItem> _baseItemsForTab(_FolderTopTab tab) =>
       EmbyExclusiveFolderStateHelpers.baseItemsForTab(
-        topTab: _topTab,
+        topTab: tab,
         libraryKind: _libraryKind,
         imageDominantMixedLibrary: _isImageDominantMixedLibrary(),
         items: _items,
@@ -2915,12 +2942,6 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     }
     return item.coverUrl.trim();
   }
-
-  double _dominantCoverAspect(List<_UiItem> items) =>
-      EmbyExclusiveFolderHelpers.dominantCoverAspect(
-        items,
-        topTab: _topTab,
-      );
 
   double _gridChildAspectRatio({
     required double maxWidth,
@@ -2957,7 +2978,6 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
 
   String _displayItemsToken() {
     return [
-      _topTab.index,
       _sort.index,
       _sortAsc ? 1 : 0,
       _libraryKind.index,
@@ -2967,13 +2987,15 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     ].join('|');
   }
 
-  List<_UiItem> _displayItems() {
+  List<_UiItem> _displayItems([_FolderTopTab? tab]) {
+    final displayTab = tab ?? _topTab;
     final token = _displayItemsToken();
-    if (token == _displayItemsCacheToken) return _displayItemsCache;
+    final cached = _displayItemsCache[displayTab];
+    if (cached != null && cached.token == token) return cached.items;
 
-    final out = _baseItemsForTab().toList(growable: true);
+    final out = _baseItemsForTab(displayTab).toList(growable: true);
     out.sort((a, b) {
-      if (_topTab == _FolderTopTab.folders) {
+      if (displayTab == _FolderTopTab.folders) {
         final kindCmp = _categorySortRank(a).compareTo(_categorySortRank(b));
         if (kindCmp != 0) return kindCmp;
         if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
@@ -2985,20 +3007,13 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
       if (!_sortAsc) cmp = -cmp;
       return cmp;
     });
-    _displayItemsCacheToken = token;
-    _displayItemsCache = out;
+    _displayItemsCache[displayTab] = (token: token, items: out);
     return out;
   }
 
-  double _dominantCoverAspectCached(List<_UiItem> items) {
-    if (items.isEmpty) return 0.67;
-    final key = identityHashCode(items);
-    if (_dominantAspectCacheKey == key) return _dominantAspectCacheValue;
-    final value = _dominantCoverAspect(items);
-    _dominantAspectCacheKey = key;
-    _dominantAspectCacheValue = value;
-    return value;
-  }
+  double _dominantCoverAspectCached(_FolderTopTab tab, List<_UiItem> items) =>
+      _dominantAspectCache[items] ??=
+          EmbyExclusiveFolderHelpers.dominantCoverAspect(items, topTab: tab);
 
   List<_UiItem> _playableItems(List<_UiItem> src) {
     return src
@@ -3048,23 +3063,6 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         recursiveVideosCount: _recursiveVideos.length,
         thresholdPercent: _imageDominantThresholdPercent,
       );
-
-  void _onFolderTopTabSwipe(DragEndDetails details) {
-    final velocity = details.primaryVelocity ?? 0;
-    if (velocity.abs() < 260) return;
-
-    final tabs = _visibleTopTabs();
-    final idx = tabs.indexOf(_topTab);
-    if (idx < 0) return;
-
-    if (velocity < 0 && idx < tabs.length - 1) {
-      _setTopTab(tabs[idx + 1]);
-      return;
-    }
-    if (velocity > 0 && idx > 0) {
-      _setTopTab(tabs[idx - 1]);
-    }
-  }
 
   _FolderTopTab _chooseTopTab({
     required _FolderTopTab current,
@@ -3569,7 +3567,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
     );
   }
 
-  Future<void> _reload() async {
+  Future<void> _reload({bool forceRefresh = false}) async {
     await _loadDisplaySettingsForCurrentFolder();
     _moviePrewarmRunToken++;
     _movieFolderPrimaryMisses.clear();
@@ -3584,6 +3582,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
       final plan = await _reader.readFolder(
         folderId: widget.folderId.trim(),
         favoritesMode: widget.favoritesMode,
+        forceRefresh: forceRefresh,
       );
       final immediateSnap = plan.immediate;
       final stage = EmbyExclusiveFolderLoadHelpers.buildReloadStage(
@@ -3602,6 +3601,7 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
         _recursiveImages = stage.recursiveImages;
         _libraryKind = stage.libraryKind;
         _topTab = stage.nextTopTab;
+        _loadError = immediateSnap.error;
         _loading = false;
         _applyEntryTopTabPriority = false;
       });
@@ -3649,7 +3649,11 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
             unawaited(_persistDisplaySettingsForCurrentFolder());
           }
           _maybePrewarmVisibleCovers(token: token);
-        } catch (_) {
+        } catch (error, stackTrace) {
+          AppLogger.error('Emby recursive media read failed',
+              error: error, stackTrace: stackTrace, tag: 'emby');
+          if (!mounted || token != _coverHydrationToken) return;
+          setState(() => _loadError = error);
           _applyEntryTopTabPriority = false;
         }
       }());
@@ -3789,47 +3793,71 @@ class _EmbyExclusiveFolderPageState extends State<_EmbyExclusiveFolderPage> {
       }
       if (_loadError != null && !hasAnyData) {
         return Center(
-            child: Text(friendlyErrorMessage(_loadError!),
-                style: TextStyle(color: _palette.sub)));
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(friendlyErrorMessage(_loadError!),
+                  style: TextStyle(color: _palette.sub)),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _reload,
+                icon: const Icon(Icons.refresh),
+                label: const Text('重试'),
+              ),
+            ],
+          ),
+        );
       }
 
-      final shown = _displayItems();
-      return RefreshIndicator(
-        onRefresh: _reload,
-        child: CustomScrollView(
-          cacheExtent: 1200,
-          physics: _kEmbyScrollPhysics,
-          slivers: [
-            if (_loading)
-              SliverToBoxAdapter(
-                child: LinearProgressIndicator(
-                  minHeight: 1.5,
-                  color: _palette.progress,
-                  backgroundColor: Colors.transparent,
-                ),
-              ),
-            if (_loadError != null)
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                  child: Text(
-                    friendlyErrorMessage(_loadError!),
-                    style: TextStyle(color: _palette.sub, fontSize: 12),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+      final tabs = _visibleTopTabs();
+      final selectedTab = tabs.contains(_topTab) ? _topTab : tabs.first;
+      return Column(
+        children: [
+          if (_loading)
+            LinearProgressIndicator(
+              minHeight: 1.5,
+              color: _palette.progress,
+              backgroundColor: Colors.transparent,
+            ),
+          if (_loadError != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      friendlyErrorMessage(_loadError!),
+                      style: TextStyle(color: _palette.sub, fontSize: 12),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                ),
-              ),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-              sliver: SliverToBoxAdapter(
-                child: _headerControls(shown.length),
+                  IconButton(
+                    tooltip: '重试',
+                    onPressed: _reload,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ],
               ),
             ),
-            const SliverToBoxAdapter(child: SizedBox(height: 12)),
-            _buildTopTabSliverContent(shown),
-          ],
-        ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            child: _headerControls(
+              tabs,
+              selectedTab,
+              _displayItems(selectedTab).length,
+            ),
+          ),
+          Expanded(
+            child: _FolderTabPager(
+              key: ValueKey(tabs.map((tab) => tab.name).join(',')),
+              selectedIndex: tabs.indexOf(selectedTab),
+              onSelected: (index) => _setTopTab(tabs[index]),
+              itemCount: tabs.length,
+              itemBuilder: (_, index) => _buildTopTabContent(tabs[index]),
+            ),
+          ),
+        ],
       );
     }();
 

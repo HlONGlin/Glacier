@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../../core/logging/app_logger.dart';
 // Keeps legacy in-memory fields populated while persistence is already secret-safe.
 import 'emby_account_model.dart';
 import 'emby_secret_store.dart';
@@ -73,7 +74,10 @@ class EmbyStore {
         }
         return accs;
       }
-    } catch (_) {}
+    } catch (error, stackTrace) {
+      AppLogger.error('Emby account data could not be decoded',
+          error: error, stackTrace: stackTrace, tag: 'accounts');
+    }
     return [];
   }
 

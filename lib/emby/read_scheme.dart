@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../emby.dart';
 import 'native_logic.dart';
+import '../core/logging/app_logger.dart';
 
 enum EmbyLibraryKindSignal { unknown, movies, series, mixed, homeVideos }
 
@@ -32,12 +33,14 @@ class EmbyFolderImmediateSnapshot {
   final EmbyMediaSplit directMedia;
   final EmbyLibraryKindSignal libraryKind;
   final EmbyItem? rootContext;
+  final Object? error;
 
   const EmbyFolderImmediateSnapshot({
     this.directItems = const <EmbyItem>[],
     this.directMedia = const EmbyMediaSplit(),
     this.libraryKind = EmbyLibraryKindSignal.unknown,
     this.rootContext,
+    this.error,
   });
 }
 
@@ -82,6 +85,16 @@ class EmbyReadCoordinator {
     required this.accountId,
   });
 
+  static void clearAccountCaches(String accountId) {
+    final prefix = '${accountId.trim()}/';
+    _homeCache.removeWhere((key, _) => key.startsWith(prefix));
+    _homeInflight.removeWhere((key, _) => key.startsWith(prefix));
+    _folderDirectCache.removeWhere((key, _) => key.startsWith(prefix));
+    _folderDirectInflight.removeWhere((key, _) => key.startsWith(prefix));
+    _folderDeepCache.removeWhere((key, _) => key.startsWith(prefix));
+    _folderDeepInflight.removeWhere((key, _) => key.startsWith(prefix));
+  }
+
   static void _trimTimedCache<T>(
     Map<String, _Timed<T>> cache, {
     required int maxEntries,
@@ -110,17 +123,20 @@ class EmbyReadCoordinator {
     }
 
     final fut = () async {
-      final loaded = await Future.wait<List<EmbyItem>>([
-        _safeList(() => client.listViews().timeout(timeout)),
-        _safeList(() => client.listResumeItems(limit: 20).timeout(timeout)),
-        _safeList(
+      final loaded = await Future.wait<_ReadAttempt<List<EmbyItem>>>([
+        _attemptList(() => client.listViews().timeout(timeout)),
+        _attemptList(() => client.listResumeItems(limit: 20).timeout(timeout)),
+        _attemptList(
           () => client.listFavorites().timeout(const Duration(seconds: 8)),
         ),
       ]);
+      for (final result in loaded) {
+        if (result.error != null) throw result.error!;
+      }
       final snap = EmbyHomeCoreSnapshot(
-        views: loaded[0],
-        resume: loaded[1],
-        favorites: loaded[2],
+        views: loaded[0].value,
+        resume: loaded[1].value,
+        favorites: loaded[2].value,
       );
       _homeCache[key] = _Timed<EmbyHomeCoreSnapshot>(snap);
       _trimTimedCache(
@@ -140,6 +156,7 @@ class EmbyReadCoordinator {
   Future<EmbyFolderReadPlan> readFolder({
     required String folderId,
     required bool favoritesMode,
+    bool forceRefresh = false,
     Duration directTimeout = const Duration(seconds: 8),
   }) async {
     final normalizedId = folderId.trim();
@@ -149,10 +166,12 @@ class EmbyReadCoordinator {
 
     _DirectFolderBundle directBundle;
     final cachedDirect = _folderDirectCache[key];
-    if (cachedDirect != null && cachedDirect.isFresh(_kFolderDirectCacheTtl)) {
+    if (!forceRefresh &&
+        cachedDirect != null &&
+        cachedDirect.isFresh(_kFolderDirectCacheTtl)) {
       directBundle = cachedDirect.value;
     } else {
-      final shared = _folderDirectInflight[key];
+      final shared = forceRefresh ? null : _folderDirectInflight[key];
       if (shared != null) {
         directBundle = await shared;
       } else {
@@ -164,11 +183,13 @@ class EmbyReadCoordinator {
         _folderDirectInflight[key] = fut;
         try {
           directBundle = await fut;
-          _folderDirectCache[key] = _Timed<_DirectFolderBundle>(directBundle);
-          _trimTimedCache(
-            _folderDirectCache,
-            maxEntries: _kMaxFolderDirectCacheEntries,
-          );
+          if (directBundle.snapshot.error == null) {
+            _folderDirectCache[key] = _Timed<_DirectFolderBundle>(directBundle);
+            _trimTimedCache(
+              _folderDirectCache,
+              maxEntries: _kMaxFolderDirectCacheEntries,
+            );
+          }
         } finally {
           _folderDirectInflight.remove(key);
         }
@@ -176,14 +197,16 @@ class EmbyReadCoordinator {
     }
 
     final deepCached = _folderDeepCache[key];
-    if (deepCached != null && deepCached.isFresh(_kFolderDeepCacheTtl)) {
+    if (!forceRefresh &&
+        deepCached != null &&
+        deepCached.isFresh(_kFolderDeepCacheTtl)) {
       return EmbyFolderReadPlan(
         immediate: directBundle.snapshot,
         recursiveMedia: Future<EmbyMediaSplit>.value(deepCached.value),
       );
     }
 
-    final inflightDeep = _folderDeepInflight[key];
+    final inflightDeep = forceRefresh ? null : _folderDeepInflight[key];
     if (inflightDeep != null) {
       return EmbyFolderReadPlan(
         immediate: directBundle.snapshot,
@@ -197,11 +220,14 @@ class EmbyReadCoordinator {
       rootItems: directBundle.snapshot.directItems,
       kind: directBundle.snapshot.libraryKind,
     ).then((value) {
-      _folderDeepCache[key] = _Timed<EmbyMediaSplit>(value);
-      _trimTimedCache(
-        _folderDeepCache,
-        maxEntries: _kMaxFolderDeepCacheEntries,
-      );
+      if (directBundle.snapshot.error == null &&
+          (value.videos.isNotEmpty || value.images.isNotEmpty)) {
+        _folderDeepCache[key] = _Timed<EmbyMediaSplit>(value);
+        _trimTimedCache(
+          _folderDeepCache,
+          maxEntries: _kMaxFolderDeepCacheEntries,
+        );
+      }
       return value;
     });
     _folderDeepInflight[key] = deepFuture;
@@ -264,18 +290,21 @@ class EmbyReadCoordinator {
   }) async {
     List<EmbyItem> directItems = const <EmbyItem>[];
     EmbyItem? rootContext;
+    Object? readError;
 
     if (favoritesMode) {
-      directItems = await _safeList(
+      final result = await _attemptList(
         () => client.listFavorites().timeout(timeout),
       );
+      directItems = result.value;
+      readError = result.error;
     } else if (folderId.isNotEmpty) {
       final kindInclude = _includeItemTypesForHint(
         hint: EmbyLibraryKindSignal.unknown,
       );
       final loaded = await Future.wait<dynamic>([
         () async {
-          var children = await _safeList(
+          var attempt = await _attemptList(
             () => client
                 .listChildren(
                   parentId: folderId,
@@ -284,8 +313,8 @@ class EmbyReadCoordinator {
                 )
                 .timeout(timeout),
           );
-          if (children.isEmpty) {
-            children = await _safeList(
+          if (attempt.value.isEmpty) {
+            final fallback = await _attemptList(
               () => client
                   .listChildren(
                     parentId: folderId,
@@ -293,16 +322,27 @@ class EmbyReadCoordinator {
                   )
                   .timeout(timeout),
             );
+            if (fallback.value.isEmpty) {
+              attempt = _ReadAttempt<List<EmbyItem>>(
+                value: const <EmbyItem>[],
+                error: fallback.error ?? attempt.error,
+              );
+            } else {
+              attempt = fallback;
+            }
           }
-          return children;
+          return attempt;
         }(),
-        _safeItem(
+        _attemptItem(
           () =>
               client.getItemById(folderId).timeout(const Duration(seconds: 5)),
         ),
       ]);
-      directItems = loaded[0] as List<EmbyItem>;
-      rootContext = loaded[1] as EmbyItem?;
+      final children = loaded[0] as _ReadAttempt<List<EmbyItem>>;
+      final root = loaded[1] as _ReadAttempt<EmbyItem?>;
+      directItems = children.value;
+      readError = children.error;
+      rootContext = root.value;
     }
 
     final kind = _detectLibraryKind(directItems, root: rootContext);
@@ -312,6 +352,7 @@ class EmbyReadCoordinator {
       directMedia: directMedia,
       libraryKind: kind,
       rootContext: rootContext,
+      error: readError,
     );
     return _DirectFolderBundle(snapshot: snap);
   }
@@ -324,9 +365,10 @@ class EmbyReadCoordinator {
   }) async {
     // Prefer a single recursive server query to avoid client-side folder-chain
     // explosion in movie/series libraries with category->movie double nesting.
+    Object? recursiveError;
     if (!favoritesMode && folderId.isNotEmpty) {
       final include = _recursiveIncludeItemTypesForHint(hint: kind);
-      var recursive = await _safeList(
+      var recursive = await _attemptList(
         () => client
             .listChildren(
               parentId: folderId,
@@ -337,8 +379,12 @@ class EmbyReadCoordinator {
             )
             .timeout(const Duration(seconds: 10)),
       );
-      if (recursive.isEmpty) {
-        recursive = await _safeList(
+      if (recursive.value.isNotEmpty) {
+        return _splitMedia(recursive.value, kind: kind);
+      }
+      recursiveError = recursive.error;
+      if (recursive.value.isEmpty) {
+        recursive = await _attemptList(
           () => client
               .listChildren(
                 parentId: folderId,
@@ -348,8 +394,11 @@ class EmbyReadCoordinator {
               )
               .timeout(const Duration(seconds: 10)),
         );
+        if (recursive.value.isNotEmpty) {
+          return _splitMedia(recursive.value, kind: kind);
+        }
+        recursiveError = recursive.error;
       }
-      if (recursive.isNotEmpty) return _splitMedia(recursive, kind: kind);
     }
 
     const maxFoldersToScan = 72;
@@ -364,6 +413,7 @@ class EmbyReadCoordinator {
     var cursor = 0;
     final startedAt = DateTime.now();
     final include = _includeItemTypesForHint(hint: kind);
+    Object? scanError;
 
     bool outOfBudget() {
       if (allMedia.length >= maxMediaItems) return true;
@@ -405,7 +455,7 @@ class EmbyReadCoordinator {
           if (outOfBudget()) return;
           if (cursor >= folderQueue.length) return;
           final folderId = folderQueue[cursor++];
-          final children = await _safeList(
+          final children = await _attemptList(
             () => client
                 .listChildren(
                   parentId: folderId,
@@ -414,7 +464,8 @@ class EmbyReadCoordinator {
                 )
                 .timeout(const Duration(seconds: 8)),
           );
-          for (final child in children) {
+          scanError ??= children.error;
+          for (final child in children.value) {
             if (outOfBudget()) return;
             push(child);
           }
@@ -424,6 +475,9 @@ class EmbyReadCoordinator {
       await Future.wait(List.generate(workerCount, (_) => worker()));
     }
 
+    if (allMedia.isEmpty && (scanError ?? recursiveError) != null) {
+      throw scanError ?? recursiveError!;
+    }
     return _splitMedia(allMedia, kind: kind);
   }
 
@@ -534,18 +588,46 @@ class EmbyReadCoordinator {
       Future<List<EmbyItem>> Function() task) async {
     try {
       return await task();
-    } catch (_) {
+    } catch (error, stackTrace) {
+      AppLogger.error('Emby list read failed',
+          error: error, stackTrace: stackTrace, tag: 'emby');
       return const <EmbyItem>[];
     }
   }
 
-  Future<EmbyItem?> _safeItem(Future<EmbyItem?> Function() task) async {
+  Future<_ReadAttempt<List<EmbyItem>>> _attemptList(
+    Future<List<EmbyItem>> Function() task,
+  ) async {
     try {
-      return await task();
-    } catch (_) {
-      return null;
+      return _ReadAttempt<List<EmbyItem>>(value: await task());
+    } catch (error, stackTrace) {
+      AppLogger.error('Emby folder read failed',
+          error: error, stackTrace: stackTrace, tag: 'emby');
+      return _ReadAttempt<List<EmbyItem>>(
+        value: const <EmbyItem>[],
+        error: error,
+      );
     }
   }
+
+  Future<_ReadAttempt<EmbyItem?>> _attemptItem(
+    Future<EmbyItem?> Function() task,
+  ) async {
+    try {
+      return _ReadAttempt<EmbyItem?>(value: await task());
+    } catch (error, stackTrace) {
+      AppLogger.error('Emby folder metadata read failed',
+          error: error, stackTrace: stackTrace, tag: 'emby');
+      return _ReadAttempt<EmbyItem?>(value: null, error: error);
+    }
+  }
+}
+
+class _ReadAttempt<T> {
+  final T value;
+  final Object? error;
+
+  const _ReadAttempt({required this.value, this.error});
 }
 
 class _DirectFolderBundle {

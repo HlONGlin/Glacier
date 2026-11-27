@@ -1,7 +1,7 @@
 ﻿name: glacier
 description: Glacier media browser (Android)
 publish_to: "none"
-version: 1.0.0+1
+version: 1.0.0+2009
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -17,6 +17,7 @@ dependencies:
   path_provider: ^2.1.4
   shared_preferences: ^2.3.2
   flutter_secure_storage: ^9.2.2
+  package_info_plus: ^9.0.0
   video_thumbnail: ^0.5.3
 
   # Picking files/folders
@@ -24,7 +25,9 @@ dependencies:
 
   # Crypto / utils
   crypto: ^3.0.5
+  cryptography: ^2.7.0
   collection: ^1.18.0
+  flutter_cache_manager: ^3.4.1
 
   # Media playback (IMPORTANT)
   media_kit: ^1.1.11

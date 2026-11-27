@@ -7,6 +7,8 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'ui/kit.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -28,6 +30,10 @@ import 'tag/tag_models.dart';
 
 // 👇👇👇 重点修改这两行 👇👇👇
 import 'core/utils/app_shared.dart'; // 必须直接引入，去掉 "as utils"
+import 'core/logging/app_logger.dart';
+import 'core/storage/app_backup.dart';
+import 'core/storage/offline_download_store.dart';
+import 'core/storage/secure_store.dart';
 import 'tag.dart';
 import 'sources/refs.dart';
 // 👆👆👆 重点修改这两行 👆👆👆

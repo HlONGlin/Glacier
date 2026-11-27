@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/logging/app_logger.dart';
 import '../models/favorite_models.dart';
 
 class FavoriteStore {
@@ -33,7 +34,10 @@ class FavoriteStore {
           await save(out);
           return out;
         }
-      } catch (_) {}
+      } catch (error, stackTrace) {
+        AppLogger.error('favorite data could not be decoded',
+            error: error, stackTrace: stackTrace, tag: 'favorites');
+      }
     }
 
     final legacy = prefs.getStringList(_kV1);

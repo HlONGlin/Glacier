@@ -51,8 +51,14 @@ class NetworkRunner {
     }
 
     if (lastError is Error) {
+      AppLogger.error('network request exhausted',
+          error: lastError,
+          stackTrace: lastStackTrace,
+          tag: label ?? 'network');
       throw lastError;
     }
+    AppLogger.error('network request exhausted',
+        error: lastError, stackTrace: lastStackTrace, tag: label ?? 'network');
     Error.throwWithStackTrace(
       lastError ?? StateError('unknown network error'),
       lastStackTrace ?? StackTrace.current,

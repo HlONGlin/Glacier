@@ -4,13 +4,15 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/utils/redaction.dart';
+
 const double kMinTapTarget = 44;
 
 bool isCompactWidth(BuildContext context) =>
     MediaQuery.sizeOf(context).width < 768;
 
 String friendlyErrorMessage(Object error) {
-  final raw = error.toString().trim();
+  final raw = redactSensitiveText(error.toString()).trim();
   final text = raw.isEmpty ? 'Unknown error' : raw;
   final lower = text.toLowerCase();
 
@@ -108,25 +110,41 @@ Future<T?> showAdaptivePanel<T>({
 
 /// iOS-like glass UI kit (minimal animation, focus on consistency)
 class AppThemeColors {
+  static bool dark = false;
   static const Color seed = Color(0xFF0E7490);
-  static const Color bg = Color(0xFFF3F7FB);
-  static const Color text = Color(0xFF111827);
-  static const Color subtext = Color(0xFF64748B);
-  static const Color glass = Color(0xCCFFFFFF);
-  static const Color glassBorder = Color(0x33FFFFFF);
-  static const Color divider = Color(0x1A000000);
+  static Color get bg =>
+      dark ? const Color(0xFF111820) : const Color(0xFFF3F7FB);
+  static Color get text =>
+      dark ? const Color(0xFFE7EDF2) : const Color(0xFF111827);
+  static Color get subtext =>
+      dark ? const Color(0xFFA7B2BD) : const Color(0xFF64748B);
+  static Color get glass =>
+      dark ? const Color(0xE6222D37) : const Color(0xCCFFFFFF);
+  static Color get glassBorder =>
+      dark ? const Color(0x334F6473) : const Color(0x33FFFFFF);
+  static Color get divider =>
+      dark ? const Color(0x335A6874) : const Color(0x1A000000);
 }
 
 class AppTheme {
   static ThemeData light() {
+    return _build(Brightness.light);
+  }
+
+  static ThemeData dark() {
+    return _build(Brightness.dark);
+  }
+
+  static ThemeData _build(Brightness brightness) {
     final scheme = ColorScheme.fromSeed(
       seedColor: AppThemeColors.seed,
-      brightness: Brightness.light,
+      brightness: brightness,
     );
 
     final baseBorder = OutlineInputBorder(
       borderRadius: BorderRadius.circular(14),
-      borderSide: BorderSide(color: Colors.black.withValues(alpha: 0.08)),
+      borderSide:
+          BorderSide(color: AppThemeColors.text.withValues(alpha: 0.16)),
     );
 
     final buttonShape = RoundedRectangleBorder(
@@ -137,14 +155,12 @@ class AppTheme {
       useMaterial3: true,
       materialTapTargetSize: MaterialTapTargetSize.padded,
       visualDensity: VisualDensity.standard,
-      colorScheme: scheme.copyWith(
-        surface: Colors.white,
-      ),
+      colorScheme: scheme,
       scaffoldBackgroundColor: AppThemeColors.bg,
       dividerColor: AppThemeColors.divider,
       splashFactory: NoSplash.splashFactory,
       highlightColor: Colors.transparent,
-      appBarTheme: const AppBarTheme(
+      appBarTheme: AppBarTheme(
         backgroundColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
@@ -157,7 +173,7 @@ class AppTheme {
         ),
         iconTheme: IconThemeData(color: AppThemeColors.text),
       ),
-      textTheme: const TextTheme(
+      textTheme: TextTheme(
         titleLarge: TextStyle(
           fontSize: 20,
           fontWeight: FontWeight.w700,
@@ -183,7 +199,7 @@ class AppTheme {
           height: 1.3,
           color: AppThemeColors.subtext,
         ),
-        labelLarge: TextStyle(
+        labelLarge: const TextStyle(
           fontSize: 14,
           fontWeight: FontWeight.w600,
         ),
@@ -197,7 +213,7 @@ class AppTheme {
         ),
       ),
       dialogTheme: DialogThemeData(
-        backgroundColor: AppThemeColors.glass,
+        backgroundColor: scheme.surface,
         elevation: 0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(20),
@@ -211,7 +227,7 @@ class AppTheme {
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: Colors.white.withValues(alpha: 0.86),
+        fillColor: AppThemeColors.glass,
         border: baseBorder,
         enabledBorder: baseBorder,
         focusedBorder: baseBorder.copyWith(
@@ -259,15 +275,15 @@ class AppTheme {
           ),
           shape: WidgetStateProperty.all(buttonShape),
           side: WidgetStateProperty.all(
-            BorderSide(color: Colors.black.withValues(alpha: 0.10)),
+            BorderSide(color: AppThemeColors.text.withValues(alpha: 0.16)),
           ),
           textStyle: WidgetStateProperty.all(
             const TextStyle(fontWeight: FontWeight.w600),
           ),
         ),
       ),
-      listTileTheme: const ListTileThemeData(
-        contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      listTileTheme: ListTileThemeData(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         minVerticalPadding: 8,
         iconColor: AppThemeColors.text,
         textColor: AppThemeColors.text,
@@ -279,9 +295,9 @@ class AppTheme {
         dividerColor: Colors.transparent,
         indicatorSize: TabBarIndicatorSize.tab,
         indicator: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.72),
+          color: AppThemeColors.glass,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.58)),
+          border: Border.all(color: AppThemeColors.glassBorder),
         ),
       ),
     );

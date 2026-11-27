@@ -1,30 +1,34 @@
 part of 'exclusive_ui.dart';
 
 extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
-  Widget _topTabButton(_FolderTopTab tab) {
+  Widget _topTabButton(_FolderTopTab tab, _FolderTopTab selectedTab) {
     final p = _palette;
-    final selected = _topTab == tab;
-    return InkWell(
-      borderRadius: BorderRadius.circular(999),
-      onTap: () => _setTopTab(tab),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? p.chipSelectedBg : Colors.transparent,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: AnimatedDefaultTextStyle(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          style: TextStyle(
-            color: p.text.withValues(alpha: selected ? 1 : 0.88),
-            fontSize: selected ? 14.2 : 14,
-            fontWeight: selected ? FontWeight.w800 : FontWeight.w700,
+    final selected = selectedTab == tab;
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: () => _setTopTab(tab),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: selected ? p.chipSelectedBg : Colors.transparent,
+            borderRadius: BorderRadius.circular(999),
           ),
-          child:
-              Text(EmbyExclusiveFolderHelpers.topTabLabel(tab, _libraryKind)),
+          child: AnimatedDefaultTextStyle(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            style: TextStyle(
+              color: p.text.withValues(alpha: selected ? 1 : 0.88),
+              fontSize: selected ? 14.2 : 14,
+              fontWeight: selected ? FontWeight.w800 : FontWeight.w700,
+            ),
+            child:
+                Text(EmbyExclusiveFolderHelpers.topTabLabel(tab, _libraryKind)),
+          ),
         ),
       ),
     );
@@ -89,9 +93,12 @@ extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
     );
   }
 
-  Widget _headerControls(int count) {
+  Widget _headerControls(
+    List<_FolderTopTab> tabs,
+    _FolderTopTab selectedTab,
+    int count,
+  ) {
     final p = _palette;
-    final tabs = _visibleTopTabs();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -101,15 +108,11 @@ extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
             color: p.chipBg,
             borderRadius: BorderRadius.circular(999),
           ),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onHorizontalDragEnd: _onFolderTopTabSwipe,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final tab in tabs) _topTabButton(tab),
-              ],
-            ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final tab in tabs) _topTabButton(tab, selectedTab),
+            ],
           ),
         ),
         const SizedBox(height: 10),
@@ -234,6 +237,55 @@ extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
     return compact.isEmpty ? raw : compact;
   }
 
+  Future<bool> _canShowDeleteAction() async {
+    if (!await AppSettings.getEmbyContentDeletionEnabled()) return false;
+    return _client.canDeleteContent();
+  }
+
+  Future<void> _deleteEmbyItem(_UiItem item) async {
+    final enabled = await AppSettings.getEmbyContentDeletionEnabled();
+    if (!enabled || !await _client.canDeleteContent()) return;
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('删除 Emby 媒体？'),
+        content: Text(item.isDir
+            ? '将从服务器删除“${item.title}”文件夹及其中内容，此操作无法撤销。'
+            : '将从服务器删除“${item.title}”，此操作无法撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await _client.deleteItem(item.item.id);
+      EmbyReadCoordinator.clearAccountCaches(widget.account.id);
+      if (!mounted) return;
+      showAppToast(context, '已从 Emby 服务器删除');
+      await _reload(forceRefresh: true);
+    } catch (error, stackTrace) {
+      AppLogger.error('Emby item deletion failed',
+          error: error, stackTrace: stackTrace, tag: 'emby');
+      if (!mounted) return;
+      final message = error is EmbyDeleteException && error.statusCode == 403
+          ? 'Emby 服务器拒绝删除，当前账号可能没有此媒体的删除权限'
+          : error is EmbyDeleteException && error.statusCode == 404
+              ? '此媒体已不存在，请刷新目录'
+              : '删除失败，请检查 Emby 连接后重试';
+      showAppToast(context, message, error: true);
+    }
+  }
+
   Widget _buildTopTabGridTile(
     _UiItem item,
     List<_UiItem> shown, {
@@ -261,6 +313,41 @@ extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
                     _cover(item),
                     _itemBadgeOverlay(item),
                     _progressOverlay(item.item),
+                    Positioned(
+                      top: 2,
+                      right: 2,
+                      child: FutureBuilder<bool>(
+                        future: _canShowDeleteAction(),
+                        builder: (context, snapshot) {
+                          if (snapshot.data != true) {
+                            return const SizedBox.shrink();
+                          }
+                          return PopupMenuButton<String>(
+                            tooltip: '媒体操作',
+                            icon: const Icon(Icons.more_vert),
+                            color: _palette.panel,
+                            onSelected: (value) {
+                              if (value == 'delete') {
+                                unawaited(_deleteEmbyItem(item));
+                              }
+                            },
+                            itemBuilder: (context) => [
+                              PopupMenuItem<String>(
+                                value: 'delete',
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.delete_outline, size: 20),
+                                    const SizedBox(width: 10),
+                                    Text('删除媒体',
+                                        style: TextStyle(color: _palette.text)),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -293,7 +380,24 @@ extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
     );
   }
 
-  Widget _buildTopTabSliverContent(List<_UiItem> shown) {
+  Widget _buildTopTabContent(_FolderTopTab tab) {
+    final shown = _displayItems(tab);
+    return RefreshIndicator(
+      onRefresh: _reload,
+      child: CustomScrollView(
+        key: PageStorageKey(tab),
+        primary: false,
+        cacheExtent: 1200,
+        physics: _kEmbyScrollPhysics,
+        slivers: [
+          const SliverToBoxAdapter(child: SizedBox(height: 12)),
+          _buildTopTabSliverContent(tab, shown),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTopTabSliverContent(_FolderTopTab tab, List<_UiItem> shown) {
     if (shown.isEmpty) {
       return SliverFillRemaining(
         hasScrollBody: false,
@@ -306,12 +410,12 @@ extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
       );
     }
 
+    final coverAspect = _dominantCoverAspectCached(tab, shown);
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
       sliver: SliverLayoutBuilder(
         builder: (context, constraints) {
           final width = constraints.crossAxisExtent;
-          final coverAspect = _dominantCoverAspectCached(shown);
           final isTablet = MediaQuery.sizeOf(context).shortestSide >= 600;
           final columns = _adaptiveGridColumns(
             width: width,
@@ -341,6 +445,86 @@ extension _EmbyExclusiveFolderPageUi on _EmbyExclusiveFolderPageState {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+class _FolderTabPager extends StatefulWidget {
+  const _FolderTabPager({
+    super.key,
+    required this.selectedIndex,
+    required this.onSelected,
+    required this.itemCount,
+    required this.itemBuilder,
+  });
+
+  final int selectedIndex;
+  final ValueChanged<int> onSelected;
+  final int itemCount;
+  final IndexedWidgetBuilder itemBuilder;
+
+  @override
+  State<_FolderTabPager> createState() => _FolderTabPagerState();
+}
+
+class _FolderTabPagerState extends State<_FolderTabPager> {
+  late final _controller = PageController(
+    initialPage: widget.selectedIndex,
+    keepPage: false,
+  );
+
+  @override
+  void didUpdateWidget(covariant _FolderTabPager oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selectedIndex == widget.selectedIndex ||
+        !_controller.hasClients ||
+        _controller.page == widget.selectedIndex) {
+      return;
+    }
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.jumpToPage(widget.selectedIndex);
+      return;
+    }
+    unawaited(_controller.animateToPage(
+      widget.selectedIndex,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    ));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return NotificationListener<ScrollEndNotification>(
+      onNotification: (notification) {
+        if (notification.depth != 0 || notification.metrics is! PageMetrics) {
+          return false;
+        }
+        // Scroll notifications can arrive during layout.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted ||
+              !_controller.hasClients ||
+              _controller.position.isScrollingNotifier.value) {
+            return;
+          }
+          final index = _controller.page?.round();
+          if (index != null && index != widget.selectedIndex) {
+            widget.onSelected(index);
+          }
+        });
+        return false;
+      },
+      child: PageView.builder(
+        controller: _controller,
+        physics: const ClampingScrollPhysics(),
+        itemCount: widget.itemCount,
+        itemBuilder: widget.itemBuilder,
       ),
     );
   }

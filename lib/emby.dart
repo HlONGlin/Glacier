@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,7 +10,9 @@ export 'features/accounts/emby/data/emby_store.dart';
 
 import 'features/accounts/emby/data/emby_account_model.dart';
 import 'features/accounts/emby/data/emby_store.dart';
+import 'core/logging/app_logger.dart';
 import 'emby/native_logic.dart';
+import 'emby/read_scheme.dart';
 import 'ui/kit.dart';
 
 const SystemUiOverlayStyle _kDarkStatusBarStyle = SystemUiOverlayStyle(
@@ -253,6 +256,15 @@ class EmbyItem {
   }
 }
 
+class EmbyDeleteException implements Exception {
+  final int statusCode;
+
+  const EmbyDeleteException(this.statusCode);
+
+  @override
+  String toString() => 'Emby delete request failed: HTTP $statusCode';
+}
+
 class EmbyLoginResult {
   final String accessToken;
   final String userId;
@@ -329,6 +341,7 @@ class EmbyPlaybackInfo {
 class EmbyClient {
   final EmbyAccount account;
   EmbyClient(this.account);
+  Future<bool>? _contentDeletionPermissionFuture;
 
   /// ✅ 轻量缓存：同一个 EmbyClient 实例生命周期内，只校验一次 token。
   ///
@@ -351,8 +364,8 @@ class EmbyClient {
     return '${uri.scheme}://${uri.host}:$port';
   }
 
-  static HttpClient _httpFor(Uri uri) {
-    final key = _httpPoolKey(uri);
+  HttpClient _httpFor(Uri uri) {
+    final key = '${account.id}|${_httpPoolKey(uri)}';
     return _httpPool.putIfAbsent(key, () {
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 10);
@@ -366,7 +379,20 @@ class EmbyClient {
     final u = account.baseUri;
     final port = u.hasPort ? u.port : (u.scheme == 'https' ? 443 : 80);
     final path = u.path.trim().isEmpty ? '/' : u.path.trim();
-    return '${u.scheme}://${u.host}:$port$path|${account.userId}|${account.apiKey}';
+    final tokenDigest = sha256.convert(utf8.encode(account.apiKey)).toString();
+    return '${account.id}|${u.scheme}://${u.host}:$port$path|${account.userId}|$tokenDigest';
+  }
+
+  static void clearAccountCaches(String accountId) {
+    final prefix = '${accountId.trim()}|';
+    _validateOkAt.removeWhere((key, _) => key.startsWith(prefix));
+    _validateInflight.removeWhere((key, _) => key.startsWith(prefix));
+    final clients = _httpPool.keys
+        .where((key) => key.startsWith(prefix))
+        .toList(growable: false);
+    for (final key in clients) {
+      _httpPool.remove(key)?.close(force: true);
+    }
   }
 
   /// Emby 字幕轨道信息（用于外部字幕/SRT 功能）。
@@ -715,10 +741,7 @@ class EmbyClient {
   Future<void> _postPlaybackCheckIn(
       String path, Map<String, dynamic> body) async {
     await validateToken();
-    final uri = _u(path, <String, String>{
-      // ✅ 某些反代/插件会要求 query 携带 api_key；这里同时保留 header + query 的方式。
-      'api_key': account.apiKey,
-    });
+    final uri = _u(path);
 
     final deviceId = await EmbyStore.getOrCreateDeviceId();
     final headers = <String, String>{
@@ -784,36 +807,39 @@ class EmbyClient {
     int redirectCount = 0,
   }) async {
     if (redirectCount > 5) throw Exception('重定向次数过多');
-
-    final client = _httpFor(uri);
-
-    final req = await client.openUrl(method, uri);
-    req.followRedirects = false;
-    req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-    if (bodyBytes != null) {
-      req.headers.set(
-          HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
-      req.headers.contentLength = bodyBytes.length;
-    }
-    headers?.forEach((k, v) => req.headers.set(k, v));
-    if (bodyBytes != null) req.add(bodyBytes);
-
-    final resp = await req.close();
-
-    if (resp.isRedirect) {
-      final location = resp.headers.value(HttpHeaders.locationHeader);
-      if (location != null) {
-        final newUri = uri.resolve(location);
-        return _sendRequest(
-          method,
-          newUri,
-          headers: headers,
-          bodyBytes: bodyBytes,
-          redirectCount: redirectCount + 1,
-        );
+    try {
+      final client = _httpFor(uri);
+      final req = await client.openUrl(method, uri);
+      req.followRedirects = false;
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      if (bodyBytes != null) {
+        req.headers.set(
+            HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+        req.headers.contentLength = bodyBytes.length;
       }
+      headers?.forEach((k, v) => req.headers.set(k, v));
+      if (bodyBytes != null) req.add(bodyBytes);
+
+      final resp = await req.close();
+      if (resp.isRedirect) {
+        final location = resp.headers.value(HttpHeaders.locationHeader);
+        if (location != null) {
+          final newUri = uri.resolve(location);
+          return _sendRequest(
+            method,
+            newUri,
+            headers: headers,
+            bodyBytes: bodyBytes,
+            redirectCount: redirectCount + 1,
+          );
+        }
+      }
+      return resp;
+    } catch (error, stackTrace) {
+      AppLogger.error('Emby HTTP request failed',
+          error: error, stackTrace: stackTrace, tag: 'emby');
+      rethrow;
     }
-    return resp;
   }
 
   Future<Map<String, dynamic>> _getJson(Uri uri) async {
@@ -832,6 +858,42 @@ class EmbyClient {
     if (data is Map<String, dynamic>) return data;
     if (data is Map) return data.cast<String, dynamic>();
     return <String, dynamic>{};
+  }
+
+  Future<bool> canDeleteContent() {
+    return _contentDeletionPermissionFuture ??= () async {
+      try {
+        await validateToken();
+        final user = await _getJson(_u('/Users/${account.userId}'));
+        final policy = user['Policy'];
+        return policy is Map && policy['EnableContentDeletion'] == true;
+      } catch (error, stackTrace) {
+        AppLogger.error(
+          'Unable to read Emby content deletion permission',
+          error: error,
+          stackTrace: stackTrace,
+          tag: 'emby',
+        );
+        return false;
+      }
+    }();
+  }
+
+  Future<void> deleteItem(String itemId) async {
+    await validateToken();
+    final id = itemId.trim();
+    if (id.isEmpty || id.contains('/') || id.contains('\\')) {
+      throw ArgumentError.value(itemId, 'itemId', 'Invalid Emby item ID');
+    }
+    final headers = <String, String>{
+      if (account.apiKey.trim().isNotEmpty) 'X-Emby-Token': account.apiKey,
+    };
+    final response =
+        await _sendRequest('DELETE', _u('/Items/$id'), headers: headers);
+    await utf8.decodeStream(response);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw EmbyDeleteException(response.statusCode);
+    }
   }
 
   Future<EmbyLoginResult> loginByName({
@@ -1685,7 +1747,13 @@ class _EmbyPageState extends State<EmbyPage> {
     }
   }
 
-  Future<void> _save() async => EmbyStore.save(_list);
+  Future<void> _save() async {
+    for (final account in _list) {
+      EmbyClient.clearAccountCaches(account.id);
+      EmbyReadCoordinator.clearAccountCaches(account.id);
+    }
+    await EmbyStore.save(_list);
+  }
 
   Future<void> _addOrEdit({EmbyAccount? existing}) async {
     final isEdit = existing != null;
@@ -1714,6 +1782,25 @@ class _EmbyPageState extends State<EmbyPage> {
       if (url.isEmpty || uname.isEmpty || pw.isEmpty) {
         setState(() => loginErr = 'Server URL / 用户名 / 密码 不能为空');
         return;
+      }
+
+      if (url.toLowerCase().startsWith('http://')) {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('确认明文连接'),
+            content: const Text('HTTP 不会加密账号密码和媒体请求。确认此服务器可信并继续？'),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('取消')),
+              FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('继续')),
+            ],
+          ),
+        );
+        if (confirmed != true) return;
       }
 
       setState(() {
@@ -1949,6 +2036,8 @@ class _EmbyPageState extends State<EmbyPage> {
       ),
     );
     if (ok != true) return;
+    EmbyClient.clearAccountCaches(a.id);
+    EmbyReadCoordinator.clearAccountCaches(a.id);
     setState(() => _list.removeWhere((x) => x.id == a.id));
     await _save();
   }

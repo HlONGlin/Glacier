@@ -8,6 +8,8 @@ class AppSettings extends ChangeNotifier {
 
   static final AppSettings instance = AppSettings._();
 
+  void notifyRestored() => notifyListeners();
+
   SharedPreferences? _prefs;
   bool _initialized = false;
   Future<void>? _initFuture;
@@ -58,8 +60,12 @@ class AppSettings extends ChangeNotifier {
       '${_kPrefix}favorite_per_directory_display_settings_state_v1';
   static const String _kEmbyExclusiveFavoritesUiEnabled =
       '${_kPrefix}emby_exclusive_favorites_ui_enabled';
+  static const String _kEmbyContentDeletionEnabled =
+      '${_kPrefix}emby_content_deletion_enabled';
   static const String _kHistoryEnabled = '${_kPrefix}history_enabled';
   static const String _kTagEnabled = '${_kPrefix}tag_enabled';
+  static const String _kMediaCacheLimitMb = '${_kPrefix}media_cache_limit_mb';
+  static const String _kThemeMode = '${_kPrefix}theme_mode';
   static const String _kFolderSearchScope = '${_kPrefix}folder_search_scope';
   static const String _kFolderSearchSingleCollectionId =
       '${_kPrefix}folder_search_single_collection_id';
@@ -137,6 +143,28 @@ class AppSettings extends ChangeNotifier {
 
   static Future<int> getDoubleTapSeekSeconds() async {
     return instance._read((sp) => sp.getInt(_kDoubleTapSeekSeconds) ?? 10);
+  }
+
+  static Future<String> getThemeMode() async => instance._read((sp) {
+        final value = sp.getString(_kThemeMode);
+        return value == 'dark' ? 'dark' : 'light';
+      });
+
+  static Future<void> setThemeMode(String value) async {
+    final mode = value == 'dark' ? 'dark' : 'light';
+    await _writeAndNotify((sp) => sp.setString(_kThemeMode, mode));
+  }
+
+  static Future<void> resetToDefaults() async {
+    final sp = await _sp();
+    final keys = sp
+        .getKeys()
+        .where((key) => key.startsWith(_kPrefix))
+        .toList(growable: false);
+    for (final key in keys) {
+      await sp.remove(key);
+    }
+    instance.notifyListeners();
   }
 
   static Future<void> setDoubleTapSeekSeconds(int v) async {
@@ -302,6 +330,15 @@ class AppSettings extends ChangeNotifier {
     );
   }
 
+  static Future<bool> getEmbyContentDeletionEnabled() async {
+    return instance
+        ._read((sp) => sp.getBool(_kEmbyContentDeletionEnabled) ?? false);
+  }
+
+  static Future<void> setEmbyContentDeletionEnabled(bool v) async {
+    await _writeAndNotify((sp) => sp.setBool(_kEmbyContentDeletionEnabled, v));
+  }
+
   static Future<String?> getLastFavoriteId() async {
     return instance._read((sp) {
       final v = sp.getString(_kLastFavoriteId);
@@ -376,6 +413,17 @@ class AppSettings extends ChangeNotifier {
 
   static Future<void> setTagEnabled(bool v) async {
     await _writeAndNotify((sp) => sp.setBool(_kTagEnabled, v));
+  }
+
+  static Future<int> getMediaCacheLimitMb() async => instance._read((sp) {
+        final value = sp.getInt(_kMediaCacheLimitMb) ?? 512;
+        return value.clamp(64, 2048).toInt();
+      });
+
+  static Future<void> setMediaCacheLimitMb(int value) async {
+    await _writeAndNotify(
+      (sp) => sp.setInt(_kMediaCacheLimitMb, value.clamp(64, 2048).toInt()),
+    );
   }
 
   static Future<String> getFolderSearchScope() async {

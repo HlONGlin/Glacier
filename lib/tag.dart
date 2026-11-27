@@ -25,6 +25,7 @@ import 'tag/tag_manager_filters.dart';
 import 'tag/tag_models.dart';
 import 'tag/tag_store_algorithms.dart';
 import 'tag/tag_store_persistence.dart';
+import 'core/utils/app_settings.dart';
 import 'package:file_picker/file_picker.dart'; // 用于选择目录/导入文件
 part 'tag/tag_files_tab_view.dart';
 part 'tag/tag_ui_sections.dart';
@@ -79,6 +80,104 @@ class TagThumbCache {
         if (!await dir.exists()) await dir.create(recursive: true);
         return dir;
       })();
+
+  static Future<Map<String, List<Directory>>> _mediaCacheDirectories() async {
+    final support = await getApplicationSupportDirectory();
+    final temporary = await getTemporaryDirectory();
+    return <String, List<Directory>>{
+      'thumbnails': <Directory>[
+        Directory(p.join(support.path, 'thumb_cache')),
+        Directory(p.join(temporary.path, 'thumb_source_cache')),
+      ],
+      'webdav': <Directory>[
+        Directory(p.join(temporary.path, 'webdav_cache')),
+        Directory(p.join(support.path, 'webdav_cover_cache')),
+      ],
+      'networkImages': <Directory>[
+        Directory(p.join(temporary.path, 'libCachedImageData')),
+      ],
+    };
+  }
+
+  static Future<int> cacheBytes() async {
+    var total = 0;
+    for (final directories in (await _mediaCacheDirectories()).values) {
+      for (final directory in directories) {
+        if (!await directory.exists()) continue;
+        await for (final entity
+            in directory.list(recursive: true, followLinks: false)) {
+          if (entity is File) total += await entity.length();
+        }
+      }
+    }
+    return total;
+  }
+
+  static Future<Map<String, int>> cacheBytesByCategory() async {
+    final result = <String, int>{};
+    for (final entry in (await _mediaCacheDirectories()).entries) {
+      var total = 0;
+      for (final directory in entry.value) {
+        if (!await directory.exists()) continue;
+        await for (final entity
+            in directory.list(recursive: true, followLinks: false)) {
+          if (entity is File) total += await entity.length();
+        }
+      }
+      result[entry.key] = total;
+    }
+    return result;
+  }
+
+  static Future<void> clearCacheCategory(String category) async {
+    final directories = (await _mediaCacheDirectories())[category];
+    if (directories == null) return;
+    for (final directory in directories) {
+      if (await directory.exists()) await directory.delete(recursive: true);
+    }
+    if (category == 'thumbnails') {
+      _cacheDirFuture = null;
+      _sourceCacheDirFuture = null;
+      _inflightPreview.clear();
+    }
+  }
+
+  static Future<void> clearCache() async {
+    for (final category in (await _mediaCacheDirectories()).keys) {
+      await clearCacheCategory(category);
+    }
+  }
+
+  static Future<void> enforceCacheLimit() async {
+    final limit = (await AppSettings.getMediaCacheLimitMb()) * 1024 * 1024;
+    final directories = await _mediaCacheDirectories();
+    final files = <File>[];
+    for (final directory in directories.values.expand((value) => value)) {
+      if (!await directory.exists()) continue;
+      await for (final entity
+          in directory.list(recursive: true, followLinks: false)) {
+        if (entity is File) files.add(entity);
+      }
+    }
+    final sizes = <({File file, int size, DateTime modified})>[];
+    var total = 0;
+    for (final file in files) {
+      final stat = await file.stat();
+      total += stat.size;
+      sizes.add((file: file, size: stat.size, modified: stat.modified));
+    }
+    if (total <= limit) return;
+    sizes.sort((a, b) => a.modified.compareTo(b.modified));
+    for (final entry in sizes) {
+      if (total <= limit) break;
+      try {
+        await entry.file.delete();
+        total -= entry.size;
+      } on FileSystemException {
+        if (!await entry.file.exists()) total -= entry.size;
+      }
+    }
+  }
 
   static Future<File> _sourceCacheFile(String stableKey,
       {String ext = ''}) async {
@@ -386,6 +485,7 @@ class TagThumbCache {
         out = await runWithLocal(full.localPath, isPartial: false);
       }
     }
+    if (out != null) await enforceCacheLimit();
     return out;
   }
 
@@ -520,6 +620,7 @@ class TagThumbCache {
         out = await runWithLocal(full.localPath, isPartial: false);
       }
     }
+    if (out != null) await enforceCacheLimit();
     return out;
   }
 
@@ -946,6 +1047,21 @@ class TagStore extends ChangeNotifier {
       payload,
       fileName: _kStoreFileName,
     );
+  }
+
+  Future<void> importPayload(Map<String, dynamic> payload) async {
+    _tagsById.clear();
+    _targetToTagIds.clear();
+    _targetsByKey.clear();
+    TagStorePersistence.hydrateFromPayload(
+      payload,
+      tagsById: _tagsById,
+      targetToTagIds: _targetToTagIds,
+      targetsByKey: _targetsByKey,
+    );
+    _loaded = true;
+    await _persist();
+    notifyListeners();
   }
 
   @visibleForTesting

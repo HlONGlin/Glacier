@@ -15,6 +15,10 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   bool _loading = true;
+  bool _busyDataAction = false;
+  int _mediaCacheLimitMb = 512;
+  int _doubleTapSeekSeconds = 10;
+  String _themeMode = 'light';
 
   double _subtitleFontSize = 22.0;
   double _subtitleBottomOffset = 36.0;
@@ -24,6 +28,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _longPressSpeedEnabled = true;
   double _longPressSpeedMultiplier = 2.0;
   bool _videoMiniProgressWhenHidden = true;
+  bool _videoAutoNextAfterEnd = false;
   bool _videoCatalogEnabled = true;
   bool _videoEpisodeNavButtonsEnabled = true;
   bool _videoLockPauseSeekEnabled = true;
@@ -38,9 +43,18 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _autoEnterLastFavorite = false;
   bool _favoritePerDirectoryDisplaySettingsEnabled = false;
   bool _embyExclusiveFavoritesUiEnabled = false;
+  bool _embyContentDeletionEnabled = false;
 
   bool _historyEnabled = true;
   bool _tagEnabled = true;
+
+  SystemUiOverlayStyle get _statusBarStyle => _themeMode == 'dark'
+      ? const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.light,
+          statusBarBrightness: Brightness.dark,
+        )
+      : _kDarkStatusBarStyle;
 
   void _onAppSettingsChanged() {
     unawaited(_load());
@@ -51,6 +65,12 @@ class _SettingsPageState extends State<SettingsPage> {
     super.initState();
     AppSettings.instance.addListener(_onAppSettingsChanged);
     _load();
+    _loadCacheLimit();
+  }
+
+  Future<void> _loadCacheLimit() async {
+    final limit = await AppSettings.getMediaCacheLimitMb();
+    if (mounted) setState(() => _mediaCacheLimitMb = limit);
   }
 
   Future<void> _load() async {
@@ -76,8 +96,12 @@ class _SettingsPageState extends State<SettingsPage> {
         AppSettings.getAutoEnterLastFavorite(),
         AppSettings.getFavoritePerDirectoryDisplaySettingsEnabled(),
         AppSettings.getEmbyExclusiveFavoritesUiEnabled(),
+        AppSettings.getEmbyContentDeletionEnabled(),
         AppSettings.getHistoryEnabled(),
         AppSettings.getTagEnabled(),
+        AppSettings.getDoubleTapSeekSeconds(),
+        AppSettings.getThemeMode(),
+        AppSettings.getVideoAutoNextAfterEnd(),
       ]);
 
       final font = values[0] as double;
@@ -100,8 +124,12 @@ class _SettingsPageState extends State<SettingsPage> {
       final autoFav = values[17] as bool;
       final perDirDisplay = values[18] as bool;
       final embyExclusiveFavoritesUiEnabled = values[19] as bool;
-      final his = values[20] as bool;
-      final tagEnabled = values[21] as bool;
+      final embyContentDeletionEnabled = values[20] as bool;
+      final his = values[21] as bool;
+      final tagEnabled = values[22] as bool;
+      final seekSeconds = values[23] as int;
+      final themeMode = values[24] as String;
+      final autoNext = values[25] as bool;
 
       if (!mounted) return;
       setState(() {
@@ -125,14 +153,356 @@ class _SettingsPageState extends State<SettingsPage> {
         _autoEnterLastFavorite = autoFav;
         _favoritePerDirectoryDisplaySettingsEnabled = perDirDisplay;
         _embyExclusiveFavoritesUiEnabled = embyExclusiveFavoritesUiEnabled;
+        _embyContentDeletionEnabled = embyContentDeletionEnabled;
         _historyEnabled = his;
         _tagEnabled = tagEnabled;
+        _doubleTapSeekSeconds = seekSeconds;
+        _themeMode = themeMode;
+        _videoAutoNextAfterEnd = autoNext;
         _loading = false;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() => _loading = false);
     }
+  }
+
+  Future<void> _exportLogs() async {
+    try {
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '导出应用日志',
+        fileName: 'glacier.log',
+        bytes: Uint8List.fromList(utf8.encode(await AppLogger.readLogs())),
+      );
+      if (path != null && mounted) showAppToast(context, '日志已导出');
+    } catch (error, stackTrace) {
+      AppLogger.error('log export failed',
+          error: error, stackTrace: stackTrace, tag: 'settings');
+      if (mounted) {
+        showAppToast(context, '日志导出失败：${friendlyErrorMessage(error)}',
+            error: true);
+      }
+    }
+  }
+
+  Future<void> _exportBackup() async {
+    final passwordController = TextEditingController();
+    var includeCredentials = false;
+    final include = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('导出备份'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: includeCredentials,
+                title: const Text('包含账号凭据'),
+                subtitle: const Text('使用口令加密后写入备份'),
+                onChanged: (value) =>
+                    setDialogState(() => includeCredentials = value ?? false),
+              ),
+              if (includeCredentials)
+                TextField(
+                  controller: passwordController,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: '备份口令（至少 8 位）'),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('继续')),
+          ],
+        ),
+      ),
+    );
+    if (include != true) {
+      passwordController.dispose();
+      return;
+    }
+    setState(() => _busyDataAction = true);
+    try {
+      final json = await AppBackup.export(
+        credentialPassword: includeCredentials ? passwordController.text : null,
+      );
+      final saved = await FilePicker.platform.saveFile(
+        dialogTitle: '保存 Glacier 备份',
+        fileName: 'glacier-backup.json',
+        bytes: Uint8List.fromList(utf8.encode(json)),
+      );
+      if (saved != null && mounted) showAppToast(context, '备份已导出');
+    } catch (error, stackTrace) {
+      AppLogger.error('backup export failed',
+          error: error, stackTrace: stackTrace, tag: 'settings');
+      if (mounted) {
+        showAppToast(context, '备份导出失败：${friendlyErrorMessage(error)}',
+            error: true);
+      }
+    } finally {
+      passwordController.dispose();
+      if (mounted) setState(() => _busyDataAction = false);
+    }
+  }
+
+  Future<String?> _askBackupPassword() async {
+    final controller = TextEditingController();
+    final password = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('输入备份口令'),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '备份口令'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, controller.text),
+              child: const Text('解密')),
+        ],
+      ),
+    );
+    controller.dispose();
+    return password;
+  }
+
+  Future<void> _importBackup() async {
+    final picked = await FilePicker.platform.pickFiles(
+      dialogTitle: '选择 Glacier 备份',
+      type: FileType.custom,
+      allowedExtensions: const ['json'],
+      withData: true,
+    );
+    final file = picked?.files.single;
+    if (file?.bytes == null) return;
+    if (!mounted) return;
+    final ok = await _confirm(
+      context,
+      title: '恢复备份',
+      message: '恢复会替换当前账号、收藏、标签和应用设置。建议先导出当前数据。',
+    );
+    if (!ok) return;
+    setState(() => _busyDataAction = true);
+    try {
+      final raw = utf8.decode(file!.bytes!);
+      final envelope = jsonDecode(raw) as Map<String, dynamic>;
+      final data = envelope['data'] as Map<String, dynamic>?;
+      final encrypted = data?.containsKey('credentialBundle') ?? false;
+      final password = encrypted ? await _askBackupPassword() : null;
+      if (encrypted && password == null) return;
+      await AppBackup.restore(raw, credentialPassword: password);
+      await _load();
+      if (mounted) showAppToast(context, '备份已恢复');
+    } catch (error, stackTrace) {
+      AppLogger.error('backup import failed',
+          error: error, stackTrace: stackTrace, tag: 'settings');
+      if (mounted) {
+        showAppToast(context, '备份恢复失败：${friendlyErrorMessage(error)}',
+            error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _busyDataAction = false);
+    }
+  }
+
+  Future<void> _showCacheUsage() async {
+    try {
+      final usage = await TagThumbCache.cacheBytesByCategory();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('媒体缓存'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                  '总占用 ${_formatBytes(usage.values.fold<int>(0, (a, b) => a + b))}，上限 $_mediaCacheLimitMb MB'),
+              _cacheCategoryTile(
+                  dialogContext, 'thumbnails', '缩略图', usage['thumbnails'] ?? 0),
+              _cacheCategoryTile(
+                  dialogContext, 'webdav', 'WebDAV 文件缓存', usage['webdav'] ?? 0),
+              _cacheCategoryTile(dialogContext, 'networkImages', '网络图片缓存',
+                  usage['networkImages'] ?? 0),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('完成'),
+            ),
+            TextButton.icon(
+              onPressed: () async {
+                await TagThumbCache.clearCache();
+                await DefaultCacheManager().emptyCache();
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+                if (mounted) showAppToast(context, '媒体缓存已清理');
+              },
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('全部清理'),
+            ),
+          ],
+        ),
+      );
+    } catch (error, stackTrace) {
+      AppLogger.error('media cache cleanup failed',
+          error: error, stackTrace: stackTrace, tag: 'settings');
+      if (mounted) {
+        showAppToast(context, '缓存清理失败：${friendlyErrorMessage(error)}',
+            error: true);
+      }
+    }
+  }
+
+  Widget _cacheCategoryTile(
+    BuildContext dialogContext,
+    String key,
+    String title,
+    int bytes,
+  ) {
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: Text(title),
+      subtitle: Text(_formatBytes(bytes)),
+      trailing: IconButton(
+        tooltip: '清理$title',
+        icon: const Icon(Icons.delete_outline),
+        onPressed: bytes == 0
+            ? null
+            : () async {
+                await TagThumbCache.clearCacheCategory(key);
+                if (key == 'networkImages') {
+                  await DefaultCacheManager().emptyCache();
+                }
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+                if (mounted) {
+                  showAppToast(context, '$title已清理，请重新打开缓存查看用量');
+                }
+              },
+      ),
+    );
+  }
+
+  Future<void> _showAppInfo() async {
+    final info = await PackageInfo.fromPlatform();
+    if (!mounted) return;
+    showAboutDialog(
+      context: context,
+      applicationName: info.appName,
+      applicationVersion: '${info.version} (${info.buildNumber})',
+      applicationLegalese: 'Glacier',
+    );
+  }
+
+  Future<void> _showOfflineDownloads() async {
+    var downloads = await OfflineDownloadStore.load();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('下载与离线文件'),
+          content: SizedBox(
+            width: 480,
+            child: downloads.isEmpty
+                ? const Text('还没有由应用下载的文件。')
+                : ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 420),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: downloads.length,
+                      itemBuilder: (context, index) {
+                        final item = downloads[index];
+                        final exists = File(item.path).existsSync();
+                        return ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(exists
+                              ? Icons.offline_pin_outlined
+                              : Icons.cloud_off_outlined),
+                          title: Text(item.name,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          subtitle: Text(
+                              exists
+                                  ? '${_formatBytes(item.size)} · ${item.path}'
+                                  : '文件已不存在 · ${item.path}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis),
+                          trailing: PopupMenuButton<String>(
+                            tooltip: '管理下载',
+                            onSelected: (action) async {
+                              if (action == 'delete') {
+                                final confirmed = await _confirm(
+                                  dialogContext,
+                                  title: '删除离线文件',
+                                  message: '将从设备中永久删除“${item.name}”。',
+                                );
+                                if (!confirmed) return;
+                              }
+                              await OfflineDownloadStore.remove(
+                                item.path,
+                                deleteFile: action == 'delete',
+                              );
+                              final refreshed =
+                                  await OfflineDownloadStore.load();
+                              if (dialogContext.mounted) {
+                                setDialogState(() => downloads = refreshed);
+                              }
+                            },
+                            itemBuilder: (context) => [
+                              const PopupMenuItem(
+                                value: 'record',
+                                child: Text('移除记录'),
+                              ),
+                              if (exists)
+                                const PopupMenuItem(
+                                  value: 'delete',
+                                  child: Text('删除本地文件'),
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _resetSettings() async {
+    final confirmed = await _confirm(
+      context,
+      title: '恢复默认设置',
+      message: '仅恢复应用偏好设置，不会删除账号、收藏、历史记录或下载文件。',
+    );
+    if (!confirmed) return;
+    await AppSettings.resetToDefaults();
+    if (mounted) showAppToast(context, '已恢复默认设置');
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
   @override
@@ -144,20 +514,45 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const AnnotatedRegion<SystemUiOverlayStyle>(
-        value: _kDarkStatusBarStyle,
-        child: Scaffold(body: AppLoadingState()),
+      return AnnotatedRegion<SystemUiOverlayStyle>(
+        value: _statusBarStyle,
+        child: const Scaffold(body: AppLoadingState()),
       );
     }
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: _kDarkStatusBarStyle,
+      value: _statusBarStyle,
       child: Scaffold(
         appBar: const GlassAppBar(title: Text('设置')),
         body: AppViewport(
           child: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             children: [
+              const _SettingsSectionTitle('外观与应用'),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('主题模式'),
+                subtitle: const Text('切换浅色或深色界面'),
+                trailing: DropdownButton<String>(
+                  value: _themeMode,
+                  items: const [
+                    DropdownMenuItem(value: 'light', child: Text('浅色')),
+                    DropdownMenuItem(value: 'dark', child: Text('深色')),
+                  ],
+                  onChanged: (value) async {
+                    if (value == null) return;
+                    setState(() => _themeMode = value);
+                    await AppSettings.setThemeMode(value);
+                  },
+                ),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('应用信息'),
+                subtitle: const Text('查看版本号和构建号'),
+                trailing: const Icon(Icons.info_outline),
+                onTap: _showAppInfo,
+              ),
               const _SettingsSectionTitle('字幕'),
               _SettingsSliderTile(
                 title: '字幕大小',
@@ -215,6 +610,20 @@ class _SettingsPageState extends State<SettingsPage> {
                 title: Text('单击唤出控制栏 / 双击播放暂停'),
                 subtitle: Text('移动端采用主流观影播放器交互'),
               ),
+              _SettingsSliderTile(
+                title: '双击快进 / 快退时长',
+                subtitle: '设置播放器左右区域双击跳转的秒数',
+                value: _doubleTapSeekSeconds.toDouble(),
+                min: 5,
+                max: 60,
+                divisions: 11,
+                valueText: '$_doubleTapSeekSeconds 秒',
+                onChanged: (value) async {
+                  final seconds = (value / 5).round() * 5;
+                  setState(() => _doubleTapSeekSeconds = seconds);
+                  await AppSettings.setDoubleTapSeekSeconds(seconds);
+                },
+              ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('长按倍数播放'),
@@ -267,6 +676,15 @@ class _SettingsPageState extends State<SettingsPage> {
                 onChanged: (v) async {
                   setState(() => _videoEpisodeNavButtonsEnabled = v);
                   await AppSettings.setVideoEpisodeNavButtonsEnabled(v);
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('播放结束后自动播放下一集'),
+                value: _videoAutoNextAfterEnd,
+                onChanged: (value) async {
+                  setState(() => _videoAutoNextAfterEnd = value);
+                  await AppSettings.setVideoAutoNextAfterEnd(value);
                 },
               ),
               SwitchListTile(
@@ -372,6 +790,17 @@ class _SettingsPageState extends State<SettingsPage> {
                   await AppSettings.setEmbyExclusiveFavoritesUiEnabled(v);
                 },
               ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('允许删除 Emby 媒体'),
+                subtitle: const Text(
+                    '默认关闭。开启后，仅在当前 Emby 账号有删除权限时显示删除操作，删除会直接作用于服务器。'),
+                value: _embyContentDeletionEnabled,
+                onChanged: (v) async {
+                  setState(() => _embyContentDeletionEnabled = v);
+                  await AppSettings.setEmbyContentDeletionEnabled(v);
+                },
+              ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 enabled: _embyExclusiveFavoritesUiEnabled,
@@ -467,6 +896,92 @@ class _SettingsPageState extends State<SettingsPage> {
                   if (!context.mounted) return;
                   showAppToast(context, '已清空历史记录');
                 },
+              ),
+              const SizedBox(height: 10),
+              const _SettingsSectionTitle('数据与诊断'),
+              ValueListenableBuilder<bool>(
+                valueListenable: SecureStore.fallbackStatus,
+                builder: (context, usingFallback, _) => usingFallback
+                    ? const ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.warning_amber_rounded,
+                            color: Colors.deepOrange),
+                        title: Text('凭据仅保存在内存中'),
+                        subtitle: Text('安全存储不可用，应用重启后账号密码不会保留。'),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('导出账号、收藏与设置'),
+                subtitle: const Text('账号凭据可选择使用口令加密'),
+                trailing: const Icon(Icons.file_upload_outlined),
+                onTap: _busyDataAction ? null : _exportBackup,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('恢复备份'),
+                subtitle: const Text('从 Glacier JSON 备份恢复账号、收藏、标签和设置'),
+                trailing: const Icon(Icons.file_download_outlined),
+                onTap: _busyDataAction ? null : _importBackup,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('查看或导出应用日志'),
+                subtitle: const Text('日志会自动隐藏账号令牌和密码'),
+                trailing: const Icon(Icons.description_outlined),
+                onTap: _exportLogs,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('清除应用日志'),
+                trailing: const Icon(Icons.delete_outline),
+                onTap: () async {
+                  final ok = await _confirm(context,
+                      title: '清除日志', message: '确定删除本地应用日志吗？');
+                  if (!ok) return;
+                  await AppLogger.clearLogs();
+                  if (!context.mounted) return;
+                  showAppToast(context, '日志已清除');
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('媒体缓存'),
+                subtitle: const Text('查看并分类清理缩略图、WebDAV 与网络图片缓存'),
+                trailing: const Icon(Icons.cleaning_services_outlined),
+                onTap: _showCacheUsage,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('下载与离线文件'),
+                subtitle: const Text('查看应用下载的文件，移除记录或删除本地文件'),
+                trailing: const Icon(Icons.folder_open_outlined),
+                onTap: _showOfflineDownloads,
+              ),
+              _SettingsSliderTile(
+                title: '媒体缓存上限',
+                subtitle: '超出上限时自动清理较早使用的缓存文件',
+                value: _mediaCacheLimitMb.toDouble(),
+                min: 64,
+                max: 2048,
+                divisions: 31,
+                valueText: '$_mediaCacheLimitMb MB',
+                onChanged: (value) async {
+                  final limit = (value / 64).round() * 64;
+                  setState(() => _mediaCacheLimitMb = limit);
+                  await AppSettings.setMediaCacheLimitMb(limit);
+                  await TagThumbCache.enforceCacheLimit();
+                },
+              ),
+              const SizedBox(height: 10),
+              const _SettingsSectionTitle('应用设置'),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('恢复默认设置'),
+                subtitle: const Text('保留账号、收藏、历史记录和下载文件'),
+                trailing: const Icon(Icons.settings_backup_restore),
+                onTap: _resetSettings,
               ),
             ],
           ),

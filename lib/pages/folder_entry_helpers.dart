@@ -94,15 +94,6 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
     return '';
   }
 
-  String _folderKeyForEntry(Entry e) {
-    if (!e.isDir) return '';
-    if (!e.isWebDav) return (e.localPath ?? '').trim();
-    var rel = (e.wdRelPath ?? '').trim();
-    if (rel.isNotEmpty && !rel.endsWith('/')) rel = '$rel/';
-    final base = buildWebDavSource(e.wdAccountId ?? '', rel);
-    return base.endsWith('/') ? base : '$base/';
-  }
-
   String _normWebDavDirRel(String rel) {
     var r = rel.trim();
     if (r.startsWith('/')) r = r.substring(1);
@@ -122,43 +113,6 @@ extension _FolderEntryHelperMethods on _FolderDetailPageState {
       return base.endsWith('/') ? base : '$base/';
     }
     return 'local://${(e.localPath ?? '').trim()}';
-  }
-
-  int _estimateLocalMediaCount(String dir) {
-    try {
-      final d = Directory(dir);
-      if (!d.existsSync()) return 0;
-      final ents = d.listSync(followLinks: false);
-      var n = 0;
-      for (final it in ents) {
-        if (it is File) {
-          final name = p.basename(it.path);
-          if (isPageImageName(name) || isPageVideoName(name)) n++;
-        }
-      }
-      return n;
-    } catch (_) {
-      return 0;
-    }
-  }
-
-  void _prefillSkeletonForFolder(Entry folder) {
-    final key = _folderKeyForEntry(folder);
-    var n = 0;
-    if (!folder.isWebDav) {
-      final dir = folder.localPath;
-      if (dir != null) n = _estimateLocalMediaCount(dir);
-    }
-    if (n <= 0) {
-      final cached = _folderMediaCountCache[key];
-      n = cached ?? 24;
-    }
-    n = n.clamp(0, 120);
-    if (n <= 0) return;
-
-    _raw = List.generate(n, (i) => Entry.loading(i));
-    _loading = false;
-    _refreshFolderDetailState();
   }
 
   void _updateFolderCountCacheFromList(NavCtx ctx, List<Entry> list) {

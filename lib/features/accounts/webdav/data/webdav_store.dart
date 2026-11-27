@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../../core/logging/app_logger.dart';
 // Keeps legacy in-memory fields populated while persistence is already secret-safe.
 import 'webdav_account_model.dart';
 import 'webdav_secret_store.dart';
@@ -34,7 +35,10 @@ class WebDavStore {
         }
         return accounts;
       }
-    } catch (_) {}
+    } catch (error, stackTrace) {
+      AppLogger.error('WebDAV account data could not be decoded',
+          error: error, stackTrace: stackTrace, tag: 'accounts');
+    }
     return [];
   }
 

@@ -9,6 +9,7 @@ export 'features/accounts/webdav/data/webdav_account_model.dart';
 export 'features/accounts/webdav/data/webdav_store.dart';
 
 import 'core/network/background_gate.dart';
+import 'core/storage/offline_download_store.dart';
 import 'core/network/http_client_factory.dart';
 import 'core/network/network_runner.dart';
 import 'core/network/request_headers.dart';
@@ -547,6 +548,7 @@ class WebDavClient {
 
         if (await outFile.exists()) await outFile.delete();
         await tmp.rename(outFile.path);
+        await OfflineDownloadStore.record(outFile);
       } finally {
         client.close(force: true);
       }
@@ -2104,7 +2106,7 @@ Future<WebDavAccount?> _editAccountDialog(
                 FilledButton(
                   onPressed: submitting
                       ? null
-                      : () {
+                      : () async {
                           final n = name.text.trim();
                           final b = baseUrl.text.trim();
                           final u = user.text.trim();
@@ -2112,6 +2114,28 @@ Future<WebDavAccount?> _editAccountDialog(
                           if (b.isEmpty) {
                             showAppToast(ctx, 'WebDAV 地址不能为空', error: true);
                             return;
+                          }
+                          if (b.toLowerCase().startsWith('http://')) {
+                            final confirmed = await showDialog<bool>(
+                              context: ctx,
+                              builder: (dialogContext) => AlertDialog(
+                                title: const Text('确认明文连接'),
+                                content: const Text(
+                                    'HTTP 不会加密 WebDAV 用户名和密码。确认此服务器可信并继续？'),
+                                actions: [
+                                  TextButton(
+                                      onPressed: () =>
+                                          Navigator.pop(dialogContext, false),
+                                      child: const Text('取消')),
+                                  FilledButton(
+                                      onPressed: () =>
+                                          Navigator.pop(dialogContext, true),
+                                      child: const Text('继续')),
+                                ],
+                              ),
+                            );
+                            if (!ctx.mounted) return;
+                            if (confirmed != true) return;
                           }
                           setState(() => submitting = true);
                           Navigator.pop(

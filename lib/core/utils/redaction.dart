@@ -7,7 +7,8 @@ String redactSensitiveText(String input) {
   );
 
   s = s.replaceAllMapped(
-    RegExp(r'([?&](?:api_key|apikey|token|access_token|x-emby-token)=)[^&\s]+',
+    RegExp(
+        r'([?&](?:api[_-]?key|apikey|token|access[_-]?token|x-emby-token)=)[^&\s]+',
         caseSensitive: false),
     (m) => '${m.group(1)}***',
   );
@@ -20,6 +21,13 @@ String redactSensitiveText(String input) {
 
   s = s.replaceAllMapped(
     RegExp(r'((?:password|passwd|pwd)\s*[:=]\s*)[^,;\s]+',
+        caseSensitive: false),
+    (m) => '${m.group(1)}***',
+  );
+
+  s = s.replaceAllMapped(
+    RegExp(
+        r'(["\x27]?(?:X-Emby-Token|api[_-]?key|access[_-]?token|password|passwd|pwd|token)["\x27]?\s*[:=]\s*["\x27]?)[^,;\s"\x27}]+',
         caseSensitive: false),
     (m) => '${m.group(1)}***',
   );
