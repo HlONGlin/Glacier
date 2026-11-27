@@ -1,298 +1,104 @@
 # Glacier
 
-Glacier 是一个面向 Android 的媒体浏览与播放应用，统一管理三类来源：
+<p align="center">
+  <img src="assets/icon/icon.png" width="104" alt="Glacier 应用图标" />
+</p>
 
-- 本地目录
-- WebDAV
-- Emby
+<p align="center">
+  <strong>把本地媒体、WebDAV 与 Emby 收进一个轻快的浏览与播放体验。</strong>
+</p>
 
-它覆盖了从收藏、浏览、搜索、筛选，到图片查看、视频播放、历史回看、标签管理的完整流程。
+<p align="center">
+  <a href="https://github.com/HlONGlin/Glacier/releases/tag/v2.03">下载 Android 版 v2.03</a>
+  &nbsp;·&nbsp; Flutter 项目
+</p>
 
-## 项目目标
+Glacier 是一款以 Android 为主要目标平台的媒体浏览与播放应用。你可以整理常用媒体入口，在图片和视频目录中搜索、筛选，并从统一的界面继续浏览或播放。
 
-Glacier 重点解决以下几类使用场景：
+## 下载
 
-- 把分散在本地、WebDAV、Emby 的媒体入口统一收进一个收藏夹体系
-- 在大量图片、视频目录中快速定位内容
-- 用尽量低干扰的方式进行移动端和桌面端播放
-- 为历史、标签、封面、字幕、播放进度提供稳定的日常体验
+| 设备架构 | APK |
+| --- | --- |
+| ARM 64 位 | [下载](https://github.com/HlONGlin/Glacier/releases/download/v2.03/app-arm64-v8a-release.apk) |
+| ARM 32 位 | [下载](https://github.com/HlONGlin/Glacier/releases/download/v2.03/app-armeabi-v7a-release.apk) |
+| x86_64 | [下载](https://github.com/HlONGlin/Glacier/releases/download/v2.03/app-x86_64-release.apk) |
 
-## 核心功能
+查看[完整发布说明](https://github.com/HlONGlin/Glacier/releases/tag/v2.03)。
 
-### 1. 收藏夹控制台
+## 应用截图
 
-统一管理媒体入口，支持快速创建收藏夹、查看来源数量、进入常用资源。
+<p align="center">
+  <img src="assets/feature/01_dashboard.jpg" width="30%" alt="收藏夹首页" />
+  <img src="assets/feature/02_menu.jpg" width="30%" alt="快捷菜单" />
+  <img src="assets/feature/03_browser.jpg" width="30%" alt="媒体目录浏览" />
+</p>
+<p align="center">
+  <img src="assets/feature/04_video_playlist.jpg" width="30%" alt="视频播放目录" />
+  <img src="assets/feature/05_playlist_panel.jpg" width="30%" alt="播放列表面板" />
+  <img src="assets/feature/06_image_viewer.jpg" width="30%" alt="图片查看器" />
+</p>
 
-<img src="assets/feature/01_dashboard.jpg" width="260" alt="收藏夹控制台" />
+## 功能
 
-### 2. 快捷菜单中心
+### 多来源媒体库
 
-在收藏夹页可直接进入历史记录、设置、标签管理、WebDAV、Emby 等关键模块，减少跳转成本。
+- **本地目录**：浏览图片与视频，发现同目录字幕文件。
+- **WebDAV**：访问远程目录及媒体，支持封面与缓存。
+- **Emby**：浏览媒体库、继续播放、同步封面与播放进度，并支持字幕轨道和播放会话。
+- 通过收藏夹集中管理常用目录和媒体入口。
 
-<img src="assets/feature/02_menu.jpg" width="260" alt="收藏夹快捷菜单" />
+### 浏览与播放
 
-### 3. 目录浏览与筛选
+- 列表和图片视图、搜索、标签筛选与排序。
+- 图片沉浸式查看、连续浏览与位置恢复。
+- 视频倍速、字幕、播放历史和进度恢复。
+- 播放时查看目录并快速切换媒体。
+- 移动端方向控制与屏幕方向锁定。
 
-支持列表视图、搜索、标签过滤、名称排序与升降序切换，适合大规模图片/视频目录快速定位。
+### 管理与隐私
 
-<img src="assets/feature/03_browser.jpg" width="260" alt="目录浏览" />
+- 管理标签、历史记录和媒体缓存。
+- 导出日志，备份与恢复账号、收藏及设置。
+- 设置页提供离线文件管理。
+- Emby 专属界面的媒体删除开关默认关闭。开启后仍会受服务器权限控制，执行删除前需要确认。
+- 账号密码等敏感信息通过安全存储保存。
 
-### 4. 视频播放目录浮层
+## 本地运行
 
-播放中可打开目录浮层查看当前播放列表，并快速切换上下条目，提升连续观看体验。
-
-<img src="assets/feature/04_video_playlist.jpg" width="260" alt="视频播放目录浮层" />
-
-### 5. 图片查看器
-
-支持沉浸式浏览与当前位置显示，便于连续查看同目录图片内容。
-
-<img src="assets/feature/06_image_viewer.jpg" width="260" alt="图片查看器" />
-
-## 支持的媒体来源
-
-### 本地目录
-
-- 直接浏览本地文件夹
-- 支持图片和视频识别
-- 支持本地字幕候选自动发现
-
-### WebDAV
-
-- 保存 WebDAV 账号后可直接浏览远程目录
-- 支持远程图片、视频、封面和基础缓存
-- 支持从目录页直接进入播放/查看
-
-### Emby
-
-- 支持 Emby 账号登录与保存
-- 支持读取媒体库、继续播放、封面和播放进度
-- 支持 Emby 字幕轨道、播放会话和专属收藏夹 UI
-
-## 主要页面说明
-
-### 收藏夹页
-
-- 作为应用主入口
-- 展示收藏夹列表和快捷入口
-- 可进入历史记录、设置、标签、账号管理
-
-### 目录页
-
-- 浏览收藏夹下的媒体内容
-- 支持视图模式切换、排序、搜索、标签过滤
-- 支持本地 / WebDAV / Emby 目录统一体验
-
-### 视频播放器
-
-- 移动端和桌面端使用不同交互实现
-- 支持目录切换、倍速、历史进度、字幕、播放会话
-- 支持移动端体感方向切换与方向锁定
-
-### 图片查看器
-
-- 支持沉浸式查看
-- 支持条带模式和定位返回
-- 支持本地 / WebDAV / Emby 图片源
-
-### 标签系统
-
-- 支持给目录、文件、远程条目标记 Tag
-- 支持按标签回看和过滤
-- 支持批量打标
-
-### 历史记录
-
-- 保存播放历史和目录进入历史
-- 支持从历史继续播放
-- 支持清空历史
-
-## 设置项概览
-
-当前设置页已覆盖以下常用项：
-
-### 字幕
-
-- 字幕大小
-- 字幕位置（距底部）
-- 字幕背景透明度
-- 字幕描边开关
-
-### 视频播放
-
-- 长按倍速
-- 长按倍速乘数
-- 隐藏控制栏时显示细进度条
-- 启用播放目录
-- 显示上下集按钮
-- 锁定时允许暂停/拖动
-- 打开目录时定位到当前播放项
-- 自动从上次进度继续播放
-- 显示“继续播放”提示
-
-### 图片
-
-- 音量键翻页
-- 退出图片后定位到最后浏览项
-
-### 收藏夹 / 历史 / 标签
-
-- 启动后自动进入上次收藏夹
-- 按目录独立记忆视图和排序
-- Emby 专用收藏夹 UI
-- 历史记录开关
-- 标签功能开关
-
-## 技术栈
-
-- Flutter
-- `media_kit` / `media_kit_video`
-- `video_player`
-- `shared_preferences`
-- `flutter_secure_storage`
-- `file_picker`
-- `path_provider`
-- `video_thumbnail`
-- `native_device_orientation`
-
-## 运行要求
-
-### 当前主要目标平台
-
-- Android
-
-### Flutter / Dart
-
-- Flutter SDK 对应 `pubspec.yaml`
-- Dart SDK: `>=3.3.0 <4.0.0`
-
-## 快速开始
-
-### 1. 安装依赖
+需要安装 Flutter SDK。Dart SDK 版本范围为 `>=3.3.0 <4.0.0`。
 
 ```bash
 flutter pub get
-```
-
-### 2. 运行（Android）
-
-```bash
 flutter run -d android
 ```
 
-### 3. 代码检查
+检查代码并构建 Android APK：
 
 ```bash
 flutter analyze lib
-```
-
-### 4. 打包发布
-
-```bash
 flutter build apk --release
 ```
 
-APK 输出路径：
+通用 APK 输出位置为 `build/app/outputs/flutter-apk/app-release.apk`。
 
-`build/app/outputs/flutter-apk/app-release.apk`
+## 技术栈
 
-## 常用开发说明
-
-### Emby / WebDAV 账号保存
-
-- 账号主体信息保存在 `shared_preferences`
-- 密钥、密码等敏感字段通过 `flutter_secure_storage` 存储
-
-### 播放器方向逻辑
-
-- 移动端优先使用原生方向控制
-- Flutter 侧保留传感器兜底逻辑
-- 可通过播放器内方向锁定防止误旋转
-
-### 字幕显示
-
-- 本地字幕与 Emby 字幕轨道都已支持
-- 字幕大小、底部偏移、背景透明度、描边可在设置中调整
+- Flutter 与 Dart
+- `media_kit`、`media_kit_video`、`video_player`
+- `shared_preferences`、`flutter_secure_storage`
+- `file_picker`、`path_provider`、`video_thumbnail`
 
 ## 项目结构
 
-### 顶层入口
+| 目录 | 用途 |
+| --- | --- |
+| `lib/core/` | 设置、缓存、网络和安全存储等基础能力 |
+| `lib/pages/` | 页面与媒体目录交互 |
+| `lib/player/` | 播放器及其状态、字幕和控制逻辑 |
+| `lib/image/` | 图片查看器 |
+| `lib/emby/` | Emby 专属界面与辅助逻辑 |
+| `lib/tag/` | 标签功能 |
+| `lib/sources/` | 媒体来源与账号工具 |
+| `assets/feature/` | README 功能截图 |
 
-- `lib/main.dart`：应用入口
-- `lib/pages.dart`：收藏夹与目录主入口
-- `lib/video.dart`：视频播放器主入口
-- `lib/image.dart`：图片查看器主入口
-- `lib/webdav.dart`：WebDAV 主入口
-- `lib/emby.dart`：Emby 主入口
-- `lib/tag.dart`：标签模块主入口
-
-### 主要子目录
-
-- `lib/app/`：应用级配置
-- `lib/core/`：基础能力、设置、缓存、安全存储
-- `lib/pages/`：目录页相关实现
-- `lib/player/`：视频播放器拆分实现
-- `lib/image/`：图片查看器拆分实现
-- `lib/tag/`：标签模块拆分实现
-- `lib/emby/`：Emby 扩展 UI 与辅助实现
-- `lib/sources/`：来源引用与账号工具
-- `lib/ui/`：通用 UI 工具
-- `lib/debug/`：调试工具页
-
-更细的代码分层说明见：
-
-- `lib/README.md`
-
-## 当前代码组织说明
-
-项目已经从早期“根目录大量平铺文件”整理为“入口文件 + 领域子目录”的结构。
-
-例如：
-
-- `video.dart` 现在作为播放器聚合入口
-- `player/` 目录中继续拆分为：
-  - 宿主
-  - 状态类
-  - 播放源解析
-  - 字幕
-  - 设置同步
-  - 历史同步
-  - 目录弹层
-  - 移动端控制动作
-
-这样更利于后续继续维护和重构。
-
-## 资源目录
-
-- `assets/icon/`：应用图标资源
-- `assets/feature/`：README 功能截图资源
-
-## 已知说明
-
-- 当前 README 以 Android 使用与开发为主
-- 若你继续扩展 iOS / 桌面能力，建议同步补平台差异说明
-- 如果继续做大规模重构，建议保持 `flutter analyze lib` 持续全绿
-
-## 建议的提交前检查
-
-```bash
-flutter analyze lib
-```
-
-如果涉及 Android 原生方向、存储或播放器行为，建议额外手测：
-
-- 视频播放进入/退出
-- 自动横竖屏与方向锁定
-- Emby 配置重启后恢复
-- 字幕设置即时生效
-
-## 说明
-
-这个 README 主要面向项目使用和开发入门。
-
-如果你想继续完善文档，后续最适合增加的内容是：
-
-- 使用演示 GIF / 视频
-- Emby / WebDAV 配置流程图
-- 常见问题 FAQ
-- 开发贡献规范
+更多代码结构说明见 [`lib/README.md`](lib/README.md)。
