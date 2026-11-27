@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:glacier/source_refs.dart';
+import 'package:glacier/sources/refs.dart';
 
 void main() {
   group('source refs', () {

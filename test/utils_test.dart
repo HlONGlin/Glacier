@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:glacier/utils.dart';
+import 'package:glacier/core/utils/app_shared.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

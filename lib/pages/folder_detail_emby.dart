@@ -240,6 +240,31 @@ extension _FolderDetailEmby on _FolderDetailPageState {
       return client.bestCoverUrl(it, maxWidth: 720, quality: 90).trim();
     }
 
+    Entry entryFor(EmbyItem it) {
+      final isDir = _embyTypeIsDir(it.type);
+      final isImg = _embyTypeIsImage(it.type);
+      final cover = isDir
+          ? folderCoverFor(it)
+          : client.bestCoverUrl(
+              it,
+              maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
+            );
+      return Entry(
+        isDir: isDir,
+        name: it.name.isEmpty ? '未命名' : it.name,
+        size: isDir ? 0 : it.size,
+        modified: it.dateCreated ??
+            it.dateModified ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+        typeKey: isDir ? 'emby_folder' : (isImg ? 'emby_image' : 'emby_video'),
+        origin: null,
+        embyAccountId: a.id,
+        embyItemId: it.id,
+        embyCoverUrl: cover,
+        embyAspectRatio: it.primaryImageAspectRatio,
+      );
+    }
+
     try {
       if (path == 'favorites') {
         final views = await client.listViews();
@@ -279,35 +304,7 @@ extension _FolderDetailEmby on _FolderDetailPageState {
           return out;
         }
 
-        final entries = items
-            .map((it) {
-              final isDir = _embyTypeIsDir(it.type);
-              final isImg = _embyTypeIsImage(it.type);
-              final cover = isDir
-                  ? folderCoverFor(it)
-                  : client.bestCoverUrl(
-                      it,
-                      maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-                    );
-
-              return Entry(
-                isDir: isDir,
-                name: it.name.isEmpty ? '未命名' : it.name,
-                size: isDir ? 0 : it.size,
-                modified: it.dateCreated ??
-                    it.dateModified ??
-                    DateTime.fromMillisecondsSinceEpoch(0),
-                typeKey: isDir
-                    ? 'emby_folder'
-                    : (isImg ? 'emby_image' : 'emby_video'),
-                origin: null,
-                embyAccountId: accountId,
-                embyItemId: it.id,
-                embyCoverUrl: cover,
-                embyAspectRatio: it.primaryImageAspectRatio,
-              );
-            })
-            .toList(growable: false);
+        final entries = items.map(entryFor).toList(growable: false);
         out.addAll(entries);
         sortEmbyOut();
         _putCachedEmbyList(accountId, path, out);
@@ -319,35 +316,7 @@ extension _FolderDetailEmby on _FolderDetailPageState {
         if (parentId.isEmpty) return out;
 
         final children = await client.listChildren(parentId: parentId);
-        final entries = children
-            .map((it) {
-              final isDir = _embyTypeIsDir(it.type);
-              final isImg = _embyTypeIsImage(it.type);
-              final cover = isDir
-                  ? folderCoverFor(it)
-                  : client.bestCoverUrl(
-                      it,
-                      maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-                    );
-
-              return Entry(
-                isDir: isDir,
-                name: it.name.isEmpty ? '未命名' : it.name,
-                size: isDir ? 0 : it.size,
-                modified: it.dateCreated ??
-                    it.dateModified ??
-                    DateTime.fromMillisecondsSinceEpoch(0),
-                typeKey: isDir
-                    ? 'emby_folder'
-                    : (isImg ? 'emby_image' : 'emby_video'),
-                origin: null,
-                embyAccountId: a.id,
-                embyItemId: it.id,
-                embyCoverUrl: cover,
-                embyAspectRatio: it.primaryImageAspectRatio,
-              );
-            })
-            .toList(growable: false);
+        final entries = children.map(entryFor).toList(growable: false);
         out.addAll(entries);
         sortEmbyOut();
         _putCachedEmbyList(accountId, path, out);
@@ -355,35 +324,7 @@ extension _FolderDetailEmby on _FolderDetailPageState {
       }
 
       final items = await client.listFavorites();
-      final entries = items
-          .map((it) {
-            final isDir = _embyTypeIsDir(it.type);
-            final isImg = _embyTypeIsImage(it.type);
-            final cover = isDir
-                ? folderCoverFor(it)
-                : client.bestCoverUrl(
-                    it,
-                    maxWidth: _active.viewMode == ViewMode.grid ? 420 : 220,
-                  );
-
-            return Entry(
-              isDir: isDir,
-              name: it.name.isEmpty ? '未命名' : it.name,
-              size: isDir ? 0 : it.size,
-              modified: it.dateCreated ??
-                  it.dateModified ??
-                  DateTime.fromMillisecondsSinceEpoch(0),
-              typeKey: isDir
-                  ? 'emby_folder'
-                  : (isImg ? 'emby_image' : 'emby_video'),
-              origin: null,
-              embyAccountId: accountId,
-              embyItemId: it.id,
-              embyCoverUrl: cover,
-              embyAspectRatio: it.primaryImageAspectRatio,
-            );
-          })
-          .toList(growable: false);
+      final entries = items.map(entryFor).toList(growable: false);
       out.addAll(entries);
       sortEmbyOut();
       _putCachedEmbyList(accountId, path, out);

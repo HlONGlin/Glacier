@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:glacier/emby.dart';
-import 'package:glacier/secure_store.dart';
+import 'package:glacier/core/storage/secure_store.dart';
 import 'package:glacier/webdav.dart';
 
 void main() {
